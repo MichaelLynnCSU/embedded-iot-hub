@@ -1,0 +1,22 @@
+# ESP-IDF
+build/
+.cache/
+sdkconfig.old
+
+# STM32
+Debug/
+Release/
+*.elf
+*.bin
+*.hex
+*.map
+
+# Zephyr
+build/
+
+# BeagleBone binaries
+beaglebone/controller/data_controller
+beaglebone/server/sensor_server
+
+# Logs
+*.log
