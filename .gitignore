@@ -20,3 +20,9 @@ beaglebone/server/sensor_server
 
 # Logs
 *.log
+
+# Documentation and Tags
+html/
+latex/
+tags
+beaglebone/wifi/wifi_secrets.py

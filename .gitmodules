@@ -1,0 +1,3 @@
+[submodule "stm32-blackpill/Middlewares/lvgl"]
+	path = stm32-blackpill/Middlewares/lvgl
+	url = https://github.com/lvgl/lvgl.git
