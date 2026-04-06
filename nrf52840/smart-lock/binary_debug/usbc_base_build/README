@@ -1,0 +1,3 @@
+rm -rf build
+west build -b promicro_nrf52840 . -- -DDTC_OVERLAY_FILE="app.overlay"
+

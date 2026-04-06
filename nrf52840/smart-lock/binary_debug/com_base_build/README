@@ -1,0 +1,10 @@
+west build -b promicro_nrf52840 . \
+  -- -DEXTRA_CONF_FILE="rtt.conf" -DDTC_OVERLAY_FILE="rtt.overlay"
+
+west build -b promicro_nrf52840 . \
+  -- -DEXTRA_CONF_FILE="uart.conf" -DDTC_OVERLAY_FILE="uart.overlay"
+
+west build -b promicro_nrf52840 . \
+  -- -DEXTRA_CONF_FILE="usbc.conf" -DDTC_OVERLAY_FILE="usbc.overlay"
+
+

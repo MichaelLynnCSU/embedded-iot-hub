@@ -1,0 +1,417 @@
+#include <zephyr/bluetooth/gap.h>
+#include <zephyr/bluetooth/gatt.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/pwm.h>
+#include <zephyr/settings/settings.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <nrf.h>
+#include <stdio.h>
+#include "trinity_log.h"
+#include "battery.h"
+#include <zephyr/drivers/watchdog.h>
+
+LOG_MODULE_REGISTER(smartlock, LOG_LEVEL_DBG);
+
+/*
+ * \note WDT main-loop fix (2026-03-23):
+ *       WDT kicked unconditionally every 2s in main loop.
+ *
+ * \note WDT boot fix (2026-03-23):
+ *       trinity_wdt_init() + kick moved to immediately after
+ *       trinity_log_init(). Removed pointless k_sleep after dump.
+ *
+ * \note Pre-init canary (2026-03-23):
+ *       .noinit canary written at PRE_KERNEL_1. PRE_INIT_CRASH reported
+ *       if board died before trinity_log_init().
+ *
+ * \note Init stage cookie (2026-03-24):
+ *       g_init_stage breadcrumbs written before each risky init call.
+ *       Printed alongside PRE_INIT_CRASH to narrow crash to one call.
+ *
+ * \note Flash concurrency fix (2026-03-24):
+ *       save_lock_state() now wraps settings_save_one() with
+ *       trinity_flash_lock/unlock() to prevent concurrent NVMC access
+ *       with trinity_log_event() running on sysworkq.
+ *       Root cause confirmed: PC=nrf_nvmc_ready_check, LR=restore_pofwarn,
+ *       called from trinity_thread_cb -> write_entry racing with
+ *       lock_write -> settings_save_one on BT RX WQ.
+ *
+ * \note BT RX WQ stack fix (2026-03-24):
+ *       k_sleep(K_MSEC(500)) removed from lock_write() (BT RX WQ context).
+ *       Motor drive moved to motor_work on sysworkq. BT RX WQ stack was
+ *       driven to 768/1216 by the sleep; now returns to baseline ~500/1216.
+ *       sysworkq stack spike after disconnect (600/1024) also eliminated.
+ *
+ * \note RESETREAS clear fix (2026-03-27):
+ *       NRF_POWER->RESETREAS is a latched OR-history register -- it is NOT
+ *       cleared automatically on reset. Read at the very top of main(),
+ *       then immediately write 0xFFFFFFFF to clear all latched bits before
+ *       any other code reads the register. Passed to trinity_log_boot_reason()
+ *       after trinity_log_init() -- Trinity handles decode and logging.
+ *
+ * \note RESETREAS raw hex logging (2026-03-27):
+ *       trinity_log_boot_reason() logs both decoded label and raw hex.
+ *       decode_reset_reason() and NRF_RESET_* defines removed from main.c
+ *       and centralised in trinity_log.c -- all nRF52840 boards share one
+ *       implementation with identical output format.
+ */
+
+#define STATS_INTERVAL_SEC  60
+
+static uint8_t lock_state = 0;
+#define LOCK_SETTINGS_KEY "lock/state"
+
+static uint8_t heartbeat_val = 1;
+static uint64_t last_lock_activity = 0;
+#define IDLE_HEARTBEAT_SEC 120
+
+static uint8_t lock_batt_soc = 0;
+#define BATT_UPDATE_SEC  300
+
+static uint8_t mv_to_soc(int mv)
+{
+    if (mv >= 6000) return 100;
+    if (mv <= 4000) return 0;
+    return (uint8_t)((mv - 4000) * 100 / 2000);
+}
+
+#define LIGHT_NODE DT_ALIAS(led0)
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LIGHT_NODE, gpios);
+
+static const struct gpio_dt_spec ain1 = {
+    .port = DEVICE_DT_GET(DT_NODELABEL(gpio1)), .pin = 11, .dt_flags = GPIO_ACTIVE_HIGH
+};
+static const struct gpio_dt_spec ain2 = {
+    .port = DEVICE_DT_GET(DT_NODELABEL(gpio1)), .pin = 15, .dt_flags = GPIO_ACTIVE_HIGH
+};
+static const struct gpio_dt_spec stby = {
+    .port = DEVICE_DT_GET(DT_NODELABEL(gpio1)), .pin = 13, .dt_flags = GPIO_ACTIVE_HIGH
+};
+
+static struct pwm_dt_spec motor_pwm = {
+    .dev = DEVICE_DT_GET(DT_NODELABEL(pwm0)),
+    .channel = 0, .period = PWM_MSEC(20), .flags = PWM_POLARITY_NORMAL
+};
+
+static bool nvs_available = false;
+
+static struct k_work motor_work;
+static uint8_t       motor_cmd;
+
+static void motor_off_handler(struct k_timer *timer)
+{
+    gpio_pin_set_dt(&stby, 0);
+}
+
+K_TIMER_DEFINE(motor_off_timer, motor_off_handler, NULL);
+
+static void motor_work_handler(struct k_work *work)
+{
+    gpio_pin_set_dt(&stby, 1);
+    gpio_pin_set_dt(&ain1, motor_cmd ? 1 : 0);
+    gpio_pin_set_dt(&ain2, motor_cmd ? 0 : 1);
+    pwm_set_dt(&motor_pwm, PWM_MSEC(20), PWM_MSEC(10));
+    k_timer_start(&motor_off_timer, K_MSEC(500), K_NO_WAIT);
+}
+
+static void save_lock_state(void)
+{
+    trinity_flash_lock();
+    settings_save_one(LOCK_SETTINGS_KEY, &lock_state, sizeof(lock_state));
+    trinity_flash_unlock();
+    printk("Lock state saved: %d\n", lock_state);
+}
+
+static int lock_state_set(const char *key, size_t len,
+                          settings_read_cb read_cb, void *cb_arg)
+{
+    if (len != sizeof(lock_state)) return -EINVAL;
+    read_cb(cb_arg, &lock_state, sizeof(lock_state));
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(lock, "lock", NULL, lock_state_set, NULL, NULL);
+
+static void load_lock_state(void)
+{
+    settings_load();
+    printk("Lock state loaded: %d\n", lock_state);
+}
+
+static uint8_t lock_mfg_data[3] = {0xAC, 0x00, 0x00};
+
+static struct bt_data adv_data[] = {
+    BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+    BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+    BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x34, 0x12),
+    BT_DATA(BT_DATA_MANUFACTURER_DATA, lock_mfg_data, sizeof(lock_mfg_data)),
+};
+
+static void update_adv_data(void)
+{
+    lock_mfg_data[1] = lock_state;
+    lock_mfg_data[2] = lock_batt_soc;
+    bt_le_adv_update_data(adv_data, ARRAY_SIZE(adv_data), NULL, 0);
+}
+
+static ssize_t lock_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                         void *buf, uint16_t len, uint16_t offset);
+static ssize_t lock_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                          const void *buf, uint16_t len, uint16_t offset, uint8_t flags);
+static ssize_t lock_hb_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                             void *buf, uint16_t len, uint16_t offset);
+static ssize_t batt_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                         void *buf, uint16_t len, uint16_t offset);
+
+static void hb_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+    printk("[HB] CCC changed: %d\n", value);
+}
+
+BT_GATT_SERVICE_DEFINE(smartlock_svc,
+    BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_16(0x1234)),
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_16(0x1235),
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE |
+        BT_GATT_CHRC_WRITE_WITHOUT_RESP | BT_GATT_CHRC_NOTIFY,
+        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+        lock_read, lock_write, NULL),
+    BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_16(0x1236),
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+        BT_GATT_PERM_READ,
+        lock_hb_read, NULL, &heartbeat_val),
+    BT_GATT_CCC(hb_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_16(0x2A19),
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+        BT_GATT_PERM_READ,
+        batt_read, NULL, &lock_batt_soc),
+    BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+);
+
+static ssize_t lock_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                         void *buf, uint16_t len, uint16_t offset)
+{
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &lock_state, sizeof(lock_state));
+}
+
+static ssize_t lock_hb_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                             void *buf, uint16_t len, uint16_t offset)
+{
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &heartbeat_val, sizeof(heartbeat_val));
+}
+
+static ssize_t batt_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                         void *buf, uint16_t len, uint16_t offset)
+{
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &lock_batt_soc, sizeof(lock_batt_soc));
+}
+
+static ssize_t lock_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                          const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
+{
+    if (len != 1) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+
+    uint8_t val = ((uint8_t *)buf)[0];
+    lock_state         = val;
+    last_lock_activity = k_uptime_get();
+
+    save_lock_state();
+    update_adv_data();
+    bt_gatt_notify(NULL, &smartlock_svc.attrs[2], &lock_state, sizeof(lock_state));
+    gpio_pin_set_dt(&led, val ? 1 : 0);
+    printk("Lock command: %d\n", val);
+    trinity_log_event(val ? "EVENT: LOCK\n" : "EVENT: UNLOCK\n");
+
+    motor_cmd = val;
+    k_work_submit(&motor_work);
+
+    return len;
+}
+
+static struct k_work adv_restart_work;
+
+static void adv_restart_handler(struct k_work *work)
+{
+    int err = bt_le_adv_start(&(const struct bt_le_adv_param){
+        .id = BT_ID_DEFAULT, .options = BT_LE_ADV_OPT_CONN,
+        .interval_min = BT_GAP_ADV_SLOW_INT_MIN,
+        .interval_max = BT_GAP_ADV_SLOW_INT_MAX,
+    }, adv_data, ARRAY_SIZE(adv_data), NULL, 0);
+    if (err) printk("[BLE] Adv restart failed: %d\n", err);
+    else     printk("[BLE] Advertising restarted\n");
+}
+
+static void on_connected(struct bt_conn *conn, uint8_t err)
+{
+    if (err) { printk("[BLE] Connect failed: %d\n", err); return; }
+    printk("[BLE] Connected\n");
+}
+
+static void on_disconnected(struct bt_conn *conn, uint8_t reason)
+{
+    printk("[BLE] Disconnected (reason %d)\n", reason);
+    k_work_submit(&adv_restart_work);
+}
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+    .connected    = on_connected,
+    .disconnected = on_disconnected,
+};
+
+static struct k_work hb_work;
+static struct k_work batt_work;
+static struct k_work stats_work;
+
+static void hb_work_handler(struct k_work *work)
+{
+    uint64_t now = k_uptime_get();
+    if ((now - last_lock_activity) > (IDLE_HEARTBEAT_SEC * 1000ULL)) {
+        int err = bt_gatt_notify(NULL, &smartlock_svc.attrs[5],
+                                 &heartbeat_val, sizeof(heartbeat_val));
+        if (err && err != -ENOTCONN) printk("[HB] Notify failed: %d\n", err);
+        else                         printk("[HB] Sent\n");
+        update_adv_data();
+    }
+}
+
+static void batt_work_handler(struct k_work *work)
+{
+    int mv = battery_read_mv();
+    if (mv < 0) { printk("[BATT] Read failed\n"); return; }
+    lock_batt_soc = mv_to_soc(mv);
+    bt_gatt_notify(NULL, &smartlock_svc.attrs[8], &lock_batt_soc, sizeof(lock_batt_soc));
+    update_adv_data();
+    printk("[BATT] %d%% (%d mV)\n", lock_batt_soc, mv);
+}
+
+static void stats_work_handler(struct k_work *work)
+{
+    trinity_wdt_kick();
+    trinity_log_heap_stats();
+    trinity_log_task_stats();
+}
+
+static void idle_hb_handler(struct k_timer *timer)     { k_work_submit(&hb_work);    }
+static void batt_update_handler(struct k_timer *timer) { k_work_submit(&batt_work);  }
+static void stats_timer_handler(struct k_timer *timer) { k_work_submit(&stats_work); }
+
+K_TIMER_DEFINE(idle_hb_timer, idle_hb_handler,     NULL);
+K_TIMER_DEFINE(batt_timer,    batt_update_handler,  NULL);
+K_TIMER_DEFINE(stats_timer,   stats_timer_handler,  NULL);
+
+int main(void)
+{
+    /* Feed bootloader WDT channel 0 immediately -- bootloader arms it with
+     * a short timeout and field boot is long enough to trigger it before
+     * trinity_wdt_init() runs. */
+    const struct device *wdt = DEVICE_DT_GET(DT_NODELABEL(wdt0));
+    if (device_is_ready(wdt)) {
+        wdt_feed(wdt, 0);
+    }
+
+   /* Read and immediately clear RESETREAS -- this register is a latched
+     * OR-history and is NOT auto-cleared on reset. Captured here before
+     * anything else can corrupt it; passed to trinity_log_boot_reason()
+     * after trinity_log_init() -- Trinity handles decode and logging. */
+    uint32_t reset_reason = NRF_POWER->RESETREAS;
+    NRF_POWER->RESETREAS  = 0xFFFFFFFF;
+
+    printk("=== SmartLock Boot ===\n");
+    trinity_log_dump_previous();
+
+    g_init_stage = TRINITY_STAGE_GPIO;
+
+    if (!device_is_ready(ain1.port) || !device_is_ready(ain2.port) ||
+        !device_is_ready(stby.port)) { LOG_ERR("GPIO not ready"); return 0; }
+    gpio_pin_configure_dt(&ain1, GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure_dt(&ain2, GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure_dt(&stby, GPIO_OUTPUT_INACTIVE);
+
+    if (!device_is_ready(motor_pwm.dev)) { LOG_ERR("PWM not ready"); return 0; }
+    if (!device_is_ready(led.port))      { LOG_ERR("LED not ready"); return 0; }
+    gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+
+    g_init_stage = TRINITY_STAGE_BATTERY;
+
+    int ret2 = battery_init();
+    printk("battery_init ret=%d\n", ret2);
+    if (ret2 == 0) {
+        int mv = battery_read_mv();
+        if (mv > 0) {
+            lock_batt_soc = mv_to_soc(mv);
+            printk("[BATT] Initial: %d%% (%d mV)\n", lock_batt_soc, mv);
+        }
+    }
+
+    g_init_stage = TRINITY_STAGE_NVS_INIT;
+
+    if (settings_subsys_init() == 0) {
+        nvs_available = true;
+
+        g_init_stage = TRINITY_STAGE_NVS_LOAD;
+
+        load_lock_state();
+        printk("NVS ready, lock_state=%d\n", lock_state);
+    } else {
+        LOG_WRN("NVS init failed");
+    }
+
+    gpio_pin_set_dt(&led, lock_state ? 1 : 0);
+
+    g_init_stage = TRINITY_STAGE_LOG_INIT;
+
+    if (trinity_log_init() == 0) {
+        /* Trinity decodes, logs, and the raw hex -- no per-board snprintf needed */
+        trinity_log_boot_reason(reset_reason);
+        battery_print_status();
+    }
+
+    g_init_stage = TRINITY_STAGE_WDT_INIT;
+
+    trinity_wdt_init();
+    trinity_wdt_kick();
+
+    g_init_stage = TRINITY_STAGE_BT_ENABLE;
+
+    if (bt_enable(NULL) != 0) { LOG_ERR("BLE init failed"); return 0; }
+    trinity_wdt_kick();
+    LOG_INF("BLE enabled");
+    trinity_log_event("EVENT: BLE_READY\n");
+
+    g_init_stage = TRINITY_STAGE_BT_ADV;
+
+    static const struct bt_le_adv_param slow_adv_param = {
+        .id = BT_ID_DEFAULT, .options = BT_LE_ADV_OPT_CONN,
+        .interval_min = BT_GAP_ADV_SLOW_INT_MIN,
+        .interval_max = BT_GAP_ADV_SLOW_INT_MAX,
+    };
+
+    if (bt_le_adv_start(&slow_adv_param, adv_data, ARRAY_SIZE(adv_data), NULL, 0) != 0) {
+        LOG_ERR("BLE advertising failed"); return 0;
+    }
+    trinity_log_event("EVENT: BLE_ADV_START\n");
+    update_adv_data();
+
+    k_work_init(&motor_work,       motor_work_handler);
+    k_work_init(&hb_work,          hb_work_handler);
+    k_work_init(&batt_work,        batt_work_handler);
+    k_work_init(&adv_restart_work, adv_restart_handler);
+    k_work_init(&stats_work,       stats_work_handler);
+
+    last_lock_activity = k_uptime_get();
+    k_timer_start(&idle_hb_timer, K_SECONDS(IDLE_HEARTBEAT_SEC), K_SECONDS(IDLE_HEARTBEAT_SEC));
+    k_timer_start(&batt_timer,    K_SECONDS(BATT_UPDATE_SEC),    K_SECONDS(BATT_UPDATE_SEC));
+    k_timer_start(&stats_timer,   K_SECONDS(STATS_INTERVAL_SEC), K_SECONDS(STATS_INTERVAL_SEC));
+
+    g_init_stage = TRINITY_STAGE_MAIN_LOOP;
+
+    while (1) {
+        trinity_wdt_kick();
+        k_sleep(K_MSEC(2000));
+    }
+
+    return 0;
+}

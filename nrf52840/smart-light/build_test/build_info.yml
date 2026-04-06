@@ -1,0 +1,58 @@
+cmake:
+  application:
+    configuration-dir: '/home/hailviral-server/embedded-iot-hub/nrf52840/smart-light/tests/unit'
+    source-dir: '/home/hailviral-server/embedded-iot-hub/nrf52840/smart-light/tests/unit'
+  board:
+    name: 'native_sim'
+    path:
+     - '/home/hailviral-server/zephyrproject/zephyr/boards/native/native_sim'
+    qualifiers: 'native'
+    revision: ''
+  devicetree:
+    bindings-dirs:
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/bindings'
+    files:
+     - '/home/hailviral-server/zephyrproject/zephyr/boards/native/native_sim/native_sim.dts'
+    include-dirs:
+     - '/home/hailviral-server/zephyrproject/modules/hal/ambiq/dts'
+     - '/home/hailviral-server/zephyrproject/modules/hal/atmel/include'
+     - '/home/hailviral-server/zephyrproject/modules/hal/bouffalolab/include'
+     - '/home/hailviral-server/zephyrproject/modules/hal/bouffalolab/include/zephyr'
+     - '/home/hailviral-server/zephyrproject/modules/hal/gigadevice/include'
+     - '/home/hailviral-server/zephyrproject/modules/hal/microchip/include'
+     - '/home/hailviral-server/zephyrproject/modules/hal/microchip/dts'
+     - '/home/hailviral-server/zephyrproject/modules/hal/nuvoton/dts'
+     - '/home/hailviral-server/zephyrproject/modules/hal/nxp/dts'
+     - '/home/hailviral-server/zephyrproject/modules/hal/stm32/dts'
+     - '/home/hailviral-server/zephyrproject/modules/hal/ti/dts'
+     - '/home/hailviral-server/zephyrproject/zephyr/include'
+     - '/home/hailviral-server/zephyrproject/zephyr/include/zephyr'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/common'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/vendor'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/rx'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/x86'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/xtensa'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/sparc'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/riscv'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/posix'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/arm64'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/arm'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts/arc'
+     - '/home/hailviral-server/zephyrproject/zephyr/dts'
+  kconfig:
+    files:
+     - '/home/hailviral-server/zephyrproject/zephyr/boards/native/native_sim/native_sim_defconfig'
+     - '/home/hailviral-server/embedded-iot-hub/nrf52840/smart-light/tests/unit/prj.conf'
+    user-files:
+     - '/home/hailviral-server/embedded-iot-hub/nrf52840/smart-light/tests/unit/prj.conf'
+  toolchain:
+    name: 'host'
+    path: ''
+  zephyr:
+    version: '4.3.0'
+    zephyr-base: '/home/hailviral-server/zephyrproject/zephyr'
+version: '0.1.0'
+west:
+  command: '/home/hailviral-server/zephyrproject/.venv/bin/west build -b native_sim tests/unit --build-dir build_test'
+  topdir: '/home/hailviral-server/zephyrproject'
+  version: '1.5.0'

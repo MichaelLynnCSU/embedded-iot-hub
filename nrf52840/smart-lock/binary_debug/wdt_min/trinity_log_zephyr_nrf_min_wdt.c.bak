@@ -1,0 +1,44 @@
+#include "trinity_log.h"
+#include <zephyr/kernel.h>
+#include <nrf.h>
+
+#include <zephyr/drivers/watchdog.h>
+
+#define WDT_TIMEOUT_MS  10000u
+
+volatile uint32_t g_init_stage __attribute__((section(".noinit")));
+
+static const struct device *g_wdt       = NULL;
+static int                  g_wdt_channel = -1;
+
+void trinity_log_dump_previous(void) {}
+void trinity_log_dump_previous_deferred(void) {}
+void trinity_log_boot_reason(uint32_t r) { (void)r; }
+int  trinity_log_init(void) { return 0; }
+int  trinity_log_erase(void) { return 0; }
+void trinity_log_event(const char *p) { (void)p; }
+void trinity_flash_lock(void) {}
+void trinity_flash_unlock(void) {}
+
+void trinity_wdt_init(void)
+{
+   g_wdt         = DEVICE_DT_GET(DT_NODELABEL(wdt0));
+   g_wdt_channel = 0;
+   if (device_is_ready(g_wdt)) {
+      wdt_feed(g_wdt, 0);
+   }
+}
+
+void trinity_wdt_kick(void)
+{
+   if ((NULL != g_wdt) && (0 <= g_wdt_channel))
+   {
+      (void)wdt_feed(g_wdt, g_wdt_channel);
+   }
+}
+
+
+void trinity_log_heap_stats(void) {}
+void trinity_log_task_stats(void) {}
+void k_sys_fatal_error_handler(unsigned int r, const struct arch_esf *e)
+{ (void)r; (void)e; NVIC_SystemReset(); }

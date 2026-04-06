@@ -1,0 +1,72 @@
+# nRF52840 — Reed Sensor
+
+Zephyr BLE door/window reed sensor. Advertises open/closed state and battery SOC. Supports multiple instances via `CONFIG_BT_DEVICE_NAME` — each physical sensor gets its own build directory and device name.
+
+## Hardware
+
+- **MCU:** nRF52840 (Pro Micro form factor)
+- **Board:** `promicro_nrf52840`
+- **Interface:** Reed switch input, BLE advertising
+
+## Source Files
+
+| File | Description |
+|:-----|:------------|
+| `src/main.c` | BLE advertising, reed state, battery reporting |
+| `src/battery.c` | Battery SOC measurement |
+| `src/flash_log.c` | Flash-backed event logging |
+| `src/fatal_hook.c` | Fatal error handler |
+
+## Environment Setup
+
+```bash
+source ~/zephyrproject/.venv/bin/activate
+export ZEPHYR_BASE=~/zephyrproject/zephyr
+```
+
+## Build
+
+**Entry sensor (ReedSensor1):**
+```bash
+west build -p always -b promicro_nrf52840 \
+  -d ~/embedded-iot-hub/nrf52840/reed-sensor/build-entry \
+  ~/embedded-iot-hub/nrf52840/reed-sensor \
+  -- -DCONFIG_BT_DEVICE_NAME=\"ReedSensor1\" -DCONFIG_DEBUG=y
+```
+
+**Window sensor (ReedSensor2):**
+```bash
+west build -p always -b promicro_nrf52840 \
+  -d ~/embedded-iot-hub/nrf52840/reed-sensor/build-window \
+  ~/embedded-iot-hub/nrf52840/reed-sensor \
+  -- -DCONFIG_BT_DEVICE_NAME=\"ReedSensor2\" -DCONFIG_DEBUG=y
+```
+
+Additional sensors follow the same pattern with unique `build-<name>` directories and `ReedSensor3..6`.
+
+## Flash
+
+```bash
+sudo mkdir -p /mnt/nrf52
+sudo mount /dev/sda /mnt/nrf52
+
+# Entry
+sudo cp build-entry/zephyr/zephyr.uf2 /mnt/nrf52/
+
+# Window
+sudo cp build-window/zephyr/zephyr.uf2 /mnt/nrf52/
+
+sync && sudo umount /mnt/nrf52
+```
+
+## Monitor
+
+```bash
+minicom -D /dev/ttyACM0 -b 115200
+```
+
+## Teardown
+
+```bash
+deactivate
+```

@@ -1,0 +1,54 @@
+# nRF52840 — Smart Light
+
+Zephyr BLE smart light relay controller. Advertises relay state and battery SOC over BLE.
+
+## Hardware
+
+- **MCU:** nRF52840 (Pro Micro form factor)
+- **Board:** `promicro_nrf52840`
+- **Interface:** Relay output, BLE advertising
+
+## Source Files
+
+| File | Description |
+|:-----|:------------|
+| `src/main.c` | BLE advertising, relay state management |
+| `src/flash_log.c` | Flash-backed event logging |
+| `src/fatal_hook.c` | Fatal error handler |
+
+## Environment Setup
+
+```bash
+source ~/zephyrproject/.venv/bin/activate
+export ZEPHYR_BASE=~/zephyrproject/zephyr
+```
+
+## Build
+
+```bash
+west build -p always -b promicro_nrf52840 \
+  -d ~/embedded-iot-hub/nrf52840/smart-light/build \
+  ~/embedded-iot-hub/nrf52840/smart-light \
+  -- -DCONFIG_DEBUG=y
+```
+
+## Flash
+
+```bash
+sudo mkdir -p /mnt/nrf52
+sudo mount /dev/sda /mnt/nrf52
+sudo cp build/zephyr/zephyr.uf2 /mnt/nrf52/
+sync && sudo umount /mnt/nrf52
+```
+
+## Monitor
+
+```bash
+minicom -D /dev/ttyACM0 -b 115200
+```
+
+## Teardown
+
+```bash
+deactivate
+```

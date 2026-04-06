@@ -1,0 +1,20 @@
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
+#include <zephyr/drivers/watchdog.h>
+#include <nrf.h>
+#include "trinity_log.h"
+
+int main(void)
+{
+    const struct device *wdt = DEVICE_DT_GET(DT_NODELABEL(wdt0));
+    if (device_is_ready(wdt)) { wdt_feed(wdt, 0); }
+
+    printk("=== SmartLock Boot ===\n");
+    trinity_wdt_init();
+    while (1) {
+        printk("alive\n");
+        k_sleep(K_MSEC(2000));
+    }
+
+    return 0;
+}
