@@ -1,0 +1,59 @@
+# STM32 BluePill — Sensor Hub
+
+STM32F103C8T6 sensor aggregation node. Reads three DHT11 temperature/humidity sensors via FreeRTOS tasks, logs data and fault events to FRAM over I2C, and transmits JSON to the BeagleBone via UART2.
+
+## Hardware
+
+- **MCU:** STM32F103C8T6 (64KB flash, 20KB RAM)
+- **Sensors:** DHT11 on PA4, PA5, PA6
+- **FRAM:** MB85RC256V via I2C1
+- **UART1:** Debug output
+- **UART2:** JSON output to BeagleBone
+
+## Source Files
+
+| File | Description |
+|:-----|:------------|
+| `Core/Src/main.c` | FreeRTOS tasks, sensor polling, JSON output |
+| `Core/Src/freertos.c` | FreeRTOS kernel init |
+| `Core/Src/stm32f1xx_it.c` | Fault handlers with crash log integration |
+| `UserCore/Src/dht11_driver.c` | DHT11 1-wire driver |
+| `UserCore/Src/fram_driver.c` | FRAM I2C driver |
+| `UserCore/Src/crash_log.c` | FRAM-backed crash logging |
+
+## Build
+
+```bash
+cd stm32-bluepill
+
+# Configure (once)
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake
+
+# Build
+cmake --build build -j$(nproc)
+
+# Build with crash halt (JTAG debugging)
+cmake --build build --clean-first -- -j$(nproc) CFLAGS="-DCRASH_HALT=1"
+```
+
+## Flash
+
+```bash
+# ST-Link
+st-flash write build/stm32-bluepill.elf 0x08000000
+```
+
+## Monitor
+
+```bash
+minicom -D /dev/ttyACM0 -b 115200
+```
+
+## CubeMX Regeneration
+
+The `.ioc` is configured with `DeletePrevious=false`, `BackupPrevious=true`, `KeepUserCode=true`. User code inside `/* USER CODE BEGIN ... */` blocks survives regeneration. After any regeneration verify with:
+
+```bash
+diff Core/Src/main.c Core/Src/Backup/main.c
+diff Core/Src/stm32f1xx_it.c Core/Src/Backup/stm32f1xx_it.c
+```
