@@ -3,7 +3,7 @@
 A fault-tolerant distributed IoT system across 8 MCUs — sensing, control, persistence, networking, and display each run as isolated processes or dedicated hardware nodes for independent failure recovery.
 
 ## Architecture
-![System Architecture](docs/Arch%20diagram.png)9341 240x320
+![System Architecture](docs/Arch%20diagram.png)
 
 
 ## Hardware
