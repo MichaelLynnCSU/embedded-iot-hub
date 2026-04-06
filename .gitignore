@@ -1,28 +1,78 @@
-# ESP-IDF
+# === Build & General Artifacts ===
 build/
 .cache/
-sdkconfig.old
+*.swp
+__pycache__/
+*.pyc
+*.db
 
-# STM32
-Debug/
-Release/
+# === ESP-IDF (Gateway) ===
+sdkconfig.old
+managed_components/
+
+# === STM32 (Blue Pill & Black Pill) ===
+# Compiled Binaries
 *.elf
 *.bin
 *.hex
 *.map
 
-# Zephyr
-build/
+# Compiler/Linker Noise
+*.o
+*.su
+*.d
+Debug/
+Release/
 
-# BeagleBone binaries
+# IDE & CubeMX Metadata
+.settings/
+.project
+.cproject
+.mxproject
+*.launch
+
+# Debugger logs
+.gdbinit
+.gdb_history
+
+# === CMake Internal Files ===
+# These should usually stay in /build, but this catch-all is safer
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+Makefile
+
+# === BeagleBone (Hub/Server) ===
 beaglebone/controller/data_controller
 beaglebone/server/sensor_server
 
-# Logs
-*.log
+# === Security & Local Configs (DO NOT COMMIT) ===
+wifi_secrets.py
+wifi_secrets.h
+network_config.h
+secrets/
 
-# Documentation and Tags
+# === Documentation & Tools ===
 html/
 latex/
 tags
-beaglebone/wifi/wifi_secrets.py
+debug_tools/
+
+# === Zephyr Build Directories ===
+build-entry/
+build-window/
+build_esp/
+*.config-trace.json
+*.config-trace.pickle
+
+# === ESP-IDF sdkconfig (may contain compiled-in credentials) ===
+sdkconfig
+sdkconfig.defaults
+
+# === BeagleBone WiFi Tools ===
+beaglebone/wifi/
+
+# === Dependency Lock Files ===
+dependencies.lock
+tinyuf2/
