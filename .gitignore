@@ -76,3 +76,22 @@ beaglebone/wifi/
 # === Dependency Lock Files ===
 dependencies.lock
 tinyuf2/
+
+# === Zephyr/west ===
+.west/
+twister-out/
+*.dts.pre.tmp
+*.i
+nrf52840/**/build/
+
+# === ESP-IDF extras ===
+*.bin.signed
+bootloader/
+partition_table/
+
+# === STM32 extras ===
+*.ioc
+STM32*.cfg
+
+# === Logs ===
+*.log
