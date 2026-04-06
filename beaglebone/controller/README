@@ -1,0 +1,46 @@
+# BeagleBone — Data Controller
+
+Processes sensor data from the sensor server, manages the SQLite database, handles UART communication, and drives heartbeat logic.
+
+## Source Files
+
+| File | Description |
+|:-----|:------------|
+| `data_controller.c` | Main controller loop |
+| `commands.c` / `commands.h` | Command dispatch |
+| `cmd_handler.c` | Command handler implementations |
+| `db_manager.c` | SQLite database interface |
+| `heartbeat.c` | Device heartbeat tracking |
+| `uart_controller.c` | UART communication to STM32 targets |
+| `shared_data.h` | Shared state structures |
+| `controller_internal.h` | Internal types |
+| `data-controller-wrapper.sh` | systemd wrapper script |
+
+## Dependencies
+
+```bash
+sudo apt install libsqlite3-dev:armhf
+```
+
+## Build
+
+```bash
+cd beaglebone/controller
+export ARCH=arm
+export CROSS_COMPILE=arm-linux-gnueabihf-
+${CROSS_COMPILE}gcc data_controller.c commands.c db_manager.c heartbeat.c \
+  uart_controller.c cmd_handler.c -o data_controller \
+  -lpthread -lrt -lsqlite3
+
+# Verify architecture
+file data_controller
+# Expected: ELF 32-bit LSB pie executable, ARM...
+```
+
+## Deploy
+
+```bash
+scp data_controller debian@beaglebone.local:/home/debian/controller/
+ssh debian@beaglebone.local "sudo systemctl restart sensor-server data-controller && sudo systemctl status sensor-server"
+```
+

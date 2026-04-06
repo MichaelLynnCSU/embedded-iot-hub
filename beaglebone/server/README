@@ -1,0 +1,37 @@
+# BeagleBone — Sensor Server
+
+Central TCP server that receives sensor state from the ESP32-Hub and exposes it to the data controller.
+
+## Source Files
+
+| File | Description |
+|:-----|:------------|
+| `sensor_server.c` | Main TCP server, JSON parsing, sensor state management |
+| `sensor-server-wrapper.sh` | systemd wrapper script |
+
+## Dependencies
+
+```bash
+sudo apt install libjson-c-dev:armhf
+```
+
+## Build
+
+```bash
+cd beaglebone/server
+export ARCH=arm
+export CROSS_COMPILE=arm-linux-gnueabihf-
+${CROSS_COMPILE}gcc sensor_server.c -o sensor_server -ljson-c
+
+# Verify architecture
+file sensor_server
+# Expected: ELF 32-bit LSB pie executable, ARM...
+```
+
+## Deploy
+
+```bash
+scp sensor_server debian@beaglebone.local:/home/debian/controller/
+ssh debian@beaglebone.local "sudo systemctl restart sensor-server data-controller && sudo systemctl status sensor-server"
+```
+
