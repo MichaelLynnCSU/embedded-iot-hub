@@ -1,0 +1,47 @@
+/ {
+    zephyr,user {
+        pir_gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+    };
+    chosen {
+        zephyr,console = &usb_serial;
+        zephyr,shell-uart = &usb_serial;
+    };
+};
+
+&i2c0 {
+    status = "okay";
+    pinctrl-0 = <&i2c0_default>;
+    pinctrl-names = "default";
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+    max17048: max17048@36 {
+        compatible = "maxim,max17048";
+        reg = <0x36>;
+    };
+};
+
+&pinctrl {
+    i2c0_default: i2c0_default {
+        group1 {
+            pinmux = <I2C0_SDA_GPIO6>,
+                     <I2C0_SCL_GPIO7>;
+            bias-pull-up;
+            drive-open-drain;
+        };
+    };
+};
+
+&usb_serial {
+    status = "okay";
+};
+
+&flash0 {
+    partitions {
+        compatible = "fixed-partitions";
+        #address-cells = <1>;
+        #size-cells = <1>;
+        log_partition: partition@3f0000 {
+            label = "log-partition";
+            reg = <0x003f0000 0x00010000>;
+        };
+    };
+};

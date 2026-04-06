@@ -1,0 +1,27 @@
+* xtensa-esp-elf-gdb: GDB for Xtensa
+  - 16.3_20250913 (recommended, installed)
+* riscv32-esp-elf-gdb: GDB for RISC-V
+  - 16.3_20250913 (recommended, installed)
+* xtensa-esp-elf: Toolchain for 32-bit Xtensa based on GCC
+  - esp-15.2.0_20251204 (recommended, installed)
+* esp-clang: Toolchain for all Espressif chips based on clang (optional)
+  - esp-20.1.1_20250829 (recommended, installed)
+* esp-clang-libs: Standalone Clang shared libraries distribution (optional)
+  - esp-20.1.1_20250829 (recommended)
+* riscv32-esp-elf: Toolchain for 32-bit RISC-V based on GCC
+  - esp-15.2.0_20251204 (recommended, installed)
+* esp32ulp-elf: Toolchain for ESP32 ULP coprocessor
+  - 2.38_20240113 (recommended, installed)
+* cmake: CMake build system (optional)
+  - 4.0.3 (recommended)
+  - 3.22.1 (supported)
+* openocd-esp32: OpenOCD for ESP32
+  - v0.12.0-esp32-20251215 (recommended, installed)
+* ninja: Ninja build system (optional)
+  - 1.12.1 (recommended)
+* esp-rom-elfs: ESP ROM ELFs
+  - 20241011 (recommended, installed)
+* qemu-xtensa: QEMU for Xtensa (optional)
+  - esp_develop_9.2.2_20250817 (recommended)
+* qemu-riscv32: QEMU for RISC-V (optional)
+  - esp_develop_9.2.2_20250817 (recommended)

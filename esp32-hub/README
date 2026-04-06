@@ -1,0 +1,61 @@
+# ESP32-Hub
+
+BLE scanner and WiFi bridge. Scans for nRF52840 BLE advertisements, aggregates sensor state, and relays to BeagleBone via UART and optionally to AWS via TCP.
+
+## Source Files
+
+| File | Description |
+|:-----|:------------|
+| `main.c` | Application entry point |
+| `ble_manager.c` | BLE stack init and coordination |
+| `ble_scan.c` | BLE advertisement scanning |
+| `ble_gattc.c` | BLE GATT client |
+| `ble_light.c` | Smart light BLE handler |
+| `ble_lock.c` | Smart lock BLE handler |
+| `wifi_manager.c` | WiFi connection management |
+| `uart_manager.c` | UART relay to BeagleBone |
+| `tcp_manager.c` | TCP client |
+| `aws_manager.c` | AWS IoT integration |
+| `vroom_bus.c` | Internal message bus |
+| `crash_log.c` | NVS-backed crash logging |
+| `network_config.h` | Network configuration |
+| `wifi_secrets.h` | WiFi credentials (not committed) |
+
+## Build
+
+```bash
+cd esp32-hub
+. $HOME/esp/esp-idf/export.sh
+
+# Clean (avoid cache issues)
+idf.py -C ~/embedded-iot-hub/esp32-hub \
+  -B ~/embedded-iot-hub/esp32-hub/build \
+  fullclean
+
+# Build
+idf.py -C ~/embedded-iot-hub/esp32-hub \
+  -B ~/embedded-iot-hub/esp32-hub/build \
+  build
+```
+
+## Flash
+
+```bash
+idf.py -C ~/embedded-iot-hub/esp32-hub \
+  -B ~/embedded-iot-hub/esp32-hub/build \
+  -p /dev/ttyUSB1 flash
+```
+
+## Monitor
+
+```bash
+minicom -D /dev/ttyUSB1 -b 115200
+```
+
+## Crash Logging
+
+`CRASH_HALT` controls panic handler behavior:
+- `0` — log PC to NVS and restart (default, release/battery)
+- `1` — halt forever for JTAG debugger
+
+The flag is set at build time via CMake and does not require modifying source.

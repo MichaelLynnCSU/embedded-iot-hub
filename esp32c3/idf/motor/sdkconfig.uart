@@ -1,0 +1,13 @@
+# ========================= TRINITY FAULT COVERAGE ============================
+# FreeRTOS stack overflow detection — fires vApplicationStackOverflowHook
+CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY=y
+
+# FreeRTOS malloc failure hook — fires vApplicationMallocFailedHook
+CONFIG_FREERTOS_USE_MALLOC_FAILED_HOOK=y
+
+# Trinity mode — add ONE of these to the appropriate sdkconfig:
+# Bench (USB-JTAG halt):   CONFIG_TRINITY_MODE_BENCH=y
+# Field (UART + restart):  CONFIG_TRINITY_MODE_BENCH=n  (default)
+# USB   (USB CDC restart): CONFIG_TRINITY_MODE_USB=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_TASK_WDT_PANIC=y

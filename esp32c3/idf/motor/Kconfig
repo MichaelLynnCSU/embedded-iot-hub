@@ -1,0 +1,15 @@
+config TRINITY_MODE_BENCH
+    bool "Trinity bench mode — halt on crash for USB-JTAG attach"
+    default n
+    help
+      When enabled, panic handler halts in an infinite loop.
+      Attach ESP32-C3 USB-JTAG debugger to inspect state.
+      Use this mode on the dev bench only.
+
+config TRINITY_MODE_USB
+    bool "Trinity USB mode — USB CDC log transport + restart"
+    default n
+    help
+      When enabled, console output goes to USB CDC serial.
+      Panic handler logs to NVS and calls esp_restart().
+      Use when device is USB-tethered for field testing.

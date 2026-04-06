@@ -1,0 +1,76 @@
+# nRF52840 — PIR Motion Sensor
+
+Zephyr BLE PIR motion sensor running on ESP32-C3 DevKit. Advertises motion event count and battery SOC. Supports USB (bench) and UART (battery) console profiles.
+
+## Hardware
+
+- **MCU:** ESP32-C3 DevKitM
+- **Board:** `esp32c3_devkitm`
+- **Interface:** PIR input, BLE advertising
+
+## Source Files
+
+| File | Description |
+|:-----|:------------|
+| `src/main.c` | BLE advertising, PIR event counting |
+| `src/max17048.c` | MAX17048 fuel gauge driver |
+| `src/flash_log.c` | Flash-backed event logging |
+| `src/fatal_hook.c` | Fatal error handler |
+
+## Environment Setup
+
+```bash
+source ~/zephyrproject/.venv/bin/activate
+export ZEPHYR_BASE=~/zephyrproject/zephyr
+```
+
+## Build
+
+**Bench USB — halt on crash (JTAG attached):**
+```bash
+west build -p always -b esp32c3_devkitm \
+  -d ~/embedded-iot-hub/nrf52840/pir/build_esp \
+  ~/embedded-iot-hub/nrf52840/pir \
+  -- -DDTC_OVERLAY_FILE=boards/esp32c3_devkitm_usb.overlay \
+     -DOVERLAY_CONFIG=usb_debug.conf \
+     -DCONFIG_DEBUG=y
+```
+
+**Bench USB — log + reset:**
+```bash
+west build -p always -b esp32c3_devkitm \
+  -d ~/embedded-iot-hub/nrf52840/pir/build_esp \
+  ~/embedded-iot-hub/nrf52840/pir \
+  -- -DDTC_OVERLAY_FILE=boards/esp32c3_devkitm_usb.overlay \
+     -DOVERLAY_CONFIG=usb_debug.conf
+```
+
+**Battery deployment — UART console:**
+```bash
+west build -p always -b esp32c3_devkitm \
+  -d ~/embedded-iot-hub/nrf52840/pir/build_esp \
+  ~/embedded-iot-hub/nrf52840/pir \
+  -- -DDTC_OVERLAY_FILE=boards/esp32c3_devkitm_uart.overlay \
+     -DOVERLAY_CONFIG=uart_debug.conf
+```
+
+## Flash
+
+```bash
+sudo mkdir -p /mnt/nrf52
+sudo mount /dev/sda /mnt/nrf52
+sudo cp build/zephyr/zephyr.uf2 /mnt/nrf52/
+sync && sudo umount /mnt/nrf52
+```
+
+## Monitor
+
+```bash
+minicom -D /dev/ttyACM0 -b 115200
+```
+
+## Teardown
+
+```bash
+deactivate
+```

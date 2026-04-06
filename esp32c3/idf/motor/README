@@ -1,0 +1,73 @@
+# ESP32-C3-Motor
+
+RISC-V motor and actuator controller. Manages motor PWM via LEDC, WiFi TX sweep for channel selection, and NVS-backed crash logging with brownout recovery.
+
+## Source Files
+
+| File | Description |
+|:-----|:------------|
+| `main.c` | Application entry point |
+| `motor_control.c` | Motor PWM control via LEDC |
+| `wifi_tx_sweep.c` / `wifi_tx_sweep.h` | WiFi channel TX sweep |
+| `crash_log.c` / `crash_log.h` | NVS-backed crash logging |
+| `network_config.h` | Network configuration |
+| `wifi_secrets.h` | WiFi credentials (not committed) |
+
+## Build Profiles
+
+Two sdkconfig profiles are provided — use `sdkconfig.usb` for bench/debug, `sdkconfig.uart` for battery deployment.
+
+### Environment Setup
+
+```bash
+cd esp32-c3-motor
+. $HOME/esp/esp-idf/export.sh
+
+# Clean (avoid cache issues)
+idf.py -C ~/embedded-iot-hub/esp32-c3-motor \
+  -B ~/embedded-iot-hub/esp32-c3-motor/build \
+  fullclean
+```
+
+### Bench USB — log + reset
+
+```bash
+cp sdkconfig.usb sdkconfig
+idf.py -C ~/embedded-iot-hub/esp32-c3-motor/ build
+```
+
+### Bench USB — halt on crash (JTAG attached)
+
+```bash
+cp sdkconfig.usb sdkconfig
+idf.py -C ~/embedded-iot-hub/esp32-c3-motor/ build -DCRASH_HALT=1
+```
+
+### Battery deployment — UART console
+
+```bash
+cp sdkconfig.uart sdkconfig
+idf.py -C ~/embedded-iot-hub/esp32-c3-motor/ build
+```
+
+## Flash
+
+```bash
+idf.py -C ~/embedded-iot-hub/esp32-c3-motor \
+  -B ~/embedded-iot-hub/esp32-c3-motor/build \
+  -p /dev/ttyUSB0 flash
+```
+
+## Monitor
+
+```bash
+minicom -D /dev/ttyUSB0 -b 115200
+```
+
+## Crash Logging
+
+`CRASH_HALT` controls panic handler behavior:
+- `0` — log PC to NVS and restart (default, release/battery)
+- `1` — halt forever for JTAG debugger
+
+Toggle at build time with `-DCRASH_HALT=1` — no source changes needed.

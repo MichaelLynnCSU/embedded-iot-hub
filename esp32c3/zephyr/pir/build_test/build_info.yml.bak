@@ -1,0 +1,5 @@
+west:
+  command: /home/hailviral-server/zephyrproject/.venv/bin/west build -b native_sim
+    tests/unit --build-dir build_test
+  topdir: /home/hailviral-server/zephyrproject
+  version: 1.5.0
