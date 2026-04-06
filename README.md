@@ -3,36 +3,8 @@
 A fault-tolerant distributed IoT system across 8 MCUs — sensing, control, persistence, networking, and display each run as isolated processes or dedicated hardware nodes for independent failure recovery.
 
 ## Architecture
+![System Architecture](docs/Arch%20diagram.png)9341 240x320
 
-```
-nRF52840 x4 (Zephyr RTOS)
-  Reed Sensors ──┐
-  PIR Motion ────┤  BLE advertisements
-  Smart Lock ────┤  (manufacturer data)
-  Smart Light ───┘
-                 │
-                 ▼
-          ESP32 Hub (ESP-IDF)
-          ├── BLE scanner + slot manager
-          ├── UART rx ← STM32F103 avg_temp
-          ├── TCP → BeagleBone Black
-          ├── TCP → ESP32-C3 motor
-          └── UART tx → BeagleBone Black
-                 │
-        ┌────────┴────────┐
-        ▼                 ▼
-BeagleBone Black     ESP32-C3 Motor
-(Embedded Linux)     Controller
-├── sensor_server    └── PWM + DHT11
-├── data_controller
-├── SQLite DB
-└── UART tx → STM32F411
-                 │
-                 ▼
-        STM32F411 BlackPill
-        LVGL v8 Dashboard
-        ILI9341 240x320
-```
 
 ## Hardware
 
