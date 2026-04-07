@@ -124,19 +124,43 @@ idf.py build flash monitor
 ## Project Structure
 
 ```
-smart-home-iot/
-├── esp32-hub/          ESP-IDF BLE hub + TCP forwarder
-├── beaglebone/         Embedded Linux pipeline (6 services)
-│   ├── controller/     data_controller, cmd_handler, uart_controller
-│   └── server/         sensor_server
-├── stm32-blackpill/    STM32F411 LVGL dashboard
-├── stm32-bluepill/     STM32F103 DHT11 + UART bridge
-├── nrf52840/           Zephyr peripheral nodes
+embedded-iot-hub/
+├── esp32-hub/                  # ESP-IDF BLE central + TCP forwarder
+│   ├── main/                   # aws, ble, tcp, uart, wifi managers
+│   ├── managed_components/
+│   ├── tests/
+│   ├── CMakeLists.txt
+│   ├── partitions.csv
+│   └── sdkconfig
+│
+├── beaglebone/                 # Embedded Linux pipeline
+│   ├── controller/             # cmd_handler, data_controller, uart_controller
+│   ├── server/                 # sensor_server
+│   └── wifi/                  # ESP-01 TCP setup tools
+│
+├── esp32c3/                    # ESP32-C3 targets
+│   ├── idf/motor/             # Motor PWM controller (ESP-IDF)
+│   └── zephyr/pir/            # PIR sensor (Zephyr)
+│
+├── nrf52840/                   # Zephyr BLE peripheral nodes
 │   ├── reed-sensor/
-│   ├── pir/
-│   ├── smart-lock/
-│   └── smart-light/
-└── esp32-c3-motor/     Motor PWM controller
+│   ├── smart-light/
+│   └── smart-lock/
+│
+├── stm32-blackpill/            # STM32F411 LVGL dashboard
+│   ├── Core/
+│   ├── Drivers/
+│   ├── Middlewares/lvgl/
+│   └── User/
+│
+├── stm32-bluepill/             # STM32F103 DHT11 + UART bridge
+│   ├── Core/
+│   ├── Drivers/
+│   └── UserCore/
+│
+├── docs/
+├── README.md
+└── ENVIRONMENT.md
 ```
 
 ## Key Design Decisions
