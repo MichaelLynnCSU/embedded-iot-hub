@@ -15,7 +15,7 @@ A fault-tolerant distributed IoT system across 8 MCUs — sensing, control, pers
 | Temp/UART | STM32F103 Blue Pill | DHT11 avg_temp → UART to ESP32 |
 | Motor | ESP32-C3 | PWM motor control, TCP server |
 | Reed x2 | nRF52840 | Door state + battery SOC via BLE adv |
-| PIR | nRF52840 | Motion count + battery SOC via BLE adv |
+| PIR | ESP32-C3 | Motion count + battery SOC via BLE adv |
 | Smart Lock | nRF52840 | Lock state + battery SOC via BLE adv |
 | Smart Light | nRF52840 | Light state via BLE adv + GATT write |
 
