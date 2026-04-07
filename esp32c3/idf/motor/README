@@ -71,3 +71,11 @@ minicom -D /dev/ttyUSB0 -b 115200
 - `1` — halt forever for JTAG debugger
 
 Toggle at build time with `-DCRASH_HALT=1` — no source changes needed.
+
+## Testing
+
+```bash
+cd tests/unit
+mkdir -p build && cd build
+cmake .. && make && ./test_motor
+```

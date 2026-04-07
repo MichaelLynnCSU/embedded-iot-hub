@@ -59,3 +59,11 @@ minicom -D /dev/ttyUSB1 -b 115200
 - `1` — halt forever for JTAG debugger
 
 The flag is set at build time via CMake and does not require modifying source.
+
+## Testing
+
+```bash
+cd tests/unit
+mkdir -p build && cd build
+cmake .. && make && ./test_hub
+```

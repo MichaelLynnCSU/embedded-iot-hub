@@ -53,3 +53,13 @@ minicom -D /dev/ttyACM0 -b 115200
 ```bash
 deactivate
 ```
+
+## Testing
+
+Unit tests run on-host via `native_sim` — no hardware needed.
+
+```bash
+rm -rf build_test
+west build -b native_sim tests/unit --build-dir build_test
+west build -t run --build-dir build_test
+```
