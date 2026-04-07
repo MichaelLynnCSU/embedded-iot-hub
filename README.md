@@ -117,7 +117,7 @@ west build && west flash
 
 ### ESP32-C3 Motor
 ```bash
-cd esp32-c3-motor
+cd esp32c3/idf/motor/
 idf.py build flash monitor
 ```
 
