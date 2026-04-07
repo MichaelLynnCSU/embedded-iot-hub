@@ -162,6 +162,59 @@ embedded-iot-hub/
 ├── README.md
 └── ENVIRONMENT.md
 ```
+## Testing
+
+All unit tests run on-host — no hardware required.
+
+### ESP32 Hub
+```bash
+cd esp32-hub/tests/unit
+mkdir -p build && cd build
+cmake .. && make && ./test_hub
+```
+
+### ESP32-C3 Motor
+```bash
+cd esp32c3/idf/motor/tests/unit
+mkdir -p build && cd build
+cmake .. && make && ./test_motor
+```
+
+### nRF52840 (native_sim — all nodes)
+```bash
+# Run from any node directory: reed-sensor, smart-lock, smart-light, pir
+rm -rf build_test
+west build -b native_sim tests/unit --build-dir build_test
+west build -t run --build-dir build_test
+```
+
+### STM32 BlackPill
+```bash
+cd stm32-blackpill/tests/unit
+mkdir -p build && cd build
+cmake .. && make && ./test_blackpill
+```
+
+### STM32 BluePill
+```bash
+cd stm32-bluepill/tests/unit
+mkdir -p build && cd build
+cmake .. && make && ./test_bluepill
+```
+
+### BeagleBone — Controller
+```bash
+cd beaglebone/controller/tests/unit
+mkdir -p build && cd build
+cmake .. && make && ./test_controller
+```
+
+### BeagleBone — Server
+```bash
+cd beaglebone/server/tests/unit
+mkdir -p build && cd build
+cmake .. && make && ./test_server
+```
 
 ## Key Design Decisions
 
