@@ -17,6 +17,12 @@
  *          1. bus_init()                — create all queues (app_main)
  *          2. bus_register_subscriber() — register consumers (pre-task)
  *          3. bus_publish_*()           — called by producers at runtime
+ *
+ * \note    Motor battery field added (2026-04-08):
+ *          MOTOR_PAYLOAD_T gains batt field (motor supply voltage in mV).
+ *          bus_publish_motor() gains batt parameter to match.
+ *          All callers updated — bus_publish_motor(0) becomes
+ *          bus_publish_motor(0, -1) on disconnect paths.
  ******************************************************************************/
 
 #ifndef INCLUDE_VROOM_BUS_H_
@@ -96,6 +102,7 @@ typedef struct
 typedef struct
 {
    uint8_t online; /*!< 1=connected, 0=offline */
+   int     batt;   /*!< supply voltage in mV, -1 if unknown */
 } MOTOR_PAYLOAD_T;
 
 /*************************** QUEUE HANDLES ************************************/
@@ -154,7 +161,8 @@ void bus_publish_temp(int avg_temp);
 
 /** \brief Publish a motor controller status event.
  *  \param online - 1 if connected, 0 if offline.
+ *  \param batt   - Supply voltage in mV, -1 if unknown or offline.
  *  \return void */
-void bus_publish_motor(uint8_t online);
+void bus_publish_motor(uint8_t online, int batt);
 
 #endif /* INCLUDE_VROOM_BUS_H_ */

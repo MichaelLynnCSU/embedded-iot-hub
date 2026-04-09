@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
 
-# Setup compiler settings
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
@@ -26,7 +25,14 @@ add_executable(${CMAKE_PROJECT_NAME})
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
-# Add User Sources (HAL drivers + refactored dashboard modules)
+# Add User Sources
+# Trinity split -- each file can be swapped for a stub independently.
+# Dependency order (strict -- never invert):
+#   fram  -> standalone (owns uart_log, rtc_store, g_fram_ok)
+#   wdt   -> depends on fram (uart_log for status)
+#   fault -> depends on fram (uart_log + rtc_store)
+#   stack -> depends on fault (panic_handler) + fram (uart_log)
+#   heap  -> depends on fault (panic_handler) + fram (uart_log)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # HAL / board support
     "User/Core/crash_log.c"
@@ -38,8 +44,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "User/Core/parser.c"
     "User/Core/ui.c"
 
-    # Trinity logging — panic, stack canary, heap hooks, HardFault handler
-    "User/Core/trinity_log_stm32_f4.c"
+    # Trinity split
+    "User/Core/trinity_fram_stm32_f4.c"
+    "User/Core/trinity_wdt_stm32_f4.c"
+    "User/Core/trinity_fault_stm32_f4.c"
+    "User/Core/trinity_stack_stm32_f4.c"
+    "User/Core/trinity_heap_stm32_f4.c"
     "User/Core/fram_driver.c"
 )
 
@@ -60,22 +70,21 @@ target_compile_definitions(lvgl_demos PUBLIC LV_CONF_INCLUDE_SIMPLE)
 target_include_directories(lvgl PUBLIC "Core/Inc")
 target_include_directories(lvgl_demos PUBLIC "Core/Inc")
 
-# ── Trinity build mode ───────────────────────────────────────────────────────
+# Trinity build mode
 # Select exactly ONE mode by passing -DTRINITY_MODE=BENCH|FIELD|USB to cmake.
-# Default is FIELD (auto-reset + RTC black box) if not specified.
-#
-#   Bench  — UART + BKPT halt  (ST-Link inspection, dev only)
-#   Field  — UART + auto-reset + RTC black box (battery / production)
-#   USB    — USB CDC + auto-reset + RTC black box (USB tethered field test)
-#
+# Default is FIELD if not specified.
+#   Bench -- UART + BKPT halt  (ST-Link inspection, dev only)
+#   Field -- UART + auto-reset + FRAM black box (battery / production)
+#   USB   -- USB CDC + auto-reset + FRAM black box (USB tethered field test)
 if(NOT DEFINED TRINITY_MODE)
     set(TRINITY_MODE "FIELD")
 endif()
 message("Trinity mode: " ${TRINITY_MODE})
+
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     TRINITY_MODE_${TRINITY_MODE}
-    TRINITY_CHIP_STM32_F4=1       # Specify the Blackpill SoC
-    TRINITY_USE_FRAM=1              # Essential: Blackpill uses SPI FRAM for logs
+    TRINITY_CHIP_STM32_F4=1
+    TRINITY_USE_FRAM=1
 )
 
 # Link libraries

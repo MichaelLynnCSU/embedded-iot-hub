@@ -48,7 +48,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/main.c
     UserCore/Src/fram_driver.c
     UserCore/Src/dht11_driver.c
-    UserCore/Src/trinity_log_stm32_f1.c
+    UserCore/Src/trinity_fram_stm32_f1.c
+    UserCore/Src/trinity_wdt_stm32_f1.c
+    UserCore/Src/trinity_fault_stm32_f1.c
+    UserCore/Src/trinity_heap_stm32_f1.c
 )
 
 # Add include paths

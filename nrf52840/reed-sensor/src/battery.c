@@ -11,7 +11,7 @@
  *          Hardware:
  *          - ADC channel: zephyr_user node index 0, P0.02 (AIN0)
  *          - Divider: Vbat → 100k → 100k → ┬ → P0.02(AIN0)
- *                                           └ → 100k → GND
+ *                                          └ → 100k → GND
  *          - R1 = 200k (two 100k in series), R2 = 100k
  *          - Ratio: R2/(R1+R2) = 100k/300k = 1/3
  *          - Reconstruct: adc_pin_mV × 3 = Vbat_mV

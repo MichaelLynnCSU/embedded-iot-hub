@@ -11,6 +11,22 @@
  *          - trinity_wdt_kick()  called in each task's main loop
  *          - trinity_log_heap_stats() / trinity_log_task_stats() called
  *            from motor_task every STATS_INTERVAL_MS
+ *
+ * \note    Battery reporting added (2026-04-08):
+ *          battery_init() called in app_main after adc_init() -- shares
+ *          g_adc1_handle (ADC_UNIT_1). Battery uses ADC1_CH1 (GPIO1),
+ *          knob uses ADC1_CH0 (GPIO0) -- no conflict.
+ *          motor_task reads battery every BATT_INTERVAL_MS and sends
+ *          JSON back to hub on the client socket:
+ *            {"batt_motor": <mV>}
+ *          Hub receives this in handle_client() recv path and parses
+ *          "batt_motor" key to update its TCP state for BeagleBone relay.
+ *          g_client_sock exposed as global so motor_task can write to it.
+ *          Protected by g_client_sock_valid flag -- motor_task only sends
+ *          when a client is connected.
+ *
+ *          Divider: Vbat (5V) → GPIO5 (enable) → 100k → 100k → ┬ → GPIO1 (ADC1_CH1)
+ *                                                               └ → 100k → GND
  ******************************************************************************/
 
 #include <string.h>
@@ -36,6 +52,7 @@
 #include "cJSON.h"
 #include "wifi_tx_sweep.h"
 #include "trinity_log.h"
+#include "battery.h"
 
 #define TCP_PORT             3333
 #define RX_BUF_SIZE          512
@@ -70,11 +87,13 @@
 #define RECV_TIMEOUT_MS      30000
 #define STATS_INTERVAL_MS    60000u  /**< heap/task stats log interval */
 #define ACCEPT_TIMEOUT_SEC   2       /**< accept() wakeup interval for WDT kicks */
+#define BATT_INTERVAL_MS     30000u  /**< battery read and report interval */
+#define BATT_JSON_BUF_SIZE   48      /**< {"batt_motor": 5000} + null */
 
 static const char *TAG = "MOTOR_CTRL";
 
-static WIFI_TX_SWEEP_T       g_tx_sweep;
-static EventGroupHandle_t    g_wifi_eg;
+static WIFI_TX_SWEEP_T           g_tx_sweep;
+static EventGroupHandle_t        g_wifi_eg;
 static adc_oneshot_unit_handle_t g_adc1_handle;
 
 static int     g_aws_motor = 0;
@@ -82,6 +101,12 @@ static int     g_aws_low   = DEFAULT_AWS_LOW;
 static int     g_aws_high  = DEFAULT_AWS_HIGH;
 static uint8_t g_avg_temp  = DEFAULT_AVG_TEMP;
 static uint16_t g_knob_adc = 0;
+
+/* Shared client socket for motor_task battery send-back.
+ * Written by tcp_rx_task under g_client_sock_valid flag.
+ * Read by motor_task -- send() is safe from multiple tasks on lwIP. */
+static volatile int  g_client_sock       = -1;
+static volatile bool g_client_sock_valid = false;
 
 static void wifi_event_handler(void *p_arg,
                                 esp_event_base_t base,
@@ -228,6 +253,10 @@ static void handle_client(int sock)
    (void)fcntl(sock, F_SETFL, flags | O_NONBLOCK);
    (void)send(sock, TCP_READY_MSG, TCP_READY_LEN, 0);
 
+   /* Expose socket to motor_task for battery send-back */
+   g_client_sock       = sock;
+   g_client_sock_valid = true;
+
    last_rx_tick = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
    while (!socket_dead)
@@ -310,6 +339,10 @@ static void handle_client(int sock)
       vTaskDelay(pdMS_TO_TICKS(RECV_IDLE_DELAY_MS));
    }
 
+   /* Invalidate shared socket before closing */
+   g_client_sock_valid = false;
+   g_client_sock       = -1;
+
    trinity_log_event("EVENT: TCP_DISCONNECT\n");
 }
 
@@ -360,9 +393,6 @@ static void tcp_rx_task(void *p_arg)
 
    trinity_log_event("EVENT: TCP_LISTENING\n");
 
-   /* ---- Trinity: SO_RCVTIMEO causes accept() to return every
-    *      ACCEPT_TIMEOUT_SEC seconds with EAGAIN, allowing the WDT
-    *      to be kicked even when no client connects.               ---- */
    {
       struct timeval accept_tv = { .tv_sec = ACCEPT_TIMEOUT_SEC, .tv_usec = 0 };
       (void)setsockopt(listen_sock, SOL_SOCKET, SO_RCVTIMEO,
@@ -379,7 +409,7 @@ static void tcp_rx_task(void *p_arg)
       {
          if ((EAGAIN == errno) || (EWOULDBLOCK == errno))
          {
-            continue;   /* timed out — no client yet, loop back and kick */
+            continue;
          }
          vTaskDelay(pdMS_TO_TICKS(100));
          continue;
@@ -397,7 +427,11 @@ static void motor_task(void *p_arg)
    int      adc_raw       = 0;
    int      t             = 0;
    uint32_t last_stats_ms = 0u;
+   uint32_t last_batt_ms  = 0u;
    uint32_t now_ms        = 0u;
+   int      batt_mv       = -1;
+   char     batt_json[BATT_JSON_BUF_SIZE] = {0};
+   int      sock          = -1;
 
    (void)p_arg;
 
@@ -408,6 +442,7 @@ static void motor_task(void *p_arg)
                                pdFALSE, pdTRUE, portMAX_DELAY);
 
    last_stats_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+   last_batt_ms  = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
    while (1)
    {
@@ -438,8 +473,35 @@ static void motor_task(void *p_arg)
       (void)ledc_set_duty(PWM_MODE, PWM_CHANNEL, pwm_duty);
       (void)ledc_update_duty(PWM_MODE, PWM_CHANNEL);
 
-      /* ---- Trinity: heap and task stats every STATS_INTERVAL_MS ---- */
       now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+      /* ---- Battery read and send-back every BATT_INTERVAL_MS ---- */
+      if ((now_ms - last_batt_ms) >= BATT_INTERVAL_MS)
+      {
+         last_batt_ms = now_ms;
+
+         batt_mv = battery_read_mv();
+         if (0 < batt_mv)
+         {
+            ESP_LOGI(TAG, "[BATT] %d mV", batt_mv);
+
+            /* Send battery reading back to hub as JSON if connected */
+            if (g_client_sock_valid)
+            {
+               sock = g_client_sock;
+               (void)snprintf(batt_json, sizeof(batt_json),
+                              "{\"batt_motor\":%d}", batt_mv);
+               (void)send(sock, batt_json, strlen(batt_json), 0);
+               ESP_LOGI(TAG, "[BATT] Sent to hub: %s", batt_json);
+            }
+         }
+         else
+         {
+            ESP_LOGW(TAG, "[BATT] Read failed");
+         }
+      }
+
+      /* ---- Trinity: heap and task stats every STATS_INTERVAL_MS ---- */
       if ((now_ms - last_stats_ms) >= STATS_INTERVAL_MS)
       {
          last_stats_ms = now_ms;
@@ -497,6 +559,12 @@ void app_main(void)
 
    pwm_init();
    adc_init();
+
+   /* Battery init -- shares g_adc1_handle, configures ADC1_CH1 (GPIO1) */
+   if (0 != battery_init(g_adc1_handle))
+   {
+      ESP_LOGW(TAG, "Battery init failed -- batt_motor will not report");
+   }
 
    trinity_log_event("EVENT: HARDWARE_READY\n");
 

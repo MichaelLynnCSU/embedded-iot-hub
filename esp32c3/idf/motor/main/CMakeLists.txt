@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "motor_control.c"
+        "battery.c"
         "wifi_tx_sweep.c"
         "build_info.c"
         "trinity_wdt_idf.c"

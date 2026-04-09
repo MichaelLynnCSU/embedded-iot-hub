@@ -263,9 +263,9 @@ void bus_publish_temp(int avg_temp)
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
-void bus_publish_motor(uint8_t online)
+void bus_publish_motor(uint8_t online, int batt)
 {
-   MOTOR_PAYLOAD_T p = { .online = online }; /**< motor payload */
+   MOTOR_PAYLOAD_T p = { .online = online, .batt = batt }; /**< motor payload */
 
    if (pdTRUE != xQueueSend(q_motor, &p, 0))
    {

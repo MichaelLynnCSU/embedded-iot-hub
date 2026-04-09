@@ -26,6 +26,17 @@
  *          The event group wait uses TCP_SEND_INTERVAL_MS as its timeout,
  *          which must be less than the WDT timeout (5 s). Verify
  *          TCP_SEND_INTERVAL_MS in config.h is < 5000.
+ *
+ * \note    Motor battery added (2026-04-08):
+ *          TCP_STATE_T gains motor_batt field (supply mV, -1 = unknown).
+ *          drain_queues() reads batt from MOTOR_PAYLOAD_T.
+ *          build_and_send() emits "batt_motor" in JSON alongside existing
+ *          batt_pir and batt_lck fields. Motor side sends battery reading
+ *          back to hub as JSON: {"batt_motor": <mV>} on the same TCP
+ *          connection. Hub parses this in recv path (future) or reads it
+ *          from the vroom bus queue populated by the motor TCP receive task.
+ *          For now: motor publishes via bus_publish_motor(online, batt_mv)
+ *          and hub drains it here into g_state.motor_batt.
  ******************************************************************************/
 
 #include "config.h"
@@ -76,27 +87,29 @@ typedef struct
 /** \brief Local snapshot of all sensor state for TCP JSON payload */
 typedef struct
 {
-   int              avg_temp;             /*!< average temperature from STM32 */
-   uint32_t         motion_count;         /*!< PIR motion event count */
-   int              pir_batt;             /*!< PIR battery SOC percent */
-   uint8_t          light_state;          /*!< smart light relay state */
-   uint8_t          lock_state;           /*!< smart lock state */
-   int              lock_batt;            /*!< smart lock battery SOC */
-   uint8_t          motor_online;         /*!< C3 motor controller online flag */
+   int              avg_temp;               /*!< average temperature from STM32 */
+   uint32_t         motion_count;           /*!< PIR motion event count */
+   int              pir_batt;               /*!< PIR battery SOC percent */
+   uint8_t          light_state;            /*!< smart light relay state */
+   uint8_t          lock_state;             /*!< smart lock state */
+   int              lock_batt;              /*!< smart lock battery SOC */
+   uint8_t          motor_online;           /*!< C3 motor controller online flag */
+   int              motor_batt;             /*!< motor supply voltage mV, -1=unknown */
    REED_SLOT_STATE_T reed_slots[MAX_REEDS]; /*!< per-reed slot state */
-   uint16_t         age_pir;             /*!< PIR device age seconds */
-   uint16_t         age_lgt;             /*!< light device age seconds */
-   uint16_t         age_lck;             /*!< lock device age seconds */
+   uint16_t         age_pir;               /*!< PIR device age seconds */
+   uint16_t         age_lgt;               /*!< light device age seconds */
+   uint16_t         age_lck;               /*!< lock device age seconds */
 } TCP_STATE_T;
 
 static TCP_STATE_T g_state =
 {
-   .avg_temp  = DEFAULT_AVG_TEMP,
-   .pir_batt  = -1,
-   .lock_batt = -1,
-   .age_pir   = 0xFFFF,
-   .age_lgt   = 0xFFFF,
-   .age_lck   = 0xFFFF,
+   .avg_temp   = DEFAULT_AVG_TEMP,
+   .pir_batt   = -1,
+   .lock_batt  = -1,
+   .motor_batt = -1,
+   .age_pir    = 0xFFFF,
+   .age_lgt    = 0xFFFF,
+   .age_lck    = 0xFFFF,
 };
 
 static void drain_queues(EventBits_t bits)
@@ -176,6 +189,11 @@ static void drain_queues(EventBits_t bits)
       while (pdTRUE == xQueueReceive(q_motor, &p_motor, 0))
       {
          g_state.motor_online = p_motor.online;
+         /* Only update batt when online -- preserve last known on disconnect */
+         if (p_motor.online && (p_motor.batt > 0))
+         {
+            g_state.motor_batt = p_motor.batt;
+         }
       }
    }
 
@@ -217,7 +235,7 @@ static void handle_c3_send_error(int *p_sock,
          *p_state       = TCP_STATE_DISCONNECTED;
          *p_block_count = 0;
          g_state.motor_online = 0;
-         bus_publish_motor(0);
+         bus_publish_motor(0, -1);
       }
    }
    else
@@ -227,7 +245,7 @@ static void handle_c3_send_error(int *p_sock,
       *p_sock        = SOCK_INVALID;
       *p_state       = TCP_STATE_DISCONNECTED;
       *p_block_count = 0;
-      bus_publish_motor(0);
+      bus_publish_motor(0, -1);
       g_state.motor_online = 0;
    }
 }
@@ -295,6 +313,7 @@ static void build_and_send(int *p_bb_sock,
    (void)cJSON_AddNumberToObject(p_root, "age_lck",      g_state.age_lck);
    (void)cJSON_AddNumberToObject(p_root, "batt_pir",     g_state.pir_batt);
    (void)cJSON_AddNumberToObject(p_root, "batt_lck",     g_state.lock_batt);
+   (void)cJSON_AddNumberToObject(p_root, "batt_motor",   g_state.motor_batt);
    (void)cJSON_AddNumberToObject(p_root, "motor_online", g_state.motor_online);
 
    count   = ble_get_reed_count();
@@ -383,13 +402,14 @@ static void build_and_send(int *p_bb_sock,
       else
       {
          *p_bb_block_count = 0;
-         ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u lgt=%d lck=%d reeds=%d mtr=%d",
+         ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u lgt=%d lck=%d reeds=%d mtr=%d batt_mtr=%d",
                   g_state.avg_temp,
                   (unsigned)g_state.motion_count,
                   g_state.light_state,
                   g_state.lock_state,
                   count,
-                  (int)g_state.motor_online);
+                  (int)g_state.motor_online,
+                  g_state.motor_batt);
       }
    }
 
@@ -430,7 +450,7 @@ static void run_c3_state_machine(int *p_sock,
          {
             *p_state = TCP_STATE_CONNECTED; *p_block_count = 0;
             ESP_LOGI(TAG, "[C3_MOTOR] Connected");
-            bus_publish_motor(1);
+            bus_publish_motor(1, -1);
          }
          else if (EINPROGRESS == errno)
          {
@@ -471,7 +491,7 @@ static void run_c3_state_machine(int *p_sock,
             {
                trinity_log_event("EVENT: TCP_C3_CONNECTED\n");
                *p_state = TCP_STATE_CONNECTED; *p_block_count = 0;
-               bus_publish_motor(1);
+               bus_publish_motor(1, -1);
             }
          }
          break;
@@ -635,6 +655,10 @@ void tcp_manager_task(EventGroupHandle_t p_system_eg,
          while (pdTRUE == xQueueReceive(q_motor, &p_m, 0))
          {
             g_state.motor_online = p_m.online;
+            if (p_m.online && (p_m.batt > 0))
+            {
+               g_state.motor_batt = p_m.batt;
+            }
          }
       }
 
