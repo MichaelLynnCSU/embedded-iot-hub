@@ -715,7 +715,8 @@ static void handle_lock(const uint8_t *p_adv,
    new_batt   = p_mfg[MFG_LOCK_BATT_IDX];
    first_seen = !g_lock_seen;
    changed    = !first_seen &&
-                (new_state != (uint8_t)ble_get_lock_state());
+                ((new_state != (uint8_t)ble_get_lock_state()) ||
+                 (new_batt  != (uint8_t)ble_lock_get_batt()));
    log_due    = (ble_get_device_age_s(DEV_IDX_LOCK) >=
                  LOCK_AGE_LOG_THRESHOLD);
 
