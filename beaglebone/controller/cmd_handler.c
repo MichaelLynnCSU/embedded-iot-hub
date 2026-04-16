@@ -64,6 +64,7 @@ void handle_get_latest(struct CommandMsg *p_cmd)
    shm_data->current_motion    = latest_data.motion_count;
    shm_data->current_light     = latest_data.light_state;
    shm_data->current_lock      = latest_data.lock_state;
+   shm_data->batt_motor        = latest_data.batt_motor;
    shm_data->current_timestamp = latest_data.timestamp;
    shm_data->data_valid        = latest_data.valid;
    shm_data->sequence++;
@@ -296,6 +297,7 @@ static void process_sensor_frame(const struct SensorData *p_data)
    latest_data.age_lck      = p_data->age_lck;
    latest_data.batt_pir     = p_data->batt_pir;
    latest_data.batt_lck     = p_data->batt_lck;
+   latest_data.batt_motor   = p_data->batt_motor;
    latest_data.motor_online = p_data->motor_online;
 
    process_reed_slots(p_data);
@@ -303,7 +305,7 @@ static void process_sensor_frame(const struct SensorData *p_data)
    pthread_mutex_unlock(&data_mutex);
 
    LOG("Sensor: temp=%.1f motion=%d ages pir=%d lgt=%d lck=%d "
-       "batt pir=%d%% lck=%d%% mtr=%d",
+       "batt pir=%d%% lck=%d%% motor=%d mV mtr=%d",
        p_data->avg_temp,
        p_data->motion_count,
        p_data->age_pir,
@@ -311,6 +313,7 @@ static void process_sensor_frame(const struct SensorData *p_data)
        p_data->age_lck,
        p_data->batt_pir,
        p_data->batt_lck,
+       p_data->batt_motor,
        p_data->motor_online);
 
    if (p_data->motor_online)

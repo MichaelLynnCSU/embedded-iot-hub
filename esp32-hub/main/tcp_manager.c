@@ -289,13 +289,17 @@ static void build_and_send(int *p_bb_sock,
    cJSON   *p_reeds    = NULL;
    cJSON   *p_rooms    = NULL;
    cJSON   *p_entry    = NULL;
+   cJSON   *p_rx_json  = NULL;
+   cJSON   *p_batt     = NULL;
    char    *p_msg      = NULL;
    char     name[REED_NAME_BUF_SIZE] = {0};
+   char     rx[64]     = {0};
    uint8_t  door_state = 0xFF;
    uint16_t gen        = 0;
    int      count      = 0;
    int      i          = 0;
    int      sent       = 0;
+   int      rlen       = 0;
 
    p_root = cJSON_CreateObject();
    if (NULL == p_root)
@@ -388,6 +392,24 @@ static void build_and_send(int *p_bb_sock,
          *p_c3_block_count = 0;
          ESP_LOGI(TAG, "[C3_MOTOR] Sent %d bytes", sent);
          g_state.motor_online = 1;
+
+         /* Drain any battery response from motor */
+         rlen = recv(*p_c3_sock, rx, sizeof(rx) - 1, MSG_DONTWAIT);
+         if (rlen > 0)
+         {
+            rx[rlen]   = '\0';
+            p_rx_json  = cJSON_Parse(rx);
+            if (NULL != p_rx_json)
+            {
+               p_batt = cJSON_GetObjectItem(p_rx_json, "batt_motor");
+               if ((NULL != p_batt) && (p_batt->valueint > 0))
+               {
+                  g_state.motor_batt = p_batt->valueint;
+                  ESP_LOGI(TAG, "[C3_MOTOR] batt_motor=%d mV", g_state.motor_batt);
+               }
+               cJSON_Delete(p_rx_json);
+            }
+         }
       }
    }
 

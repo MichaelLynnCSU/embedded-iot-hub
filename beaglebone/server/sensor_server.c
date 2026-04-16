@@ -101,6 +101,7 @@ struct SensorData
    uint16_t age_lck;         /*!< lock device age seconds */
    int8_t   batt_pir;        /*!< PIR battery SOC percent */
    int8_t   batt_lck;        /*!< lock battery SOC percent */
+   int      batt_motor;
 
    struct ReedSlotData reed_slots[MAX_REEDS]; /*!< dynamic reed slot array */
    uint8_t  motor_online;  /*!< 1 if C3 motor controller is online */
@@ -548,6 +549,7 @@ static void process_json(const char *p_json_body)
    data.age_lck   = AGE_UNKNOWN;
    data.batt_pir  = -1;
    data.batt_lck  = -1;
+   data.batt_motor = -1;
 
    for (i = 0; i < MAX_REEDS; i++)
    {
@@ -597,6 +599,12 @@ static void process_json(const char *p_json_body)
    {
       data.motor_online = (uint8_t)json_object_get_int(p_obj);
       log_msg("motor_online=%d", data.motor_online);
+   }
+
+   if (json_object_object_get_ex(p_root, "batt_motor", &p_obj))
+   {
+      data.batt_motor = json_object_get_int(p_obj);
+      log_msg("batt_motor=%d mV", data.batt_motor);
    }
 
    if (json_object_object_get_ex(p_root, "reeds", &p_obj))

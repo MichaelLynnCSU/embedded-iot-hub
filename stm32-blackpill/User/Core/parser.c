@@ -307,6 +307,10 @@ static void parse_single_value(const char *p_id, int val, int batt)
          ui_set_motor(1u);
          ui_stamp_dev_online(eDEV_MOTOR, now);
       }
+      if (batt > 0)
+      {
+        ui_set_motor_batt(batt);
+      }
       /* val=0: do nothing — last known motor state stays on screen.
        * HB_TIMEOUT_MS expiry drives the dot red, identical to how
        * PIR, LGT, and LCK go offline. No explicit offline action needed. */

@@ -83,6 +83,7 @@ typedef struct _HOME_STATE_X
    uint8_t  lock;                  /*!< Smart lock: 0=unlocked, 1=locked     */
    int8_t   lock_batt;             /*!< Lock battery percent, -1=unknown     */
    uint8_t  motor;                 /*!< Motor: 0=off, 1=cooling, 2=heating   */
+   int      motor_batt;            /*!< motor supply mV, -1=unknown          */
 } HOME_STATE_X;
 
 /**
@@ -103,6 +104,7 @@ typedef struct _TILE_LAYOUT_X
 static HOME_STATE_X g_home = {
    .reed_batt = {-1, -1, -1, -1, -1, -1},
    .lock_batt = -1,
+   .motor_batt = -1,
 };
 
 static uint32_t g_dev_last_seen[eDEV_COUNT];   /**< Tick of last device message   */
@@ -251,21 +253,21 @@ static TILE_LAYOUT_X get_layout(int n)
       layout.top_h  = 60;
       layout.reed_h = 60;
       layout.bot_h  = 60;
-      layout.mot_h  = 40;
+      layout.mot_h  = 60;
    }
    else if (n <= 4)
    {
       layout.top_h  = 54;
       layout.reed_h = 52;
       layout.bot_h  = 52;
-      layout.mot_h  = 36;
+      layout.mot_h  = 52;
    }
    else
    {
       layout.top_h  = 50;
       layout.reed_h = 44;
       layout.bot_h  = 44;
-      layout.mot_h  = 34;
+      layout.mot_h  = 50;
    }
 
    return layout;
@@ -557,6 +559,17 @@ void ui_update(void)
    {
       lv_label_set_text(g_t_motor.p_value, "HEATING");
    }
+
+      /* Battery sub-label */
+   if (g_home.motor_batt > 0)
+   {
+      (void)snprintf(buf, sizeof(buf), "BATT %d%%", g_home.motor_batt);
+      lv_label_set_text(g_t_motor.p_sub, buf);
+   }
+   else
+   {
+      lv_label_set_text(g_t_motor.p_sub, "BATT --");
+   }
    set_status(g_t_motor.p_status, g_dev_online[eDEV_MOTOR]);
 }
 
@@ -711,4 +724,9 @@ void ui_set_reed_age(uint8_t slot, uint16_t age)
    {
       g_home.reed_age[slot] = age;
    }
+}
+
+void ui_set_motor_batt(int val)
+{
+   g_home.motor_batt = val;
 }

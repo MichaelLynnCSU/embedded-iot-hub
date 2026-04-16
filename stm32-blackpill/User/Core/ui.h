@@ -164,6 +164,9 @@ void ui_set_lock_batt(int8_t val);
 /** \brief Set motor state. \param val - 0=off,1=cooling,2=heating. */
 void ui_set_motor(uint8_t val);
 
+/** \brief Set motor battery voltage mV. \param val - mV or -1 if unknown. */
+void ui_set_motor_batt(int val);
+
 /**
  * \brief  Return the current online flag for a named device.
  *

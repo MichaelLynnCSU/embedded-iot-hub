@@ -350,6 +350,7 @@ static void snapshot_reed_slots(uint8_t  *p_r_state,
  * \param age_lck      - Lock device age in seconds.
  * \param batt_pir     - PIR battery SOC percent.
  * \param batt_lck     - Lock battery SOC percent.
+ * \param batt_motor   - motor battery SOC percent.
  * \param reed_count   - Number of active reed slots.
  * \param motor_online - Motor controller online flag (0=offline, 1=online).
  * \param p_r_state    - Reed state array, size MAX_REEDS.
@@ -363,8 +364,8 @@ static void snapshot_reed_slots(uint8_t  *p_r_state,
 static void build_and_push(double temp, int motion, int lgt, int lck,
                             uint16_t age_pir, uint16_t age_lgt,
                             uint16_t age_lck, int8_t batt_pir,
-                            int8_t batt_lck, int reed_count,
-                            int motor_online,
+                            int8_t batt_lck, int8_t batt_motor,
+                            int reed_count, int motor_online,
                             const uint8_t  *p_r_state,
                             const int8_t   *p_r_batt,
                             const uint16_t *p_r_age)
@@ -417,8 +418,16 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                       "LCK:%d\n", lck);
    }
 
-   pos += snprintf(msg + pos, sizeof(msg) - pos, "MTR:%d\n", motor_online);
-
+   if (batt_motor > 0)
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "MTR:%d,%d\n", motor_online, batt_motor);
+   }
+   else
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "MTR:%d\n", motor_online);
+   }
    uart_push_msg(msg, pos);
 }
 
@@ -447,6 +456,7 @@ void *uart_push_thread(void *p_arg)
    uint16_t age_lck      = 0;    /**< lock age seconds */
    int8_t   batt_pir     = -1;   /**< PIR battery SOC */
    int8_t   batt_lck     = -1;   /**< lock battery SOC */
+   int      batt_motor   = -1;   /**< motor battery SOC */
    int      motor_online = 0;    /**< motor controller online flag */
    int      reed_count   = 0;    /**< active reed slot count */
    uint8_t  r_state[MAX_REEDS];  /**< reed state snapshot */
@@ -487,18 +497,19 @@ void *uart_push_thread(void *p_arg)
       batt_pir     = latest_data.batt_pir;
       batt_lck     = latest_data.batt_lck;
       motor_online = latest_data.motor_online;
+      batt_motor   = latest_data.batt_motor;
       pthread_mutex_unlock(&data_mutex);
 
       reed_count = 0;
       snapshot_reed_slots(r_state, r_batt, r_age, &reed_count);
 
-      LOG("[PUSH] ages pir=%u lgt=%u lck=%u | batt pir=%d%% lck=%d%% | reeds=%d motor=%d",
-          age_pir, age_lgt, age_lck, batt_pir, batt_lck, reed_count, motor_online);
+      LOG("[PUSH] ages pir=%u lgt=%u lck=%u | batt pir=%d%% lck=%d%% mtr=%d%% | reeds=%d motor=%d",
+          age_pir, age_lgt, age_lck, batt_pir, batt_lck, batt_motor, reed_count, motor_online);
 
       build_and_push(temp, motion, lgt, lck,
                      age_pir, age_lgt, age_lck,
-                     batt_pir, batt_lck, reed_count,
-                     motor_online,
+                     batt_pir, batt_lck, batt_motor,
+                     reed_count, motor_online,
                      r_state, r_batt, r_age);
    }
 
