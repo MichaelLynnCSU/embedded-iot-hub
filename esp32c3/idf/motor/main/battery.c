@@ -25,6 +25,21 @@
  *          - GPIO1 sees Vbat × 100k/300k = Vbat/3 ≈ 3000mV at 9V ✓
  *          - Well within ESP32-C3 IO limit of 3.3V and ADC max of 3.9V
  *
+ *          ADC nonlinearity correction:
+ *          - ESP32 ADC at ADC_ATTEN_DB_12 is nonlinear, especially near
+ *            full scale. Empirical calibration against a known 9V supply
+ *            showed ~18% overread (10600mV reported vs 9000mV real).
+ *          - Correction: vbat_mv = vbat_mv * ADC_CAL_NUM / ADC_CAL_DEN
+ *          - ADC_CAL_NUM = 9000  (multimeter measured)
+ *          - ADC_CAL_DEN = 10600 (ADC reported before correction)
+ *          - Retune by measuring battery with multimeter and updating
+ *            ADC_CAL_NUM to the real voltage, ADC_CAL_DEN to what the
+ *            ADC reports before correction.
+ *
+ *          Averaging:
+ *          - 16 samples taken 5ms apart (~80ms total window) to smooth
+ *            WiFi TX sag spikes on the 9V supply rail.
+ *
  *          Thresholds (9V regulated supply):
  *          - GOOD:     >= 8500mV  (well regulated)
  *          - LOW:      >= 8000mV  (supply sagging)
@@ -58,16 +73,24 @@
 
 #define BATTERY_TAG          "BATTERY"
 
-#define BAT_ADC_CHANNEL      ADC_CHANNEL_3   /**< GPIO1 -- ADC1_CH1            */
-#define BAT_SINK_PIN         GPIO_NUM_7      /**< GPIO5 -- low-side GND sink    */
+#define BAT_ADC_CHANNEL      ADC_CHANNEL_1   /**< GPIO1 -- ADC1_CH1            */
+#define BAT_SINK_PIN         GPIO_NUM_5      /**< GPIO5 -- low-side GND sink    */
 
 #define DIVIDER_RATIO_NUM    1               /**< R2 = 100k                     */
-#define DIVIDER_RATIO_DEN    3               /**< R1+R2 = 200k+100k = 300k     */
+#define DIVIDER_RATIO_DEN    3               /**< R1+R2 = 200k+100k = 300k      */
 
 #define ADC_VREF_MV          3900            /**< ADC_ATTEN_DB_12 full scale    */
 #define ADC_MAX_RAW          4095            /**< 12-bit                        */
+#define ADC_SETTLE_MS        15              /**< 5τ for 300k × 10nF = 3ms      */
+#define ADC_SAMPLES          16              /**< samples to average per read   */
+#define ADC_SAMPLE_GAP_MS    5               /**< ms between samples            */
 
-#define ADC_SETTLE_MS        500              /**< settle through 300k source    */
+/**< Empirical ADC nonlinearity correction.
+ *   Measured: 9000mV real (multimeter), 10600mV reported (ADC).
+ *   To retune: measure battery with multimeter, update CAL_NUM to real mV,
+ *   update CAL_DEN to what ADC reports before correction is applied.       */
+#define ADC_CAL_NUM          9000
+#define ADC_CAL_DEN          10600
 
 /* 9V regulated supply thresholds in mV */
 #define VBAT_GOOD_MV         8500            /**< well regulated                */
@@ -109,11 +132,10 @@ int battery_init(adc_oneshot_unit_handle_t adc_handle)
     /* Sink pin HIGH -- divider disabled, no quiescent drain */
     (void)gpio_set_direction(BAT_SINK_PIN, GPIO_MODE_OUTPUT);
     (void)gpio_set_level(BAT_SINK_PIN, 1);
-    vTaskDelay(pdMS_TO_TICKS(100));   // long settle for testing
 
-    ESP_LOGI(BATTERY_TAG,
-    "Battery init OK (9V supply, GPIO3)");
-          return 0;
+    ESP_LOGI(BATTERY_TAG, "Battery init OK (ADC1_CH1/GPIO1, sink GPIO5)");
+
+    return 0;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -121,10 +143,10 @@ int battery_init(adc_oneshot_unit_handle_t adc_handle)
 int battery_read_mv(void)
 {
     int       adc_raw    = 0;
-    int       sink_level = 0;
     int       pin_mv     = 0;
     int       vbat_mv    = 0;
     esp_err_t err        = ESP_OK;
+    uint32_t  sum        = 0;
 
     if (NULL == s_adc_handle)
     {
@@ -134,27 +156,26 @@ int battery_read_mv(void)
 
     /* Drive LOW -- GPIO5 sinks bottom of divider to GND, current flows */
     (void)gpio_set_level(BAT_SINK_PIN, 0);
-     vTaskDelay(pdMS_TO_TICKS(100));
-     int sink = gpio_get_level(BAT_SINK_PIN);
-     int adc_pin = gpio_get_level(GPIO_NUM_0);
-     ESP_LOGI(BATTERY_TAG, "sink_level=%d adc_gpio_level=%d", sink, adc_pin);
-
-    /* 10ms settle: allow ADC input cap to charge through 300k source */
     vTaskDelay(pdMS_TO_TICKS(ADC_SETTLE_MS));
 
-    /* Read sink level DURING measurement -- before driving high again */
-    sink_level = gpio_get_level(BAT_SINK_PIN);
-
-    err = adc_oneshot_read(s_adc_handle, BAT_ADC_CHANNEL, &adc_raw);
+    /* 16-sample average to smooth WiFi TX sag (~80ms window) */
+    for (int i = 0; i < ADC_SAMPLES; i++)
+    {
+        int sample = 0;
+        err = adc_oneshot_read(s_adc_handle, BAT_ADC_CHANNEL, &sample);
+        if (ESP_OK != err)
+        {
+            (void)gpio_set_level(BAT_SINK_PIN, 1);
+            ESP_LOGE(BATTERY_TAG, "ADC read failed (%d)", err);
+            return -1;
+        }
+        sum += (uint32_t)sample;
+        vTaskDelay(pdMS_TO_TICKS(ADC_SAMPLE_GAP_MS));
+    }
+    adc_raw = (int)(sum >> 4);
 
     /* Drive HIGH -- no current path, zero quiescent drain */
     (void)gpio_set_level(BAT_SINK_PIN, 1);
-
-    if (ESP_OK != err)
-    {
-        ESP_LOGE(BATTERY_TAG, "ADC read failed (%d)", err);
-        return -1;
-    }
 
     /* Convert raw to mV at ADC pin (linear approximation) */
     pin_mv = (adc_raw * ADC_VREF_MV) / ADC_MAX_RAW;
@@ -162,9 +183,10 @@ int battery_read_mv(void)
     /* Reconstruct Vbat: ADC pin sees Vbat/3, multiply back by 3 */
     vbat_mv = pin_mv * DIVIDER_RATIO_DEN / DIVIDER_RATIO_NUM;
 
-    ESP_LOGI(BATTERY_TAG,
-             "sink=%d raw=%d pin_mv=%d vbat_mv=%d",
-             sink_level, adc_raw, pin_mv, vbat_mv);
+    /* Empirical ADC nonlinearity correction (see file header for tuning) */
+    vbat_mv = (vbat_mv * ADC_CAL_NUM) / ADC_CAL_DEN;
+
+    ESP_LOGI(BATTERY_TAG, "raw=%d pin_mv=%d vbat_mv=%d", adc_raw, pin_mv, vbat_mv);
 
     return vbat_mv;
 }
