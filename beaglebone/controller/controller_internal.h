@@ -163,7 +163,7 @@ struct LatestData
    uint16_t age_lck;       /*!< lock device age in seconds */
    int8_t   batt_pir;      /*!< PIR battery SOC percent */
    int8_t   batt_lck;      /*!< lock battery SOC percent */
-   int      batt_motor;    /*!< motor battery mV */
+   int      batt_motor;    /*!< motor battery */
    struct ReedSlotData reed_slots[MAX_REEDS]; /*!< reed slot mirror */
    uint8_t  motor_online;  /*!< 1 if C3 motor controller is online */
 };

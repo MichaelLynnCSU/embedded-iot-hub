@@ -71,6 +71,9 @@
 #define TCP_STATE_CONNECTING    1         /**< socket state: connect in progress */
 #define TCP_STATE_CONNECTED     2         /**< socket state: connected */
 
+#define MOTOR_BATT_MAX_MV 9000             /**< full charge (100%) */
+#define MOTOR_BATT_MIN_MV 7500
+
 static const char *TAG = "TCP_MGR"; /**< ESP log tag */
 
 /** \brief Per-reed slot state snapshot for TCP JSON payload */
@@ -111,6 +114,15 @@ static TCP_STATE_T g_state =
    .age_lgt    = 0xFFFF,
    .age_lck    = 0xFFFF,
 };
+
+static int motor_mv_to_percent(int mv)
+{
+    if (mv <= MOTOR_BATT_MIN_MV) return 0;
+    if (mv >= MOTOR_BATT_MAX_MV) return 100;
+
+    return (mv - MOTOR_BATT_MIN_MV) * 100 /
+           (MOTOR_BATT_MAX_MV - MOTOR_BATT_MIN_MV);
+}
 
 static void drain_queues(EventBits_t bits)
 {
@@ -192,7 +204,7 @@ static void drain_queues(EventBits_t bits)
          /* Only update batt when online -- preserve last known on disconnect */
          if (p_motor.online && (p_motor.batt > 0))
          {
-            g_state.motor_batt = p_motor.batt;
+            g_state.motor_batt = motor_mv_to_percent(p_motor.batt);
          }
       }
    }
@@ -404,8 +416,8 @@ static void build_and_send(int *p_bb_sock,
                p_batt = cJSON_GetObjectItem(p_rx_json, "batt_motor");
                if ((NULL != p_batt) && (p_batt->valueint > 0))
                {
-                  g_state.motor_batt = p_batt->valueint;
-                  ESP_LOGI(TAG, "[C3_MOTOR] batt_motor=%d mV", g_state.motor_batt);
+                  g_state.motor_batt = motor_mv_to_percent(p_batt->valueint);
+                  ESP_LOGI(TAG, "[C3_MOTOR] batt_motor=%d%%", g_state.motor_batt);
                }
                cJSON_Delete(p_rx_json);
             }
@@ -424,7 +436,7 @@ static void build_and_send(int *p_bb_sock,
       else
       {
          *p_bb_block_count = 0;
-         ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u lgt=%d lck=%d reeds=%d mtr=%d batt_mtr=%d",
+         ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u lgt=%d lck=%d reeds=%d mtr=%d batt_mtr=%d%%",
                   g_state.avg_temp,
                   (unsigned)g_state.motion_count,
                   g_state.light_state,
@@ -679,7 +691,7 @@ void tcp_manager_task(EventGroupHandle_t p_system_eg,
             g_state.motor_online = p_m.online;
             if (p_m.online && (p_m.batt > 0))
             {
-               g_state.motor_batt = p_m.batt;
+               g_state.motor_batt = motor_mv_to_percent(p_m.batt);
             }
          }
       }

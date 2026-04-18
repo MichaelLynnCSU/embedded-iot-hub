@@ -81,7 +81,7 @@ struct SharedSensorData
    int    current_motion;    /*!< latest PIR motion event count */
    int    current_light;     /*!< latest smart light relay state */
    int    current_lock;      /*!< latest smart lock state */
-   int    batt_motor;        /*!< motor battery voltage in mV, -1=unknown */
+   int    batt_motor;        /*!< motor battery percentage (0–100), -1=unknown */
    long   current_timestamp; /*!< Unix timestamp of latest reading */
    int    data_valid;        /*!< 1 if at least one reading has been received */
 

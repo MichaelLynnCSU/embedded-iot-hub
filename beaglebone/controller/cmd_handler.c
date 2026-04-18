@@ -305,7 +305,7 @@ static void process_sensor_frame(const struct SensorData *p_data)
    pthread_mutex_unlock(&data_mutex);
 
    LOG("Sensor: temp=%.1f motion=%d ages pir=%d lgt=%d lck=%d "
-       "batt pir=%d%% lck=%d%% motor=%d mV mtr=%d",
+       "batt pir=%d%% lck=%d%% motor=%d%% mtr=%d",
        p_data->avg_temp,
        p_data->motion_count,
        p_data->age_pir,

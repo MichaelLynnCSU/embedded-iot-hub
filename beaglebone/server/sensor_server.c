@@ -604,7 +604,7 @@ static void process_json(const char *p_json_body)
    if (json_object_object_get_ex(p_root, "batt_motor", &p_obj))
    {
       data.batt_motor = json_object_get_int(p_obj);
-      log_msg("batt_motor=%d mV", data.batt_motor);
+      log_msg("batt_motor=%d%%", data.batt_motor);
    }
 
    if (json_object_object_get_ex(p_root, "reeds", &p_obj))
