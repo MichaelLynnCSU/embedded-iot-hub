@@ -1,3 +1,4 @@
+
 /* USER CODE BEGIN Header */
 /******************************************************************************
  * \file main.c
@@ -38,9 +39,9 @@
 /** \brief Shared sensor data buffer — written by sensor tasks, read by default task */
 typedef struct
 {
-   uint8_t temp[3];  /*!< temperature readings from sensors 1-3 */
-   uint8_t hum[3];   /*!< humidity readings from sensors 1-3 */
-   uint8_t valid[3]; /*!< 1 if reading is valid, 0 if not yet read */
+   uint8_t temp[4];  /*!< temperature readings from sensors 1-3 */
+   uint8_t hum[4];   /*!< humidity readings from sensors 1-3 */
+   uint8_t valid[4]; /*!< 1 if reading is valid, 0 if not yet read */
 } SENSOR1_DATA_T;
 
 /* USER CODE END PTD */
@@ -50,7 +51,8 @@ typedef struct
 #define SENSOR1_ID          1     /**< FRAM log ID for sensor 1 */
 #define SENSOR2_ID          2     /**< FRAM log ID for sensor 2 */
 #define SENSOR3_ID          3     /**< FRAM log ID for sensor 3 */
-#define SENSOR_COUNT        3     /**< number of DHT11 sensors */
+#define SENSOR4_ID          4
+#define SENSOR_COUNT        4     /**< number of DHT11 sensors */
 #define JSON_BUF_SIZE       64    /**< JSON message buffer size bytes */
 #define MSG_BUF_SIZE        80    /**< UART message buffer size bytes */
 #define I2C_SCAN_START      0x50  /**< I2C scan start address */
@@ -77,6 +79,8 @@ osThreadId defaultTaskHandle;
 osThreadId myTask02Handle;
 osThreadId myTask03Handle;
 osThreadId myTask04Handle;
+osThreadId myTask05Handle;
+
 /* USER CODE BEGIN PV */
 osMutexId g_dht11_mutex;   /**< mutex protecting DHT11 bus access */
 osMutexId g_fram_mutex;    /**< mutex protecting FRAM I2C access */
@@ -95,6 +99,7 @@ void StartDefaultTask(void const * argument);
 void StartTask02(void const * argument);
 void StartTask03(void const * argument);
 void StartTask04(void const * argument);
+void StartTask05(void const * argument);
 
 /* USER CODE BEGIN PFP */
 void uart_print(const char *p_msg);
@@ -202,9 +207,9 @@ int main(void)
       RCC->CSR     |= RCC_CSR_RMVF;
 
       FRAM_Init(&hi2c1);
-      trinity_log_init_ex(reset_reason);
+      trinity_log_init();
       crash_log_dump_previous();
-      trinity_log_init_ex(reset_reason);
+      trinity_log_init();
       DHT11_Init();
 
       for (addr = I2C_SCAN_START; addr < I2C_SCAN_END; addr++)
@@ -262,6 +267,9 @@ int main(void)
   /* definition and creation of myTask04 */
   osThreadDef(myTask04, StartTask04, osPriorityIdle, 0, 384);
   myTask04Handle = osThreadCreate(osThread(myTask04), NULL);
+
+  osThreadDef(myTask05, StartTask05, osPriorityIdle, 0, 384);
+  myTask05Handle = osThreadCreate(osThread(myTask05), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -436,10 +444,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7, GPIO_PIN_SET);
 
   /*Configure GPIO pins : PA4 PA5 PA6 */
-  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6;
+  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -530,7 +538,11 @@ void StartTask02(void const * argument)
 
    for (;;)
    {
-      ok = DHT11_ReadData(GPIO_PIN_4, &temp, &hum);
+      if (osOK == osMutexWait(g_dht11_mutex, osWaitForever))
+      {
+         ok = DHT11_ReadData(GPIO_PIN_4, &temp, &hum);
+         osMutexRelease(g_dht11_mutex);
+      }
 
       if (ok)
       {
@@ -579,12 +591,20 @@ void StartTask03(void const * argument)
    uart_print("\r\n=== SENSOR 2 TASK STARTED (PA5) ===\r\n");
 
    osDelay(SENSOR_WARMUP_MS);
-   (void)DHT11_ReadData(GPIO_PIN_5, &temp, &hum);
+   if (osOK == osMutexWait(g_dht11_mutex, osWaitForever))
+   {
+      (void)DHT11_ReadData(GPIO_PIN_5, &temp, &hum);
+      osMutexRelease(g_dht11_mutex);
+   }
    osDelay(SENSOR_WARMUP_MS);
 
    for (;;)
    {
-      ok = DHT11_ReadData(GPIO_PIN_5, &temp, &hum);
+      if (osOK == osMutexWait(g_dht11_mutex, osWaitForever))
+      {
+         ok = DHT11_ReadData(GPIO_PIN_5, &temp, &hum);
+         osMutexRelease(g_dht11_mutex);
+      }
 
       if (ok)
       {
@@ -633,12 +653,20 @@ void StartTask04(void const * argument)
    uart_print("\r\n=== SENSOR 3 TASK STARTED (PA6) ===\r\n");
 
    osDelay(SENSOR_WARMUP_MS);
-   (void)DHT11_ReadData(GPIO_PIN_6, &temp, &hum);
+   if (osOK == osMutexWait(g_dht11_mutex, osWaitForever))
+   {
+      (void)DHT11_ReadData(GPIO_PIN_6, &temp, &hum);
+      osMutexRelease(g_dht11_mutex);
+   }
    osDelay(SENSOR_WARMUP_MS);
 
    for (;;)
    {
-      ok = DHT11_ReadData(GPIO_PIN_6, &temp, &hum);
+      if (osOK == osMutexWait(g_dht11_mutex, osWaitForever))
+      {
+         ok = DHT11_ReadData(GPIO_PIN_6, &temp, &hum);
+         osMutexRelease(g_dht11_mutex);
+      }
 
       if (ok)
       {
@@ -667,6 +695,60 @@ void StartTask04(void const * argument)
       osDelay(SENSOR_TASK_DELAY);
    }
   /* USER CODE END StartTask04 */
+}
+
+void StartTask05(void const * argument)
+{
+    uint8_t temp = 0;
+    uint8_t hum  = 0;
+    uint8_t ok   = 0;
+    char    msg[MSG_BUF_SIZE] = {0};
+
+    (void)argument;
+
+    uart_print("\r\n=== SENSOR 4 TASK STARTED (PA7 - ATtiny85) ===\r\n");
+    osDelay(SENSOR_WARMUP_MS);
+    if (osOK == osMutexWait(g_dht11_mutex, osWaitForever))
+    {
+       ok = DHT11_ReadData(GPIO_PIN_7, &temp, &hum);
+       osMutexRelease(g_dht11_mutex);
+    }
+    osDelay(SENSOR_WARMUP_MS);
+
+    for (;;)
+    {
+       if (osOK == osMutexWait(g_dht11_mutex, osWaitForever))
+       {
+          ok = DHT11_ReadData(GPIO_PIN_7, &temp, &hum);
+          osMutexRelease(g_dht11_mutex);
+       }
+
+        if (ok)
+        {
+            (void)snprintf(msg, sizeof(msg),
+                           "[S4-ATtiny] Temp=%dC Hum=%d%%\r\n", temp, hum);
+            uart_print(msg);
+
+            if (osOK == osMutexWait(g_sensor1_mutex, osWaitForever))
+            {
+                g_sensor1_data.temp[3]  = temp;
+                g_sensor1_data.hum[3]   = hum;
+                g_sensor1_data.valid[3] = 1;
+                (void)osMutexRelease(g_sensor1_mutex);
+            }
+
+            (void)osMutexWait(g_fram_mutex, osWaitForever);
+            FRAM_LogTemp(SENSOR4_ID, temp, hum);
+            (void)osMutexRelease(g_fram_mutex);
+        }
+        else
+        {
+            uart_print("[S4-ATtiny] FAILED\r\n");
+            crash_log_event("EVENT: DHT11_FAIL | SENSOR=4\n");
+        }
+
+        osDelay(SENSOR_TASK_DELAY);
+    }
 }
 
 /**
