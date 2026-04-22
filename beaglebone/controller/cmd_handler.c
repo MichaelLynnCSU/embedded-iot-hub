@@ -220,7 +220,13 @@ static void process_reed_slots(const struct SensorData *p_data)
          check_reed_online_state(i, was_offline, now_offline);
       }
 
-      latest_data.reed_slots[i] = p_data->reed_slots[i];
+      /* Phantom widget fix (2026-04-21): only overwrite when active.
+       * Unconditional overwrite was clearing active=0 on slots missing
+       * from one JSON frame, dropping reed_count and hiding the widget. */
+      if (p_data->reed_slots[i].active)
+      {
+         latest_data.reed_slots[i] = p_data->reed_slots[i];
+      }
    }
 
    for (i = 0; i < MAX_REEDS; i++)

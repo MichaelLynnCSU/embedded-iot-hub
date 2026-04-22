@@ -25,8 +25,19 @@
  *          Protected by g_client_sock_valid flag -- motor_task only sends
  *          when a client is connected.
  *
- *          Divider: Vbat (5V) → GPIO5 (enable) → 100k → 100k → ┬ → GPIO1 (ADC1_CH1)
- *                                                               └ → 100k → GND
+ *          Divider: Vbat (9V) → 100k → 100k → ┬ → GPIO1 (ADC1_CH1)
+ *                                              └ → 100k → GND (always)
+ *          Bottom resistor is permanently tied to GND rail -- no switching
+ *          GPIO. Quiescent draw is ~27uA, negligible vs WiFi and MCU load.
+ *          See battery.c for full design rationale.
+ *
+ *          WiFi TX burst sag rejection:
+ *          WiFi TX pulls 100-300mA causing real transient voltage sag on the
+ *          9V rail. Readings more than BATT_SAG_REJECT_MV (200mV) below the
+ *          last accepted value are discarded and not sent to the hub. A real
+ *          battery cannot decline 200mV in 30 seconds under this load so the
+ *          threshold safely separates sag artifacts from genuine discharge.
+ *          Rejected readings are logged as warnings for visibility.
  ******************************************************************************/
 
 #include <string.h>
@@ -89,6 +100,10 @@
 #define ACCEPT_TIMEOUT_SEC   2       /**< accept() wakeup interval for WDT kicks */
 #define BATT_INTERVAL_MS     30000u  /**< battery read and report interval */
 #define BATT_JSON_BUF_SIZE   48      /**< {"batt_motor": 5000} + null */
+#define BATT_SAG_REJECT_MV   200     /**< reject readings more than 200mV below
+                                      *   last good value -- WiFi TX burst sag.
+                                      *   Real battery decline between 30s reads
+                                      *   will never exceed this threshold.      */
 
 static const char *TAG = "MOTOR_CTRL";
 
@@ -107,6 +122,12 @@ static uint16_t g_knob_adc = 0;
  * Read by motor_task -- send() is safe from multiple tasks on lwIP. */
 static volatile int  g_client_sock       = -1;
 static volatile bool g_client_sock_valid = false;
+
+/* Last accepted battery reading in mV. Used to detect and reject WiFi TX
+ * burst sag artifacts. A reading more than BATT_SAG_REJECT_MV below this
+ * value is discarded and not sent to the hub. Initialised to 0 (no reading
+ * yet) -- first reading is always accepted regardless of value.           */
+static int g_batt_last_good_mv = 0;
 
 static void wifi_event_handler(void *p_arg,
                                 esp_event_base_t base,
@@ -483,16 +504,32 @@ static void motor_task(void *p_arg)
          batt_mv = battery_read_mv();
          if (0 < batt_mv)
          {
-            ESP_LOGI(TAG, "[BATT] %d mV", batt_mv);
-
-            /* Send battery reading back to hub as JSON if connected */
-            if (g_client_sock_valid)
+            /* Reject WiFi TX burst sag artifacts. WiFi TX pulls 100-300mA
+             * causing real but transient voltage sag on the 9V rail. A
+             * genuine battery cannot drop more than BATT_SAG_REJECT_MV in
+             * 30 seconds under this load -- any reading that does is a sag
+             * artifact and is discarded. First reading (last_good == 0) is
+             * always accepted to establish the baseline.                   */
+            if ((g_batt_last_good_mv > 0) &&
+                (batt_mv < (g_batt_last_good_mv - BATT_SAG_REJECT_MV)))
             {
-               sock = g_client_sock;
-               (void)snprintf(batt_json, sizeof(batt_json),
-                              "{\"batt_motor\":%d}", batt_mv);
-               (void)send(sock, batt_json, strlen(batt_json), 0);
-               ESP_LOGI(TAG, "[BATT] Sent to hub: %s", batt_json);
+               ESP_LOGW(TAG, "[BATT] Rejected sag reading %d mV (last good %d mV)",
+                        batt_mv, g_batt_last_good_mv);
+            }
+            else
+            {
+               g_batt_last_good_mv = batt_mv;
+               ESP_LOGI(TAG, "[BATT] %d mV", batt_mv);
+
+               /* Send battery reading back to hub as JSON if connected */
+               if (g_client_sock_valid)
+               {
+                  sock = g_client_sock;
+                  (void)snprintf(batt_json, sizeof(batt_json),
+                                 "{\"batt_motor\":%d}", batt_mv);
+                  (void)send(sock, batt_json, strlen(batt_json), 0);
+                  ESP_LOGI(TAG, "[BATT] Sent to hub: %s", batt_json);
+               }
             }
          }
          else

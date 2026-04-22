@@ -5,25 +5,32 @@
  *
  * \brief   Battery voltage measurement for ESP32-C3 motor controller node.
  *
- * \details Reads 9V supply voltage via ADC through a switched resistor
- *          divider. GPIO5 sinks the bottom of the divider to GND to enable
- *          measurement, eliminating quiescent drain during idle periods.
+ * \details Reads 9V supply voltage via ADC through a fixed resistor divider.
+ *          The bottom of the divider is permanently tied to GND rail --
+ *          no switching GPIO is used. Quiescent current through the 300k
+ *          total divider resistance is ~27uA, negligible compared to WiFi
+ *          and MCU draw.
  *
  *          Hardware:
  *          - ADC: ADC_UNIT_1, ADC_CHANNEL_1 (GPIO1)
  *          - Divider: Vbat (9V) → 100k → 100k → ┬ → GPIO1 (ADC1_CH1)
- *                                                 └ → 100k → GPIO5 (LOW=GND)
+ *                                                 └ → 100k → GND (always)
  *          - R1 = 200k (two 100k in series), R2 = 100k
  *          - Ratio: R2/(R1+R2) = 100k/300k = 1/3
  *          - Reconstruct: adc_pin_mV × 3 = Vbat_mV
  *          - ADC: 12-bit, ADC_ATTEN_DB_12 (0–3.9V input range)
  *          - 9V fresh → ADC pin ~3000mV → within 3.9V max ✓
- *          - GPIO5: drive LOW to enable (GND sink), drive HIGH to disable
  *
- *          GPIO5 voltage when enabled:
- *          - GPIO5 is driven to 0V (GND sink) -- no overvoltage risk
- *          - GPIO1 sees Vbat × 100k/300k = Vbat/3 ≈ 3000mV at 9V ✓
- *          - Well within ESP32-C3 IO limit of 3.3V and ADC max of 3.9V
+ *          Why always-connected (no GPIO sink):
+ *          - A floating ADC node has no DC reference and acts as an antenna
+ *          - Leakage paths (ESD diodes, PCB contamination, capacitive
+ *            coupling) dominate a fully isolated node producing random reads
+ *          - With the bottom resistor always tied to GND the node is always
+ *            defined: ADC pin sits at Vbat/3 at all times, readable anytime
+ *          - 27uA quiescent draw is irrelevant vs WiFi (~100mA TX bursts)
+ *            and MCU idle current (~5mA)
+ *          - No boot-state risk: GPIO defaults are irrelevant, divider is
+ *            always biased correctly from power-on
  *
  *          ADC nonlinearity correction:
  *          - ESP32 ADC at ADC_ATTEN_DB_12 is nonlinear, especially near
@@ -37,8 +44,12 @@
  *            ADC reports before correction.
  *
  *          Averaging:
- *          - 16 samples taken 5ms apart (~80ms total window) to smooth
- *            WiFi TX sag spikes on the 9V supply rail.
+ *          - 64 samples taken as fast as possible (~1-2ms total burst)
+ *            rather than spread across a long window. A wide sample window
+ *            (e.g. 16 samples × 5ms = 80ms) catches multiple WiFi TX
+ *            bursts which genuinely sag the 9V rail, producing wild swings.
+ *            A fast burst captures one consistent rail state and averages
+ *            out ADC quantisation noise without spanning a TX event.
  *
  *          Thresholds (9V regulated supply):
  *          - GOOD:     >= 8500mV  (well regulated)
@@ -46,27 +57,27 @@
  *          - CRITICAL: >= 7500mV  (brownout risk)
  *          - DEAD:      < 7500mV  (unreliable operation)
  *
- * \note    Why low-side GPIO sink instead of high-side:
- *          Previous design wired GPIO5 into the high-voltage side of the
- *          divider (Vbat → GPIO5 → resistors → GPIO1). With a 9V supply
- *          this applied 9V to an IO pin rated for 3.3V max. The ESD diodes
- *          clamped into the 3.3V rail, damaging the onboard regulator and
- *          permanently disabling USB on two ESP32-C3 boards.
- *          Fix: GPIO5 now sinks the bottom of R2 to GND (low-side switch).
- *          When enabled GPIO5 is at 0V -- safe regardless of supply voltage.
- *
  * \note    ADC channel conflict:
  *          ADC1_CH0 (GPIO0) is already used for the motor speed knob.
  *          Battery uses ADC1_CH1 (GPIO1) to avoid conflict. Both channels
  *          share the same adc_oneshot unit handle (g_adc1_handle) initialised
  *          in motor_control.c -- battery_init() only configures the
  *          additional channel, it does not create a new unit.
+ *
+ * \note    Previous design (now removed):
+ *          GPIO5 was used to sink the bottom of the divider to GND to
+ *          eliminate quiescent drain. This caused a floating ADC node
+ *          whenever GPIO5 was HIGH (disabled), pulling the ADC pin toward
+ *          the 9V rail through the top resistors. ESD diodes clamped the
+ *          pin to ~3.6V and dumped excess current into the 3.3V rail.
+ *          Two ESP32-C3 boards had their onboard regulators damaged and
+ *          USB permanently disabled as a result. Always-connected bottom
+ *          resistor eliminates this failure mode entirely.
  ******************************************************************************/
 
 #include "battery.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
 #include "trinity_log.h"
@@ -74,16 +85,14 @@
 #define BATTERY_TAG          "BATTERY"
 
 #define BAT_ADC_CHANNEL      ADC_CHANNEL_1   /**< GPIO1 -- ADC1_CH1            */
-#define BAT_SINK_PIN         GPIO_NUM_5      /**< GPIO5 -- low-side GND sink    */
 
 #define DIVIDER_RATIO_NUM    1               /**< R2 = 100k                     */
 #define DIVIDER_RATIO_DEN    3               /**< R1+R2 = 200k+100k = 300k      */
 
 #define ADC_VREF_MV          3900            /**< ADC_ATTEN_DB_12 full scale    */
 #define ADC_MAX_RAW          4095            /**< 12-bit                        */
-#define ADC_SETTLE_MS        15              /**< 5τ for 300k × 10nF = 3ms      */
-#define ADC_SAMPLES          16              /**< samples to average per read   */
-#define ADC_SAMPLE_GAP_MS    5               /**< ms between samples            */
+#define ADC_SAMPLES          64             /**< fast burst -- no inter-sample  */
+                                            /**< delay, captures one rail state */
 
 /**< Empirical ADC nonlinearity correction.
  *   Measured: 9000mV real (multimeter), 10600mV reported (ADC).
@@ -129,11 +138,7 @@ int battery_init(adc_oneshot_unit_handle_t adc_handle)
         return -1;
     }
 
-    /* Sink pin HIGH -- divider disabled, no quiescent drain */
-    (void)gpio_set_direction(BAT_SINK_PIN, GPIO_MODE_OUTPUT);
-    (void)gpio_set_level(BAT_SINK_PIN, 1);
-
-    ESP_LOGI(BATTERY_TAG, "Battery init OK (ADC1_CH1/GPIO1, sink GPIO5)");
+    ESP_LOGI(BATTERY_TAG, "Battery init OK (ADC1_CH1/GPIO1, always-on divider)");
 
     return 0;
 }
@@ -154,28 +159,23 @@ int battery_read_mv(void)
         return -1;
     }
 
-    /* Drive LOW -- GPIO5 sinks bottom of divider to GND, current flows */
-    (void)gpio_set_level(BAT_SINK_PIN, 0);
-    vTaskDelay(pdMS_TO_TICKS(ADC_SETTLE_MS));
-
-    /* 16-sample average to smooth WiFi TX sag (~80ms window) */
+    /* Fast burst: 64 samples with no delay between them (~1-2ms total).
+     * Captures one consistent rail state rather than spanning multiple
+     * WiFi TX bursts which sag the 9V supply and cause wild swings.     */
     for (int i = 0; i < ADC_SAMPLES; i++)
     {
         int sample = 0;
         err = adc_oneshot_read(s_adc_handle, BAT_ADC_CHANNEL, &sample);
         if (ESP_OK != err)
         {
-            (void)gpio_set_level(BAT_SINK_PIN, 1);
             ESP_LOGE(BATTERY_TAG, "ADC read failed (%d)", err);
             return -1;
         }
         sum += (uint32_t)sample;
-        vTaskDelay(pdMS_TO_TICKS(ADC_SAMPLE_GAP_MS));
     }
-    adc_raw = (int)(sum >> 4);
 
-    /* Drive HIGH -- no current path, zero quiescent drain */
-    (void)gpio_set_level(BAT_SINK_PIN, 1);
+    /* Divide by 64 using shift for efficiency */
+    adc_raw = (int)(sum >> 6);
 
     /* Convert raw to mV at ADC pin (linear approximation) */
     pin_mv = (adc_raw * ADC_VREF_MV) / ADC_MAX_RAW;

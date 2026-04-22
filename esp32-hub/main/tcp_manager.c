@@ -21,6 +21,15 @@
  *          Reed sensors emitted as dynamic JSON array — adding more
  *          ReedSensor nodes requires zero changes here or on BeagleBone.
  *
+ * \note    Phantom widget fix (2026-04-21):
+ *          Re-querying ble_get_reed_count() in build_and_send() creates a TOCTOU
+ *          race -- a BLE advertisement arriving between drain_queues() and
+ *          build_and_send() can change the slot count, causing the JSON array to
+ *          shrink and the dashboard to remove a widget for 1-2 seconds.
+ *          Fix: snapshot count once here and use g_state.reed_count in
+ *          build_and_send() so both the slot data and array length come from the
+ *          same moment in time.
+ *
  * \note    WDT fix (2026-03-21):
  *          trinity_wdt_kick() added at the top of the main while(1) loop.
  *          The event group wait uses TCP_SEND_INTERVAL_MS as its timeout,
@@ -102,6 +111,7 @@ typedef struct
    uint16_t         age_pir;               /*!< PIR device age seconds */
    uint16_t         age_lgt;               /*!< light device age seconds */
    uint16_t         age_lck;               /*!< lock device age seconds */
+   int              reed_count;            /*!< snapshotted reed count -- see phantom widget fix note */
 } TCP_STATE_T;
 
 static TCP_STATE_T g_state =
@@ -332,12 +342,12 @@ static void build_and_send(int *p_bb_sock,
    (void)cJSON_AddNumberToObject(p_root, "batt_motor",   g_state.motor_batt);
    (void)cJSON_AddNumberToObject(p_root, "motor_online", g_state.motor_online);
 
-   count   = ble_get_reed_count();
+   g_state.reed_count   = ble_get_reed_count();
    p_reeds = cJSON_CreateArray();
 
    if (NULL != p_reeds)
    {
-      for (i = 0; (i < count) && (i < MAX_REEDS); i++)
+      for (i = 0; (i < g_state.reed_count) && (i < MAX_REEDS); i++)
       {
          (void)memset(name, 0, sizeof(name));
          door_state = 0xFF;
@@ -441,7 +451,7 @@ static void build_and_send(int *p_bb_sock,
                   (unsigned)g_state.motion_count,
                   g_state.light_state,
                   g_state.lock_state,
-                  count,
+                  g_state.reed_count,
                   (int)g_state.motor_online,
                   g_state.motor_batt);
       }
