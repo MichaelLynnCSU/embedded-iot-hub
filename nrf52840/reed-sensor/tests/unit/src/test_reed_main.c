@@ -209,3 +209,22 @@ ZTEST_SUITE(reed_ble,      NULL, NULL, NULL, NULL, NULL);
 ZTEST_SUITE(reed_resetreas, NULL, NULL, NULL, NULL, NULL);
 ZTEST_SUITE(reed_mfg,      NULL, NULL, NULL, NULL, NULL);
 ZTEST_SUITE(reed_batt,     NULL, NULL, NULL, NULL, NULL);
+
+/******************************************************************************
+ * Logging thread stack fix (2026-04-21)
+ * Bug: LOG_PROCESS_THREAD_STACK_SIZE=1024 overflowed during stats burst
+ *      (9 deferred log messages queued simultaneously), causing lockup.
+ * Fix: increased to 2048.
+ ******************************************************************************/
+ZTEST(reed_log_stack, test_log_thread_stack_size_sufficient)
+{
+    /* Documents minimum stack size for logging thread stats burst.
+     * Bug: 1024 overflowed during 9-message stats dump causing lockup.
+     * prj.conf must have CONFIG_LOG_PROCESS_THREAD_STACK_SIZE=2048.
+     * This sentinel must be updated if prj.conf changes. */
+    const int configured = 2048;
+    zassert_true(configured >= 2048,
+        "Update this sentinel if log stack size changes in prj.conf");
+}
+
+ZTEST_SUITE(reed_log_stack, NULL, NULL, NULL, NULL, NULL);

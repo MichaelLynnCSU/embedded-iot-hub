@@ -95,4 +95,13 @@ static inline bool logic_cmd_known(int cmd)
     return (cmd >= CMD_GET_LATEST) && (cmd <= CMD_GET_DEVICE_STATUS);
 }
 
+/* ---- Pure logic: should reed slot be updated from incoming frame ---- */
+/* Phantom widget fix (2026-04-21):
+ * Only overwrite latest slot data when incoming frame has active=1.
+ * Preserves previous state when a slot is missing from one JSON frame. */
+static inline bool logic_reed_slot_should_update(uint8_t incoming_active)
+{
+    return incoming_active != 0;
+}
+
 #endif /* CONTROLLER_LOGIC_H */

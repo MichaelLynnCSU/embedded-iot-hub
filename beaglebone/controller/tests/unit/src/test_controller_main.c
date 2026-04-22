@@ -243,47 +243,97 @@ void test_alert_msg_size(void)
     CU_ASSERT_EQUAL(ALERT_MSG_SIZE, 64);
 }
 
+/******************************************************************************
+ * Phantom widget fix (2026-04-21)
+ * Bug: process_reed_slots() unconditionally overwrote latest_data with
+ *      incoming frame data, even when active=0. A slot missing from one
+ *      JSON frame cleared active=0, dropped reed_count, hid the widget
+ *      for 1-2 seconds.
+ * Fix: only overwrite when incoming slot has active=1.
+ ******************************************************************************/
+void test_reed_slot_update_when_active(void)
+{
+    CU_ASSERT_TRUE(logic_reed_slot_should_update(1));
+}
+
+void test_reed_slot_no_update_when_inactive(void)
+{
+    CU_ASSERT_FALSE(logic_reed_slot_should_update(0));
+}
+
+void test_reed_slot_no_update_preserves_previous(void)
+{
+    /* Slot was active, incoming frame has active=0 -- must preserve. */
+    uint8_t current_active  = 1;
+    uint8_t incoming_active = 0;
+
+    if (logic_reed_slot_should_update(incoming_active))
+    {
+        current_active = incoming_active;
+    }
+
+    CU_ASSERT_EQUAL(current_active, 1);
+}
+
+void test_reed_slot_update_overwrites_when_active(void)
+{
+    /* Incoming frame has active=1 -- slot must be updated. */
+    uint8_t current_active  = 0;
+    uint8_t incoming_active = 1;
+
+    if (logic_reed_slot_should_update(incoming_active))
+    {
+        current_active = incoming_active;
+    }
+
+    CU_ASSERT_EQUAL(current_active, 1);
+}
+
+/******************************************************************************
+ * main
+ ******************************************************************************/
 int main(void)
 {
-    CU_pSuite hb_suite       = NULL;
-    CU_pSuite state_suite    = NULL;
-    CU_pSuite dev_suite      = NULL;
-    CU_pSuite reed_suite     = NULL;
-    CU_pSuite alert_suite    = NULL;
-    CU_pSuite history_suite  = NULL;
-    CU_pSuite batt_suite     = NULL;
-    CU_pSuite cmd_suite      = NULL;
-    CU_pSuite const_suite    = NULL;
+    CU_pSuite hb_suite      = NULL;
+    CU_pSuite state_suite   = NULL;
+    CU_pSuite dev_suite     = NULL;
+    CU_pSuite reed_suite    = NULL;
+    CU_pSuite alert_suite   = NULL;
+    CU_pSuite history_suite = NULL;
+    CU_pSuite batt_suite    = NULL;
+    CU_pSuite cmd_suite     = NULL;
+    CU_pSuite const_suite   = NULL;
+    CU_pSuite phantom_suite = NULL;
 
     if (CUE_SUCCESS != CU_initialize_registry()) { return CU_get_error(); }
 
     hb_suite = CU_add_suite("heartbeat_online", NULL, NULL);
-    CU_add_test(hb_suite, "never_seen",           test_hb_never_seen_is_offline);
-    CU_add_test(hb_suite, "recent",               test_hb_recent_is_online);
-    CU_add_test(hb_suite, "at_timeout",           test_hb_at_timeout_is_offline);
-    CU_add_test(hb_suite, "just_before_timeout",  test_hb_just_before_timeout_is_online);
-    CU_add_test(hb_suite, "long_ago",             test_hb_long_ago_is_offline);
-    CU_add_test(hb_suite, "timeout_value",        test_hb_timeout_value);
+    CU_add_test(hb_suite, "never_seen",          test_hb_never_seen_is_offline);
+    CU_add_test(hb_suite, "recent",              test_hb_recent_is_online);
+    CU_add_test(hb_suite, "at_timeout",          test_hb_at_timeout_is_offline);
+    CU_add_test(hb_suite, "just_before_timeout", test_hb_just_before_timeout_is_online);
+    CU_add_test(hb_suite, "long_ago",            test_hb_long_ago_is_offline);
+    CU_add_test(hb_suite, "timeout_value",       test_hb_timeout_value);
 
     state_suite = CU_add_suite("heartbeat_state_change", NULL, NULL);
-    CU_add_test(state_suite, "offline_to_online",  test_hb_state_changed_offline_to_online);
-    CU_add_test(state_suite, "online_to_offline",  test_hb_state_changed_online_to_offline);
-    CU_add_test(state_suite, "unchanged_online",   test_hb_state_unchanged_online);
-    CU_add_test(state_suite, "unchanged_offline",  test_hb_state_unchanged_offline);
+    CU_add_test(state_suite, "offline_to_online", test_hb_state_changed_offline_to_online);
+    CU_add_test(state_suite, "online_to_offline", test_hb_state_changed_online_to_offline);
+    CU_add_test(state_suite, "unchanged_online",  test_hb_state_unchanged_online);
+    CU_add_test(state_suite, "unchanged_offline", test_hb_state_unchanged_offline);
 
     dev_suite = CU_add_suite("device_index", NULL, NULL);
-    CU_add_test(dev_suite, "valid_pir",       test_dev_idx_valid_pir);
-    CU_add_test(dev_suite, "valid_motor",     test_dev_idx_valid_motor);
-    CU_add_test(dev_suite, "invalid_neg",     test_dev_idx_invalid_neg);
-    CU_add_test(dev_suite, "invalid_count",   test_dev_idx_invalid_dev_count);
-    CU_add_test(dev_suite, "dev_count_value", test_dev_count_value);
+    CU_add_test(dev_suite, "valid_pir",      test_dev_idx_valid_pir);
+    CU_add_test(dev_suite, "valid_motor",    test_dev_idx_valid_motor);
+    CU_add_test(dev_suite, "invalid_neg",    test_dev_idx_invalid_neg);
+    CU_add_test(dev_suite, "invalid_count",  test_dev_idx_invalid_dev_count);
+    CU_add_test(dev_suite, "dev_count",      test_dev_count_value);
 
     reed_suite = CU_add_suite("reed_slots", NULL, NULL);
-    CU_add_test(reed_suite, "valid_0",       test_reed_slot_valid_0);
-    CU_add_test(reed_suite, "valid_5",       test_reed_slot_valid_5);
-    CU_add_test(reed_suite, "invalid_neg",   test_reed_slot_invalid_neg);
-    CU_add_test(reed_suite, "invalid_6",     test_reed_slot_invalid_6);
-    CU_add_test(reed_suite, "max_reeds",     test_max_reeds_value);
+    CU_add_test(reed_suite, "valid_0",     test_reed_slot_valid_0);
+    CU_add_test(reed_suite, "valid_5",     test_reed_slot_valid_5);
+    CU_add_test(reed_suite, "invalid_neg", test_reed_slot_invalid_neg);
+    CU_add_test(reed_suite, "invalid_6",   test_reed_slot_invalid_6);
+    CU_add_test(reed_suite, "max_reeds",   test_max_reeds_value);
 
     alert_suite = CU_add_suite("alert_severity", NULL, NULL);
     CU_add_test(alert_suite, "low",     test_severity_low);
@@ -293,16 +343,16 @@ int main(void)
     CU_add_test(alert_suite, "values",  test_severity_values);
 
     history_suite = CU_add_suite("history_ring", NULL, NULL);
-    CU_add_test(history_suite, "zero",            test_history_idx_zero);
-    CU_add_test(history_suite, "wraps",           test_history_idx_wraps);
-    CU_add_test(history_suite, "mid",             test_history_idx_mid);
-    CU_add_test(history_suite, "just_before_wrap",test_history_idx_just_before_wrap);
-    CU_add_test(history_suite, "buf_size",        test_history_buf_size);
+    CU_add_test(history_suite, "zero",             test_history_idx_zero);
+    CU_add_test(history_suite, "wraps",            test_history_idx_wraps);
+    CU_add_test(history_suite, "mid",              test_history_idx_mid);
+    CU_add_test(history_suite, "just_before_wrap", test_history_idx_just_before_wrap);
+    CU_add_test(history_suite, "buf_size",         test_history_buf_size);
 
     batt_suite = CU_add_suite("battery_sentinel", NULL, NULL);
-    CU_add_test(batt_suite, "valid_100",  test_batt_valid_100);
-    CU_add_test(batt_suite, "valid_0",    test_batt_valid_0);
-    CU_add_test(batt_suite, "invalid",    test_batt_invalid_neg1);
+    CU_add_test(batt_suite, "valid_100", test_batt_valid_100);
+    CU_add_test(batt_suite, "valid_0",   test_batt_valid_0);
+    CU_add_test(batt_suite, "invalid",   test_batt_invalid_neg1);
 
     cmd_suite = CU_add_suite("commands", NULL, NULL);
     CU_add_test(cmd_suite, "known_latest",  test_cmd_known_get_latest);
@@ -316,9 +366,14 @@ int main(void)
     CU_add_test(const_suite, "room_buf_size",  test_room_buf_size);
     CU_add_test(const_suite, "alert_msg_size", test_alert_msg_size);
 
+    phantom_suite = CU_add_suite("phantom_widget_fix", NULL, NULL);
+    CU_add_test(phantom_suite, "update_when_active",      test_reed_slot_update_when_active);
+    CU_add_test(phantom_suite, "no_update_when_inactive", test_reed_slot_no_update_when_inactive);
+    CU_add_test(phantom_suite, "preserves_previous",      test_reed_slot_no_update_preserves_previous);
+    CU_add_test(phantom_suite, "overwrites_when_active",  test_reed_slot_update_overwrites_when_active);
+
     CU_basic_set_mode(CU_BRM_VERBOSE);
     CU_basic_run_tests();
     CU_cleanup_registry();
-
     return CU_get_error();
 }
