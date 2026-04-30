@@ -52,6 +52,7 @@
 #define LOCK_AGE_LOG_THRESHOLD 30             /**< seconds between periodic logs */
 #define MFG_PIR_MIN_LEN        6             /**< min PIR mfg data length */
 #define MFG_PIR_BATT_IDX       6             /**< PIR battery byte index */
+#define MFG_PIR_OCCUPIED_IDX   7             /* occupied flag byte index */
 #define MFG_REED_STATE_IDX     1             /**< reed state byte index */
 #define MFG_REED_BATT_IDX      2             /**< reed battery byte index */
 #define MFG_LIGHT_STATE_IDX    2             /**< light state byte index */
@@ -85,6 +86,7 @@ int g_pir_batt     = -1;                  /**< PIR battery SOC percent */
  * to use ble_get_motion_count() and ble_get_pir_batt() accessors */
 int motion_count = DEFAULT_MOTION_COUNT; /**< legacy alias for g_motion_count */
 int pir_batt     = -1;                  /**< legacy alias for g_pir_batt */
+int g_pir_occupied = 0;                  /* 0=empty, 1=occupied */
 
 static bool g_pir_seen   = false; /**< PIR first-seen flag */
 static bool g_lock_seen  = false; /**< lock first-seen flag */
@@ -495,6 +497,11 @@ static void handle_pir(const uint8_t *p_adv,
    {
       pir_batt   = (int)p_mfg[MFG_PIR_BATT_IDX];
       g_pir_batt = pir_batt;
+   }
+
+   if (mfg_len >= (MFG_PIR_OCCUPIED_IDX + 1))
+   {
+      g_pir_occupied = (int)p_mfg[MFG_PIR_OCCUPIED_IDX];
    }
 
    stamp_device(DEV_IDX_PIR);

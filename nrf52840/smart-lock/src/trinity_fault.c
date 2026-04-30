@@ -53,6 +53,8 @@ static const char *reason_to_str(unsigned int reason)
    }
 }
 
+/* stage_to_str is only referenced in the BENCH build path below. */
+#if defined(CONFIG_TRINITY_MODE_BENCH)
 static const char *stage_to_str(uint32_t stage)
 {
    switch (stage)
@@ -70,6 +72,7 @@ static const char *stage_to_str(uint32_t stage)
       default:                      { return "UNKNOWN";   }
    }
 }
+#endif /* CONFIG_TRINITY_MODE_BENCH */
 
 void k_sys_fatal_error_handler(unsigned int reason,
                                 const struct arch_esf *p_esf)

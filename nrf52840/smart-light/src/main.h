@@ -14,4 +14,12 @@
 #define LIGHT_WRITE_LEN      1
 #define LIGHT_STATE_MAX      1
 
+/**
+ * \brief  Drive the relay and status LED to the requested state.
+ *         Implemented in main.c, called by ble_gatt.c on GATT write.
+ *
+ * \param  state  0=OFF, 1=ON.
+ */
+void relay_set(uint8_t state);
+
 #endif /* MAIN_H */

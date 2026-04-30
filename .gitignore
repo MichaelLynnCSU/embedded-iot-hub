@@ -95,3 +95,16 @@ STM32*.cfg
 
 # === Logs ===
 *.log
+
+# Zephyr/CMake build artifacts
+**/build_test/.ninja_deps
+**/build_test/.ninja_log
+**/build_test/**/*.a
+**/build_test/**/*.exe
+**/build_test/**/*.pickle
+**/build_test/**/*.stat
+**/build_test/**/*.checksum
+**/build_test/**/build_info.yml
+**/build_test/**/build_info.yml.bak
+nrf52840/reed-sensor/build_test/
+nrf52840/smart-lock/build_test/

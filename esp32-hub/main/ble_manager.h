@@ -111,4 +111,8 @@ bool ble_get_reed_slot_info(int slot,
  *  \return void */
 void ble_expire_reed_slots(void);
 
+/** \brief Get PIR occupancy state from sliding window.
+ *  \return int - 1 if occupied, 0 if empty. */
+int ble_get_pir_occupied(void);
+
 #endif /* INCLUDE_BLE_MANAGER_H_ */

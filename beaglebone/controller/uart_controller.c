@@ -27,6 +27,11 @@
  *          LCK:state[,batt]\n
  *          MTR:online\n
  *
+ *          Lock state machine (LOCK_STATE_E from controller_logic.h):
+ *          Inbound LCK frames drive logic_lock_transition(). Commands
+ *          are rejected while motor is moving (UNLOCKING/LOCKING).
+ *          All transitions are logged to device_events via db_save_event().
+ *
  *          Adding ReedSensor3..N requires zero code changes here —
  *          ESP32 auto-discovers, reed_count increments in JSON,
  *          STM32 receives REED_COUNT:n and calls UI_Reflow(n).
@@ -34,17 +39,21 @@
 
 #include <termios.h>
 #include "controller_internal.h"
+#include "controller_logic.h"
 
-#define UART_PUSH_INTERVAL_SEC  5     /**< push thread send interval seconds */
-#define UART_RETRY_DELAY_SEC    5     /**< delay before retrying UART open */
-#define UART_PUSH_DELAY_US      100000 /**< delay after write in microseconds */
-#define UART_MSG_BUF_SIZE       512   /**< push message buffer size bytes */
-#define UART_STATE_UNKNOWN      0xFF  /**< sentinel for unknown reed state */
+#define UART_PUSH_INTERVAL_SEC  5       /**< push thread send interval seconds */
+#define UART_RETRY_DELAY_SEC    5       /**< delay before retrying UART open */
+#define UART_PUSH_DELAY_US      100000  /**< delay after write in microseconds */
+#define UART_MSG_BUF_SIZE       512     /**< push message buffer size bytes */
+#define UART_STATE_UNKNOWN      0xFF    /**< sentinel for unknown reed state */
 #define UART_BAUD               B115200 /**< UART baud rate */
 
-static int             g_uart_fd         = -1;  /**< UART file descriptor */
+static int             g_uart_fd          = -1;  /**< UART file descriptor */
 static pthread_mutex_t g_uart_write_mutex =
-   PTHREAD_MUTEX_INITIALIZER;                    /**< UART write mutex */
+   PTHREAD_MUTEX_INITIALIZER;                     /**< UART write mutex */
+
+/** \brief Lock state machine — owned here, protected by data_mutex */
+static LOCK_STATE_E g_lock_state = LOCK_STATE_LOCKED;
 
 /******************************************************************************
  * \brief Open UART device at 115200 8N1.
@@ -103,6 +112,63 @@ static int uart_open(const char *p_dev)
 }
 
 /******************************************************************************
+ * \brief Process an inbound LCK frame through the lock state machine.
+ *
+ * \param val  - Lock value from STM32 (0=locked, 1=unlocked).
+ * \param batt - Battery SOC percent, -1 if absent.
+ *
+ * \return void
+ *
+ * \details Runs logic_lock_transition() to validate the command.
+ *          If state changes, logs transition to device_events and
+ *          updates latest_data.lock_state. Rejects commands while
+ *          motor is moving (UNLOCKING or LOCKING states).
+ *          Must NOT be called with data_mutex held.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+static void uart_process_lock(int val, int batt)
+{
+   LOCK_STATE_E    old_state = LOCK_STATE_LOCKED; /**< previous state */
+   LOCK_STATE_E    new_state = LOCK_STATE_LOCKED; /**< new state */
+   const char     *p_ev      = NULL;              /**< event string */
+
+   pthread_mutex_lock(&data_mutex);
+
+   old_state = g_lock_state;
+   new_state = logic_lock_transition(old_state, val);
+
+   if (new_state == old_state)
+   {
+      if (logic_lock_is_busy(old_state))
+      {
+         LOG("[LCK] Command rejected — motor moving (%s)",
+             logic_lock_state_label(old_state));
+      }
+      pthread_mutex_unlock(&data_mutex);
+      return;
+   }
+
+   g_lock_state            = new_state;
+   latest_data.lock_state  = (int)new_state;
+   latest_data.batt_lck    = (int8_t)batt;
+
+   pthread_mutex_unlock(&data_mutex);
+
+   p_ev = logic_lock_event_str(old_state, new_state);
+
+   LOG("[LCK] %s -> %s (val=%d batt=%d)",
+       logic_lock_state_label(old_state),
+       logic_lock_state_label(new_state),
+       val, batt);
+
+   if (NULL != p_ev)
+   {
+      db_save_event("LCK", p_ev);
+   }
+}
+
+/******************************************************************************
  * \brief Parse and process one inbound UART frame from STM32.
  *
  * \param p_line - Null-terminated frame string without newline.
@@ -111,19 +177,21 @@ static int uart_open(const char *p_dev)
  *
  * \details Frame format: <ID>:<value>[,<batt>]
  *          Valid IDs: PIR, LGT, LCK
- *          Stamps heartbeat, saves to DB, updates latest_data for PIR.
+ *          Stamps heartbeat, saves to DB, updates latest_data.
+ *          LCK frames are routed through uart_process_lock() for
+ *          state machine validation before updating latest_data.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void uart_parse_line(const char *p_line)
 {
    char        buf[UART_LINE_LEN] = {0}; /**< local copy of line */
-   char       *p_colon  = NULL;  /**< pointer to colon separator */
-   char       *p_rest   = NULL;  /**< pointer to value portion */
-   char       *p_comma  = NULL;  /**< pointer to comma separator */
-   const char *p_id     = NULL;  /**< device ID string */
-   int         val      = 0;     /**< parsed sensor value */
-   int         batt     = -1;    /**< parsed battery SOC, -1=absent */
+   char       *p_colon  = NULL;          /**< pointer to colon separator */
+   char       *p_rest   = NULL;          /**< pointer to value portion */
+   char       *p_comma  = NULL;          /**< pointer to comma separator */
+   const char *p_id     = NULL;          /**< device ID string */
+   int         val      = 0;             /**< parsed sensor value */
+   int         batt     = -1;            /**< parsed battery SOC, -1=absent */
    DEV_ID_E    idx      = (DEV_ID_E)-1; /**< device index */
    struct CommandMsg auto_cmd = {.cmd = CMD_GET_LATEST}; /**< auto command */
 
@@ -171,13 +239,27 @@ static void uart_parse_line(const char *p_line)
    LOG("[UART] %-5s val=%-3d batt=%d", p_id, val, batt);
    db_save_uart(p_id, val, batt);
 
-   pthread_mutex_lock(&data_mutex);
-   if (DEV_PIR == idx)
+   if (DEV_LOCK == idx)
    {
-      latest_data.motion_count = val;
-      latest_data.valid        = 1;
+      /* LCK — route through state machine, updates latest_data internally */
+      uart_process_lock(val, batt);
    }
-   pthread_mutex_unlock(&data_mutex);
+   else
+   {
+      pthread_mutex_lock(&data_mutex);
+
+      if (DEV_PIR == idx)
+      {
+         latest_data.motion_count = val;
+         latest_data.valid        = 1;
+      }
+      else if (DEV_LIGHT == idx)
+      {
+         latest_data.light_state = val;
+      }
+
+      pthread_mutex_unlock(&data_mutex);
+   }
 
    handle_get_latest(&auto_cmd);
 }
@@ -350,9 +432,10 @@ static void snapshot_reed_slots(uint8_t  *p_r_state,
  * \param age_lck      - Lock device age in seconds.
  * \param batt_pir     - PIR battery SOC percent.
  * \param batt_lck     - Lock battery SOC percent.
- * \param batt_motor   - motor battery SOC percent.
+ * \param batt_motor   - Motor battery SOC percent.
  * \param reed_count   - Number of active reed slots.
  * \param motor_online - Motor controller online flag (0=offline, 1=online).
+ * \param occupied     - PIR Sliding window
  * \param p_r_state    - Reed state array, size MAX_REEDS.
  * \param p_r_batt     - Reed battery array, size MAX_REEDS.
  * \param p_r_age      - Reed age array, size MAX_REEDS.
@@ -366,6 +449,7 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                             uint16_t age_lck, int8_t batt_pir,
                             int8_t batt_lck, int8_t batt_motor,
                             int reed_count, int motor_online,
+                            int occupied,
                             const uint8_t  *p_r_state,
                             const int8_t   *p_r_batt,
                             const uint16_t *p_r_age)
@@ -389,6 +473,9 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
       pos += snprintf(msg + pos, sizeof(msg) - pos,
                       "PIR:%d\n", motion);
    }
+
+   pos += snprintf(msg + pos, sizeof(msg) - pos,
+                   "OCC:%d\n", occupied);
 
    pos += snprintf(msg + pos, sizeof(msg) - pos,
                    "REED_COUNT:%d\n", reed_count);
@@ -428,6 +515,7 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
       pos += snprintf(msg + pos, sizeof(msg) - pos,
                       "MTR:%d\n", motor_online);
    }
+
    uart_push_msg(msg, pos);
 }
 
@@ -459,6 +547,7 @@ void *uart_push_thread(void *p_arg)
    int      batt_motor   = -1;   /**< motor battery SOC */
    int      motor_online = 0;    /**< motor controller online flag */
    int      reed_count   = 0;    /**< active reed slot count */
+   int      occupied     = 0;
    uint8_t  r_state[MAX_REEDS];  /**< reed state snapshot */
    int8_t   r_batt[MAX_REEDS];   /**< reed battery snapshot */
    uint16_t r_age[MAX_REEDS];    /**< reed age snapshot */
@@ -498,18 +587,20 @@ void *uart_push_thread(void *p_arg)
       batt_lck     = latest_data.batt_lck;
       motor_online = latest_data.motor_online;
       batt_motor   = latest_data.batt_motor;
+      occupied     = latest_data.pir_occupied;
       pthread_mutex_unlock(&data_mutex);
 
       reed_count = 0;
       snapshot_reed_slots(r_state, r_batt, r_age, &reed_count);
 
-      LOG("[PUSH] ages pir=%u lgt=%u lck=%u | batt pir=%d%% lck=%d%% mtr=%d%% | reeds=%d motor=%d",
-          age_pir, age_lgt, age_lck, batt_pir, batt_lck, batt_motor, reed_count, motor_online);
+      LOG("[PUSH] ages pir=%u lgt=%u lck=%u | batt pir=%d%% lck=%d%% mtr=%d%% | reeds=%d motor=%d occ=%d",
+          age_pir, age_lgt, age_lck, batt_pir, batt_lck, batt_motor,
+          reed_count, motor_online, occupied);
 
       build_and_push(temp, motion, lgt, lck,
                      age_pir, age_lgt, age_lck,
                      batt_pir, batt_lck, batt_motor,
-                     reed_count, motor_online,
+                     reed_count, motor_online, occupied,
                      r_state, r_batt, r_age);
    }
 

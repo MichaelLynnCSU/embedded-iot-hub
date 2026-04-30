@@ -14,11 +14,12 @@
  *          - uart_push_thread:       pushes UART data to sensor pipe
  *
  *          Shared resources:
- *          - shm_data: POSIX shared memory for LCD display IPC
- *          - shm_sem:  POSIX semaphore protecting shm_data
- *          - db:       SQLite database handle
- *          - log_fp:   log file handle
- *          - running:  volatile flag cleared by signal handler
+ *          - shm_data:  POSIX shared memory for LCD display IPC
+ *          - shm_sem:   POSIX semaphore protecting shm_data
+ *          - db:        SQLite database handle
+ *          - log_fp:    log file handle
+ *          - log_mutex: serialises log writes across all threads
+ *          - running:   volatile flag cleared by signal handler
  ******************************************************************************/
 
 #include <sys/mman.h>
@@ -26,11 +27,12 @@
 #include <signal.h>
 #include "controller_internal.h"
 
-FILE                    *log_fp   = NULL; /**< log file handle */
-struct SharedSensorData *shm_data = NULL; /**< shared memory data pointer */
-sem_t                   *shm_sem  = NULL; /**< shared memory semaphore */
-sqlite3                 *db       = NULL; /**< SQLite database handle */
-volatile int             running  = 1;    /**< main loop run flag */
+FILE                    *log_fp    = NULL; /**< log file handle */
+pthread_mutex_t          log_mutex = PTHREAD_MUTEX_INITIALIZER; /**< log serialiser */
+struct SharedSensorData *shm_data  = NULL; /**< shared memory data pointer */
+sem_t                   *shm_sem   = NULL; /**< shared memory semaphore */
+sqlite3                 *db        = NULL; /**< SQLite database handle */
+volatile int             running   = 1;    /**< main loop run flag */
 
 /******************************************************************************
  * \brief POSIX signal handler — initiates graceful shutdown.
@@ -45,7 +47,7 @@ volatile int             running  = 1;    /**< main loop run flag */
  ******************************************************************************/
 static void signal_handler(int sig)
 {
-   LOG("Signal %d received, shutting down", sig);
+   LOG_WRN("Signal %d received, shutting down", sig);
    running = 0;
 }
 
@@ -69,7 +71,7 @@ int init_shared_memory(void)
    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
    if (0 > shm_fd)
    {
-      LOG("shm_open failed");
+      LOG_ERR("shm_open failed");
       return -1;
    }
 
@@ -83,7 +85,7 @@ int init_shared_memory(void)
 
    if (MAP_FAILED == shm_data)
    {
-      LOG("mmap failed");
+      LOG_ERR("mmap failed");
       return -1;
    }
 
@@ -94,11 +96,11 @@ int init_shared_memory(void)
    shm_sem = sem_open(SEM_NAME, O_CREAT, 0666, 1);
    if (SEM_FAILED == shm_sem)
    {
-      LOG("sem_open failed");
+      LOG_ERR("sem_open failed");
       return -1;
    }
 
-   LOG("Shared memory initialized");
+   LOG_INF("Shared memory initialized");
    return 0;
 }
 
@@ -123,43 +125,38 @@ static int create_threads(pthread_t *p_rx_thread,
 {
    int ret = 0; /**< pthread return value */
 
-   ret = pthread_create(p_rx_thread,   NULL,
-                         receive_data_thread, NULL);
+   ret = pthread_create(p_rx_thread, NULL, receive_data_thread, NULL);
    if (0 != ret)
    {
-      LOG("receive_data_thread create failed (err=%d)", ret);
+      LOG_ERR("receive_data_thread create failed (err=%d)", ret);
       return -1;
    }
 
-   ret = pthread_create(p_cmd_thread,  NULL,
-                         command_handler_thread, NULL);
+   ret = pthread_create(p_cmd_thread, NULL, command_handler_thread, NULL);
    if (0 != ret)
    {
-      LOG("command_handler_thread create failed (err=%d)", ret);
+      LOG_ERR("command_handler_thread create failed (err=%d)", ret);
       return -1;
    }
 
-   ret = pthread_create(p_uart_thread, NULL,
-                         uart_reader_thread, NULL);
+   ret = pthread_create(p_uart_thread, NULL, uart_reader_thread, NULL);
    if (0 != ret)
    {
-      LOG("uart_reader_thread create failed (err=%d)", ret);
+      LOG_ERR("uart_reader_thread create failed (err=%d)", ret);
       return -1;
    }
 
-   ret = pthread_create(p_hb_thread,   NULL,
-                         heartbeat_monitor_thread, NULL);
+   ret = pthread_create(p_hb_thread, NULL, heartbeat_monitor_thread, NULL);
    if (0 != ret)
    {
-      LOG("heartbeat_monitor_thread create failed (err=%d)", ret);
+      LOG_ERR("heartbeat_monitor_thread create failed (err=%d)", ret);
       return -1;
    }
 
-   ret = pthread_create(p_push_thread, NULL,
-                         uart_push_thread, NULL);
+   ret = pthread_create(p_push_thread, NULL, uart_push_thread, NULL);
    if (0 != ret)
    {
-      LOG("uart_push_thread create failed (err=%d)", ret);
+      LOG_ERR("uart_push_thread create failed (err=%d)", ret);
       return -1;
    }
 
@@ -227,16 +224,16 @@ int main(void)
       return 1;
    }
 
-   LOG("=========================================");
-   LOG("Data Controller starting");
-   LOG("=========================================");
+   LOG_INF("=========================================");
+   LOG_INF("Data Controller starting");
+   LOG_INF("=========================================");
 
    (void)signal(SIGINT,  signal_handler);
    (void)signal(SIGTERM, signal_handler);
 
    if (0 > init_shared_memory())
    {
-      LOG("Shared memory init failed");
+      LOG_ERR("Shared memory init failed");
       fclose(log_fp);
       return 1;
    }
@@ -252,12 +249,12 @@ int main(void)
                            &hb_thread,
                            &push_thread))
    {
-      LOG("Thread creation failed");
+      LOG_ERR("Thread creation failed");
       cleanup();
       return 1;
    }
 
-   LOG("All threads started, controller ready");
+   LOG_INF("All threads started, controller ready");
 
    (void)pthread_join(rx_thread,   NULL);
    (void)pthread_join(cmd_thread,  NULL);
@@ -265,7 +262,7 @@ int main(void)
    (void)pthread_join(hb_thread,   NULL);
    (void)pthread_join(push_thread, NULL);
 
-   LOG("Controller shutting down");
+   LOG_INF("Controller shutting down");
 
    cleanup();
 

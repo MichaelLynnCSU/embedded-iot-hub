@@ -6,7 +6,7 @@
  * \brief Devicetree overlay for Pro Micro nRF52840 reed sensor node.
  *
  * \details Configures:
- *          - ADC channel 0: P0.02 (AIN0) 12-bit, 1/6 gain, internal ref
+ *          - ADC channel 0: VDD internal monitor, 12-bit, 1/6 gain
  *          - UART0: TX=P0.06, RX=P0.08 (overrides board default P0.09/P0.10)
  *          - Flash partitions:
  *            storage_partition @ 0xED000 (16KB) NVS settings
@@ -24,20 +24,45 @@
  *          with the board dtsi, leaving both pin sets active and the
  *          board defaults winning.
  *
- * \note    Battery divider (2026-03-29):
- *          No software enable pin. Divider is always connected.
- *          Vbat → 100k → 100k → P0.02(AIN0) → 100k → GND
- *          R1 = 200k (two 100k in series), R2 = 100k.
- *          Ratio = R2/(R1+R2) = 100k/300k = 1/3.
- *          ADC pin voltage = Vbat / 3.
- *          Reconstruct: adc_pin_mV * 3 = Vbat_mV.
- *          Quiescent current = Vbat / 300k = ~10uA at 3V -- acceptable
- *          for CR2032 (typical capacity 220mAh = ~2.5 years at 10uA).
- *          Previous design used P0.29 as a high-side enable switch but
- *          P0.29 was wired to P0.31 (AIN7) through a resistor, not to
- *          Vbat, so the enable had no effect and the ADC saturated at
- *          4095 (3.6V full scale). Fixed by removing the enable pin and
- *          connecting the divider directly between Vbat and GND.
+ * \note    BATTERY ADC HISTORY -- DO NOT RETRY THESE APPROACHES (2026-04-22):
+ *          This board (Teyleten Robot Pro Micro nRF52840) has a HX3001 LDO
+ *          regulator permanently in the power path. CR2032 (3V) → HX3001
+ *          → 2.5V VDD. The LDO output is always 2.5V regardless of cell
+ *          state. SWD connection does not affect this.
+ *
+ *          Four SAADC approaches were tested and failed:
+ *
+ *          TEST 1 -- P0.02 (AIN0) + 200k/100k divider:
+ *          Worked but nonsensical. CR2032 max voltage (3V) is already within
+ *          SAADC range (3.6V at ADC_GAIN_1_6). Divider attenuated a voltage
+ *          that needed no attenuation, wasted resolution, added quiescent
+ *          drain. Abandoned in favour of direct connection.
+ *          NOTE: This is the only SAADC approach that produced stable
+ *          readings. It remains the fallback if MAX17048 is unavailable.
+ *
+ *          TEST 2 -- P0.02 (AIN0) direct, no divider, no caps:
+ *          Failed. CR2032 internal impedance (10-30 ohms) cannot source
+ *          the SAADC input capacitance charge current fast enough. Rail
+ *          collapses during sampling. Longer acquisition time (40us tested)
+ *          made it worse -- more time connected means more charge drawn,
+ *          deeper voltage sag. Fails even pre-BLE with radio fully idle.
+ *
+ *          TEST 3 -- NRF_SAADC_VDD internal monitor:
+ *          Failed. NRF_SAADC_VDD measures the VDD rail (2.5V regulated),
+ *          not the cell. Nordic recommendation assumes cell IS VDD (no
+ *          regulator in path). That assumption does not hold on this board.
+ *          Always reads ~1812 mV regardless of cell state.
+ *
+ *          TEST 4 -- P0.02 (AIN0) direct + 2x 10uF bulk caps:
+ *          Failed. Datasheet cap recommendation assumes low-impedance source
+ *          (Li-ion, LiPo). CR2032 at 10-30 ohms cannot recharge caps fast
+ *          enough between samples. Hundreds of uF would be required --
+ *          impractical for a coin cell node. Fails with radio idle and
+ *          active. Radio state is not the determining factor.
+ *
+ *          CURRENT SOLUTION -- MAX17048 fuel gauge IC over I2C:
+ *          Measures B+ directly with nanoamp bias current. Independent of
+ *          VDD rail, SAADC, and BLE radio. See battery.c for implementation.
  *******************************************************************************/
 /delete-node/ &storage_partition;
 / {
@@ -67,7 +92,9 @@
         zephyr,gain = "ADC_GAIN_1_6";
         zephyr,reference = "ADC_REF_INTERNAL";
         zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
-        zephyr,input-positive = <NRF_SAADC_AIN0>; /* P0.02 -- Vbat/3 via 200k/100k divider */
+        zephyr,input-positive = <NRF_SAADC_VDD>; /* reads regulated 2.5V rail --
+                                                     retained for reference only,
+                                                     MAX17048 handles cell measurement */
         zephyr,resolution = <12>;
     };
 };
@@ -90,3 +117,4 @@
     status = "okay";
     current-speed = <115200>;
 };
+

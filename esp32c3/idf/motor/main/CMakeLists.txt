@@ -1,6 +1,9 @@
 idf_component_register(
     SRCS
+        "main.c"
         "motor_control.c"
+        "tcp_server.c"
+        "wifi.c"
         "battery.c"
         "wifi_tx_sweep.c"
         "build_info.c"
@@ -24,7 +27,6 @@ idf_component_register(
         esp_system
         esp_driver_ledc
 )
-
 # Trinity split -- each file can be swapped for a stub independently.
 #
 # Dependency order (strict -- never invert):
@@ -33,12 +35,10 @@ idf_component_register(
 #   nvs_idf    -> canary (RTC vars)
 #   stats_idf  -> nvs (via trinity_log_event)
 #   panic_idf  -> nvs (via trinity_log_event)
-
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     TRINITY_CHIP_ESP32C3_IDF=1
     "TRINITY_NVS_NAMESPACE=\"motor_log\""
 )
-
 if(DEFINED TRINITY_MODE AND "${TRINITY_MODE}" STREQUAL "BENCH")
     target_compile_definitions(${COMPONENT_LIB} PUBLIC
         CONFIG_TRINITY_MODE_BENCH=1

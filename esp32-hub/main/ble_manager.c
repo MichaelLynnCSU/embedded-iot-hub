@@ -244,6 +244,12 @@ int ble_get_pir_batt(void)
    return pir_batt;
 }
 
+int ble_get_pir_occupied(void)
+{
+   extern int g_pir_occupied;
+   return g_pir_occupied;
+}
+
 int ble_get_dr1_batt(void)
 {
    extern int dr1_batt;

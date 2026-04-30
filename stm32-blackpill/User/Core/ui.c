@@ -17,6 +17,11 @@
  *
  *          Feature switches:
  *            UI_DEBUG_REFLOW — logs reflow dimensions to USB CDC when defined.
+ *
+ * \note    Occupied indicator (2026-04-30):
+ *          pir_occupied added to HOME_STATE_X. PIR tile value label now
+ *          prefixes count with "OCC" or "---" to show sliding-window
+ *          occupancy state received via OCC: UART frame from BeagleBone.
  ******************************************************************************/
 
 #include "ui.h"
@@ -76,6 +81,7 @@ typedef struct _HOME_STATE_X
    uint8_t  hum;                   /*!< Relative humidity percent            */
    uint32_t pir_count;             /*!< Cumulative PIR trigger count         */
    uint8_t  pir_batt;              /*!< PIR battery percent                  */
+   uint8_t  pir_occupied;          /*!< 1=occupied, 0=empty (sliding window) */
    uint8_t  reed_state[MAX_REEDS]; /*!< Reed state: 0=closed, 1=open         */
    int8_t   reed_batt[MAX_REEDS];  /*!< Reed battery percent, -1=unknown     */
    uint16_t reed_age[MAX_REEDS];   /*!< Reed BLE age in seconds              */
@@ -102,8 +108,8 @@ typedef struct _TILE_LAYOUT_X
 /**< All fields zero-init; populated from ESP32 STATE message on first receipt.
  *   reed_batt initialised to -1 (unknown) per field semantics. */
 static HOME_STATE_X g_home = {
-   .reed_batt = {-1, -1, -1, -1, -1, -1},
-   .lock_batt = -1,
+   .reed_batt  = {-1, -1, -1, -1, -1, -1},
+   .lock_batt  = -1,
    .motor_batt = -1,
 };
 
@@ -506,8 +512,10 @@ void ui_update(void)
    lv_label_set_text(g_t_temp.p_value, buf);
    set_status(g_t_temp.p_status, g_dev_online[eDEV_TEMP]);
 
-   /* PIR tile */
-   (void)snprintf(buf, sizeof(buf), "%lu", (unsigned long)g_home.pir_count);
+   /* PIR tile — prefix count with OCC/--- to show sliding window occupancy */
+   (void)snprintf(buf, sizeof(buf), "%s %lu",
+                  (0u != g_home.pir_occupied) ? "OCC" : "---",
+                  (unsigned long)g_home.pir_count);
    lv_label_set_text(g_t_pir.p_value, buf);
    if (g_home.pir_batt > 0u)
    {
@@ -560,7 +568,7 @@ void ui_update(void)
       lv_label_set_text(g_t_motor.p_value, "HEATING");
    }
 
-      /* Battery sub-label */
+   /* Battery sub-label */
    if (g_home.motor_batt > 0)
    {
       (void)snprintf(buf, sizeof(buf), "BATT %d%%", g_home.motor_batt);
@@ -663,14 +671,15 @@ uint8_t ui_get_dev_online(DEVICE_ID_E dev_id)
    return g_dev_online[dev_id];
 }
 
-void ui_set_temp(uint8_t val)       { g_home.temp = val; }
-void ui_set_hum(uint8_t val)        { g_home.hum  = val; }
-void ui_set_pir_count(uint32_t val) { g_home.pir_count = val; }
-void ui_set_pir_batt(uint8_t val)   { g_home.pir_batt  = val; }
-void ui_set_light(uint8_t val)      { g_home.light = val; }
-void ui_set_lock(uint8_t val)       { g_home.lock  = val; }
-void ui_set_lock_batt(int8_t val)   { g_home.lock_batt = val; }
-void ui_set_motor(uint8_t val)      { g_home.motor = val; }
+void ui_set_temp(uint8_t val)            { g_home.temp         = val; }
+void ui_set_hum(uint8_t val)             { g_home.hum          = val; }
+void ui_set_pir_count(uint32_t val)      { g_home.pir_count    = val; }
+void ui_set_pir_batt(uint8_t val)        { g_home.pir_batt     = val; }
+void ui_set_pir_occupied(uint8_t val)    { g_home.pir_occupied = val; }
+void ui_set_light(uint8_t val)           { g_home.light        = val; }
+void ui_set_lock(uint8_t val)            { g_home.lock         = val; }
+void ui_set_lock_batt(int8_t val)        { g_home.lock_batt    = val; }
+void ui_set_motor(uint8_t val)           { g_home.motor        = val; }
 
 /**
  * \brief  Set the door state for a reed sensor slot.

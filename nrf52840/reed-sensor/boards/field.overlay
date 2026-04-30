@@ -1,3 +1,38 @@
+/*******************************************************************************
+ * \file field.overlay
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ * \date 01-01-2025
+ *
+ * \brief Field mode devicetree overlay for Pro Micro nRF52840 reed sensor.
+ *
+ * \details Configures UART console on P0.06/P0.08. Battery measurement
+ *          handled by MAX17048 fuel gauge IC over I2C. See
+ *          promicro_nrf52840.overlay for full SAADC failure history.
+ *
+ * \note    Enable pin removed (2026-03-29):
+ *          P0.29 vbat-div-en node removed. Pin was wired to P0.31 not
+ *          Vbat and had no effect.
+ *
+ * \note    BATTERY ADC HISTORY (2026-04-22):
+ *          All SAADC-based battery measurement approaches failed on this
+ *          board due to the HX3001 LDO permanently separating the CR2032
+ *          from VDD. Four approaches tested -- see promicro_nrf52840.overlay
+ *          for complete failure analysis. Current solution is MAX17048
+ *          fuel gauge IC measuring B+ directly over I2C.
+ *
+ *          Short summary of what was tried and why it failed:
+ *          - Divider + AIN:      worked but attenuated a voltage already
+ *                                in range. Retained as fallback only.
+ *          - Direct AIN:         CR2032 impedance (10-30 ohm) collapses
+ *                                under SAADC input capacitance load.
+ *          - NRF_SAADC_VDD:      reads 2.5V regulated rail, not cell.
+ *          - Direct AIN + caps:  2x 10uF insufficient. CR2032 cannot
+ *                                recharge caps fast enough. Datasheet cap
+ *                                recommendation assumes low-impedance source,
+ *                                not CR2032. Hundreds of uF would be needed.
+ *                                Radio state is not the determining factor --
+ *                                fails with radio idle too.
+ *******************************************************************************/
 /delete-node/ &storage_partition;
 
 / {
@@ -5,13 +40,6 @@
         zephyr,console = &uart0;
         zephyr,shell-uart = &uart0;
         zephyr,uart-mcumgr = &uart0;
-    };
-
-    vbat_div_en: vbat-div-en {
-        compatible = "gpio-leds";
-        vbat_enable: vbat-enable {
-            gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
-        };
     };
 
     zephyr,user {
@@ -63,7 +91,9 @@
         zephyr,gain = "ADC_GAIN_1_6";
         zephyr,reference = "ADC_REF_INTERNAL";
         zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
-        zephyr,input-positive = <NRF_SAADC_AIN0>;
+        zephyr,input-positive = <NRF_SAADC_VDD>; /* reads regulated 2.5V rail --
+                                                     retained for reference only,
+                                                     MAX17048 handles cell measurement */
         zephyr,resolution = <12>;
     };
 };
@@ -83,3 +113,4 @@
         };
     };
 };
+

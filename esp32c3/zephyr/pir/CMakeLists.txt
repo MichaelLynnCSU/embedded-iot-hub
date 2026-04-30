@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.13.1)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(pir_ble)
-
 # Trinity split -- each file can be swapped for a stub independently.
 #
 # Dependency order (strict -- never invert):
@@ -10,9 +9,9 @@ project(pir_ble)
 #   flash_esp  -> canary (noinit vars)
 #   stats_esp  -> flash (via trinity_log_event), wdt
 #   fault_esp  -> flash (via write_panic), canary (via g_init_stage)
-
 target_sources(app PRIVATE
     src/main.c
+    src/ble_adv.c
     src/max17048.c
     src/build_info.c
     src/trinity_wdt_esp.c

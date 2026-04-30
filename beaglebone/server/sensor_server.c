@@ -100,6 +100,7 @@ struct SensorData
    uint16_t age_lgt;         /*!< light device age seconds */
    uint16_t age_lck;         /*!< lock device age seconds */
    int8_t   batt_pir;        /*!< PIR battery SOC percent */
+   int8_t   pir_occupied;    /*!< 1=occupied, 0=empty     */
    int8_t   batt_lck;        /*!< lock battery SOC percent */
    int      batt_motor;
 
@@ -590,6 +591,11 @@ static void process_json(const char *p_json_body)
       data.batt_pir = (int8_t)json_object_get_int(p_obj);
    }
 
+   if (json_object_object_get_ex(p_root, "pir_occupied", &p_obj))
+   {
+      data.pir_occupied = (int8_t)json_object_get_int(p_obj);
+   }
+
    if (json_object_object_get_ex(p_root, "batt_lck", &p_obj))
    {
       data.batt_lck = (int8_t)json_object_get_int(p_obj);
@@ -615,9 +621,9 @@ static void process_json(const char *p_json_body)
    log_msg("Parsed avg_temp=%.2f motion=%d light=%d lock=%d",
            data.avg_temp, data.motion_count,
            data.light_state, data.lock_state);
-   log_msg("Ages pir=%d lgt=%d lck=%d | Batt pir=%d%% lck=%d%%",
+   log_msg("Ages pir=%d lgt=%d lck=%d | Batt pir=%d%% lck=%d%% | Occupied=%d",
            data.age_pir, data.age_lgt, data.age_lck,
-           data.batt_pir, data.batt_lck);
+           data.batt_pir, data.batt_lck, data.pir_occupied);
 
    if (json_object_object_get_ex(p_root, "rooms", &p_obj))
    {

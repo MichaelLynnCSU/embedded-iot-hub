@@ -83,7 +83,7 @@ ZTEST(reed_ble, test_broadcast_uses_update_not_stop_start)
 /******************************************************************************
  * RESETREAS clear fix (2026-03-27)
  * Bug: RESETREAS never cleared -- stale DOG bits survived across flash
- *      cycles, first boot after flashing misreported as WATCHDOG.
+ *      cycles, causing first boot after flashing to misreport as WATCHDOG.
  * Fix: read then immediately write 0xFFFFFFFF at top of main().
  ******************************************************************************/
 ZTEST(reed_resetreas, test_resetreas_cleared_before_any_log)
@@ -178,19 +178,22 @@ ZTEST(reed_mfg, test_mfg_batt_byte_index)
 }
 
 /******************************************************************************
- * Battery SOC conversion
+ * Battery SOC conversion (2026-04-22)
+ * Divider removed -- Vbat connects directly to P0.02 (AIN0).
+ * SOC curve unchanged: BATT_MV_MAX=3000, BATT_MV_MIN=2000, range=1000.
+ * CR2032 nominal 3.0V reads directly -- no reconstruct multiply needed.
  * Regression: mv_to_soc() boundary conditions.
  ******************************************************************************/
 ZTEST(reed_batt, test_mv_to_soc_max)
 {
-    /* At or above BATT_MV_MAX (3000mV) must return 100% */
+    /* At or above BATT_MV_MAX (3000mV direct) must return 100% */
     zassert_equal(mv_to_soc(3000), 100, "3000mV should be 100%%");
-    zassert_equal(mv_to_soc(3500), 100, "3500mV should clamp to 100%%");
+    zassert_equal(mv_to_soc(3300), 100, "3300mV should clamp to 100%%");
 }
 
 ZTEST(reed_batt, test_mv_to_soc_min)
 {
-    /* At or below BATT_MV_MIN (2000mV) must return 0% */
+    /* At or below BATT_MV_MIN (2000mV direct) must return 0% */
     zassert_equal(mv_to_soc(2000), 0, "2000mV should be 0%%");
     zassert_equal(mv_to_soc(1500), 0, "1500mV should clamp to 0%%");
 }
@@ -201,11 +204,24 @@ ZTEST(reed_batt, test_mv_to_soc_midpoint)
     zassert_equal(mv_to_soc(2500), 50, "2500mV should be 50%%");
 }
 
+ZTEST(reed_batt, test_mv_to_soc_no_divider_regression)
+{
+    /* Regression: old divider code multiplied ADC reading by 3.
+     * With divider, 3000mV battery read as 1000mV * 3 = 3000mV -- correct.
+     * Without divider, ADC reads 3000mV directly -- no multiply.
+     * If multiply is reintroduced, 3000mV becomes 9000mV -> clamps to 100%
+     * but 2500mV becomes 7500mV -> also 100% -- midpoint test catches this. */
+    zassert_equal(mv_to_soc(2500), 50,
+        "Midpoint failed -- divider multiply may have been reintroduced");
+    zassert_true(mv_to_soc(2100) < 20,
+        "2100mV should be near 10%% -- if clamping to 100%% divider is back");
+}
+
 /******************************************************************************
  * Test suite registration
  ******************************************************************************/
-ZTEST_SUITE(reed_wdt,      NULL, NULL, NULL, NULL, NULL);
-ZTEST_SUITE(reed_ble,      NULL, NULL, NULL, NULL, NULL);
+ZTEST_SUITE(reed_wdt,       NULL, NULL, NULL, NULL, NULL);
+ZTEST_SUITE(reed_ble,       NULL, NULL, NULL, NULL, NULL);
 ZTEST_SUITE(reed_resetreas, NULL, NULL, NULL, NULL, NULL);
-ZTEST_SUITE(reed_mfg,      NULL, NULL, NULL, NULL, NULL);
-ZTEST_SUITE(reed_batt,     NULL, NULL, NULL, NULL, NULL);
+ZTEST_SUITE(reed_mfg,       NULL, NULL, NULL, NULL, NULL);
+ZTEST_SUITE(reed_batt,      NULL, NULL, NULL, NULL, NULL);

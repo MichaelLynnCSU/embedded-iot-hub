@@ -10,13 +10,18 @@
  *
  * \details Processes line-oriented ASCII messages from the ESP32. Messages
  *          follow the pattern "ID:field[,field...]". Supported IDs:
- *            REED_COUNT, DR1-DR6, PIR, LGT, LCK, MTR, STATE.
+ *            REED_COUNT, DR1-DR6, PIR, LGT, LCK, MTR, STATE, OCC.
  *          All parsing uses strtol() rather than atoi() for error detection.
  *
  *          Online/offline pattern (all devices including MTR):
  *          - When online: update value and stamp last-seen tick
  *          - When offline: do nothing — HB_TIMEOUT_MS expiry drives dot red
  *          - This is identical behaviour for PIR, LGT, LCK, and MTR
+ *
+ * \note    OCC frame (2026-04-30):
+ *          OCC:0 / OCC:1 sent by BeagleBone every UART_PUSH_INTERVAL_SEC.
+ *          Derived from PIR sliding window on ESP32 hub — 1 ISR in the
+ *          last 8 s asserts occupied. Routed to ui_set_pir_occupied().
  ******************************************************************************/
 
 #include "parser.h"
@@ -252,7 +257,7 @@ static void parse_state_message(const char *p_rest)
 }
 
 /**
- * \brief  Handle a single-value message: PIR, LGT, LCK, or MTR.
+ * \brief  Handle a single-value message: PIR, LGT, LCK, MTR, or OCC.
  *
  * \param  p_id   - Null-terminated message identifier string.
  * \param  val    - Primary integer value already parsed from the message.
@@ -264,10 +269,8 @@ static void parse_state_message(const char *p_rest)
  *          - Online: update value and stamp last-seen tick
  *          - Offline: do nothing — HB_TIMEOUT_MS expiry turns dot red
  *
- *          MTR follows this exactly. val=1 updates the motor state and
- *          stamps online. val=0 does nothing at all — the last known
- *          motor state stays on screen and the dot fades to red after
- *          HB_TIMEOUT_MS, identical to PIR, LGT, and LCK behaviour.
+ *          OCC:0/1 updates the PIR tile occupied prefix without affecting
+ *          the online timestamp — occupancy and connectivity are independent.
  *
  * \author MichaelLynnCSU
  */
@@ -309,11 +312,18 @@ static void parse_single_value(const char *p_id, int val, int batt)
       }
       if (batt > 0)
       {
-        ui_set_motor_batt(batt);
+         ui_set_motor_batt(batt);
       }
       /* val=0: do nothing — last known motor state stays on screen.
        * HB_TIMEOUT_MS expiry drives the dot red, identical to how
        * PIR, LGT, and LCK go offline. No explicit offline action needed. */
+   }
+   else if (0 == strcmp(p_id, "OCC"))
+   {
+      /* Sliding window occupancy from PIR node — 0=empty, 1=occupied.
+       * Does not affect the PIR online timestamp; connectivity and
+       * occupancy are independent. */
+      ui_set_pir_occupied((uint8_t)val);
    }
    else
    {

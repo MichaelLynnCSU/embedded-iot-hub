@@ -36,16 +36,23 @@
  *          which must be less than the WDT timeout (5 s). Verify
  *          TCP_SEND_INTERVAL_MS in config.h is < 5000.
  *
- * \note    Motor battery added (2026-04-08):
- *          TCP_STATE_T gains motor_batt field (supply mV, -1 = unknown).
- *          drain_queues() reads batt from MOTOR_PAYLOAD_T.
- *          build_and_send() emits "batt_motor" in JSON alongside existing
- *          batt_pir and batt_lck fields. Motor side sends battery reading
- *          back to hub as JSON: {"batt_motor": <mV>} on the same TCP
- *          connection. Hub parses this in recv path (future) or reads it
- *          from the vroom bus queue populated by the motor TCP receive task.
- *          For now: motor publishes via bus_publish_motor(online, batt_mv)
- *          and hub drains it here into g_state.motor_batt.
+ * \note    Motor battery (2026-04-08, updated 2026-04-27):
+ *          TCP_STATE_T gains motor_batt field (SOC percent, -1 = unknown).
+ *          Motor node previously sent raw millivolts and hub converted with
+ *          motor_mv_to_percent(). Motor now sends SOC percent directly:
+ *          {"batt_motor": <percent>}. motor_mv_to_percent() removed.
+ *          Hub stores and forwards percent unchanged -- no hardcoded
+ *          voltage thresholds or math on the hub side.
+ *
+ * \note    BB logging fix (2026-04-27):
+ *          run_bb_state_machine() was missing ESP_LOGI calls present in
+ *          run_c3_state_machine(), making it impossible to tell from logs
+ *          whether the BeagleBone connection succeeded or failed.
+ *          Added: connecting attempt log, immediate-connect log, EINPROGRESS
+ *          log, connected-via-select log, and timeout log.
+ *          Also fixed build_and_send() where the [BEAGLEBONE] success log
+ *          printed local variable `count` (always 0) instead of
+ *          g_state.reed_count.
  ******************************************************************************/
 
 #include "config.h"
@@ -80,9 +87,6 @@
 #define TCP_STATE_CONNECTING    1         /**< socket state: connect in progress */
 #define TCP_STATE_CONNECTED     2         /**< socket state: connected */
 
-#define MOTOR_BATT_MAX_MV 9000             /**< full charge (100%) */
-#define MOTOR_BATT_MIN_MV 7500
-
 static const char *TAG = "TCP_MGR"; /**< ESP log tag */
 
 /** \brief Per-reed slot state snapshot for TCP JSON payload */
@@ -102,11 +106,12 @@ typedef struct
    int              avg_temp;               /*!< average temperature from STM32 */
    uint32_t         motion_count;           /*!< PIR motion event count */
    int              pir_batt;               /*!< PIR battery SOC percent */
+   int              pir_occupied;           /* 0=empty, 1=occupied  -- new */
    uint8_t          light_state;            /*!< smart light relay state */
    uint8_t          lock_state;             /*!< smart lock state */
    int              lock_batt;              /*!< smart lock battery SOC */
    uint8_t          motor_online;           /*!< C3 motor controller online flag */
-   int              motor_batt;             /*!< motor supply voltage mV, -1=unknown */
+   int              motor_batt;             /*!< motor battery SOC percent, -1=unknown */
    REED_SLOT_STATE_T reed_slots[MAX_REEDS]; /*!< per-reed slot state */
    uint16_t         age_pir;               /*!< PIR device age seconds */
    uint16_t         age_lgt;               /*!< light device age seconds */
@@ -124,15 +129,6 @@ static TCP_STATE_T g_state =
    .age_lgt    = 0xFFFF,
    .age_lck    = 0xFFFF,
 };
-
-static int motor_mv_to_percent(int mv)
-{
-    if (mv <= MOTOR_BATT_MIN_MV) return 0;
-    if (mv >= MOTOR_BATT_MAX_MV) return 100;
-
-    return (mv - MOTOR_BATT_MIN_MV) * 100 /
-           (MOTOR_BATT_MAX_MV - MOTOR_BATT_MIN_MV);
-}
 
 static void drain_queues(EventBits_t bits)
 {
@@ -157,6 +153,7 @@ static void drain_queues(EventBits_t bits)
          g_state.motion_count = p_pir.count;
          g_state.pir_batt     = p_pir.batt;
       }
+      g_state.pir_occupied = ble_get_pir_occupied();
    }
 
    if (0 != (bits & EVT_BLE_REED))
@@ -211,10 +208,11 @@ static void drain_queues(EventBits_t bits)
       while (pdTRUE == xQueueReceive(q_motor, &p_motor, 0))
       {
          g_state.motor_online = p_motor.online;
-         /* Only update batt when online -- preserve last known on disconnect */
-         if (p_motor.online && (p_motor.batt > 0))
+         /* Only update batt when online -- preserve last known on disconnect.
+          * Motor sends SOC percent directly -- no conversion needed. */
+         if (p_motor.online && (p_motor.batt >= 0))
          {
-            g_state.motor_batt = motor_mv_to_percent(p_motor.batt);
+            g_state.motor_batt = p_motor.batt;
          }
       }
    }
@@ -232,11 +230,24 @@ static void drain_queues(EventBits_t bits)
       gen        = 0;
 
       (void)ble_get_reed_slot_info(i, NULL, NULL, &age, &slot_state, &gen);
-
       g_state.reed_slots[i].age     = age;
       g_state.reed_slots[i].active  = true;
       g_state.reed_slots[i].offline = (age > REED_OFFLINE_S) ? 1 : 0;
       g_state.reed_slots[i].gen     = gen;
+   }
+
+   for (i = 0; i < MAX_REEDS; i++)
+   {
+      if (g_state.reed_slots[i].active)
+      {
+         ESP_LOGI(TAG, "[REED] slot=%d state=%d batt=%d age=%d offline=%d gen=%d",
+                  i + 1,
+                  g_state.reed_slots[i].state,
+                  g_state.reed_slots[i].batt,
+                  g_state.reed_slots[i].age,
+                  g_state.reed_slots[i].offline,
+                  g_state.reed_slots[i].gen);
+      }
    }
 }
 
@@ -318,7 +329,6 @@ static void build_and_send(int *p_bb_sock,
    char     rx[64]     = {0};
    uint8_t  door_state = 0xFF;
    uint16_t gen        = 0;
-   int      count      = 0;
    int      i          = 0;
    int      sent       = 0;
    int      rlen       = 0;
@@ -338,11 +348,12 @@ static void build_and_send(int *p_bb_sock,
    (void)cJSON_AddNumberToObject(p_root, "age_lgt",      g_state.age_lgt);
    (void)cJSON_AddNumberToObject(p_root, "age_lck",      g_state.age_lck);
    (void)cJSON_AddNumberToObject(p_root, "batt_pir",     g_state.pir_batt);
+   (void)cJSON_AddNumberToObject(p_root, "pir_occupied",  g_state.pir_occupied);
    (void)cJSON_AddNumberToObject(p_root, "batt_lck",     g_state.lock_batt);
    (void)cJSON_AddNumberToObject(p_root, "batt_motor",   g_state.motor_batt);
    (void)cJSON_AddNumberToObject(p_root, "motor_online", g_state.motor_online);
 
-   g_state.reed_count   = ble_get_reed_count();
+   g_state.reed_count = ble_get_reed_count();
    p_reeds = cJSON_CreateArray();
 
    if (NULL != p_reeds)
@@ -415,18 +426,19 @@ static void build_and_send(int *p_bb_sock,
          ESP_LOGI(TAG, "[C3_MOTOR] Sent %d bytes", sent);
          g_state.motor_online = 1;
 
-         /* Drain any battery response from motor */
+         /* Drain battery response from motor -- arrives as SOC percent.
+          * {"batt_motor": <percent>} -- store directly, no conversion. */
          rlen = recv(*p_c3_sock, rx, sizeof(rx) - 1, MSG_DONTWAIT);
          if (rlen > 0)
          {
-            rx[rlen]   = '\0';
-            p_rx_json  = cJSON_Parse(rx);
+            rx[rlen]  = '\0';
+            p_rx_json = cJSON_Parse(rx);
             if (NULL != p_rx_json)
             {
                p_batt = cJSON_GetObjectItem(p_rx_json, "batt_motor");
-               if ((NULL != p_batt) && (p_batt->valueint > 0))
+               if ((NULL != p_batt) && (p_batt->valueint >= 0))
                {
-                  g_state.motor_batt = motor_mv_to_percent(p_batt->valueint);
+                  g_state.motor_batt = p_batt->valueint;
                   ESP_LOGI(TAG, "[C3_MOTOR] batt_motor=%d%%", g_state.motor_batt);
                }
                cJSON_Delete(p_rx_json);
@@ -446,14 +458,17 @@ static void build_and_send(int *p_bb_sock,
       else
       {
          *p_bb_block_count = 0;
-         ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u lgt=%d lck=%d reeds=%d mtr=%d batt_mtr=%d%%",
+         ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u occ=%d lgt=%d lck=%d reeds=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d",
                   g_state.avg_temp,
                   (unsigned)g_state.motion_count,
+                  g_state.pir_occupied,
                   g_state.light_state,
                   g_state.lock_state,
                   g_state.reed_count,
                   (int)g_state.motor_online,
-                  g_state.motor_batt);
+                  g_state.motor_batt,
+                  g_state.pir_batt,
+                  g_state.lock_batt);
       }
    }
 
@@ -571,20 +586,25 @@ static void run_bb_state_machine(int *p_sock,
          if (0 > *p_sock) { vTaskDelay(pdMS_TO_TICKS(SOCK_RETRY_DELAY_MS)); break; }
 
          flags = fcntl(*p_sock, F_GETFL, 0);
+         ESP_LOGI(TAG, "[BEAGLEBONE] Connecting to %s:%d", BEAGLEBONE_IP, BEAGLEBONE_PORT);
          (void)fcntl(*p_sock, F_SETFL, flags | O_NONBLOCK);
 
          ret = connect(*p_sock, (struct sockaddr *)p_addr, sizeof(*p_addr));
 
          if (0 == ret)
          {
+            trinity_log_event("EVENT: TCP_BB_CONNECTED\n");
             *p_state = TCP_STATE_CONNECTED; *p_block_count = 0;
+            ESP_LOGI(TAG, "[BEAGLEBONE] Connected (immediate)");
          }
          else if (EINPROGRESS == errno)
          {
+            ESP_LOGI(TAG, "[BEAGLEBONE] Connect in progress...");
             *p_connect_start = now; *p_state = TCP_STATE_CONNECTING;
          }
          else
          {
+            ESP_LOGW(TAG, "[BEAGLEBONE] Connect failed (errno=%d), retrying", errno);
             close(*p_sock); *p_sock = SOCK_INVALID;
             vTaskDelay(pdMS_TO_TICKS(CONNECTION_RETRY_DELAY_MS));
          }
@@ -595,6 +615,7 @@ static void run_bb_state_machine(int *p_sock,
       {
          if ((now - *p_connect_start) > BB_CONNECT_TIMEOUT_MS)
          {
+            ESP_LOGW(TAG, "[BEAGLEBONE] Connect timed out after %d ms", BB_CONNECT_TIMEOUT_MS);
             close(*p_sock); *p_sock = SOCK_INVALID; *p_state = TCP_STATE_DISCONNECTED;
             vTaskDelay(pdMS_TO_TICKS(CONNECTION_RETRY_DELAY_MS));
             break;
@@ -610,11 +631,14 @@ static void run_bb_state_machine(int *p_sock,
 
             if (FD_ISSET(*p_sock, &errorfds) || (0 != err))
             {
+               ESP_LOGW(TAG, "[BEAGLEBONE] Connect error (SO_ERROR=%d)", err);
                close(*p_sock); *p_sock = SOCK_INVALID; *p_state = TCP_STATE_DISCONNECTED;
                vTaskDelay(pdMS_TO_TICKS(CONNECTION_RETRY_DELAY_MS));
             }
             else if (FD_ISSET(*p_sock, &writefds))
             {
+               trinity_log_event("EVENT: TCP_BB_CONNECTED\n");
+               ESP_LOGI(TAG, "[BEAGLEBONE] Connected");
                *p_state = TCP_STATE_CONNECTED; *p_block_count = 0;
             }
          }
@@ -668,7 +692,6 @@ void tcp_manager_task(EventGroupHandle_t p_system_eg,
 
    while (1)
    {
-      /* ---- Trinity: kick WDT every loop iteration ---- */
       trinity_wdt_kick();
 
       now = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -693,18 +716,6 @@ void tcp_manager_task(EventGroupHandle_t p_system_eg,
                                   pdMS_TO_TICKS(TCP_SEND_INTERVAL_MS));
 
       drain_queues(bits);
-
-      {
-         MOTOR_PAYLOAD_T p_m;
-         while (pdTRUE == xQueueReceive(q_motor, &p_m, 0))
-         {
-            g_state.motor_online = p_m.online;
-            if (p_m.online && (p_m.batt > 0))
-            {
-               g_state.motor_batt = motor_mv_to_percent(p_m.batt);
-            }
-         }
-      }
 
       g_state.motor_online = (TCP_STATE_CONNECTED == c3_state) ? 1 : 0;
       build_and_send(&bb_sock, &c3_sock,

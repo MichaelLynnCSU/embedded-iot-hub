@@ -3,6 +3,7 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(reed_sensor)
 target_sources(app PRIVATE
     src/main.c
+    src/ble_adv.c
     src/battery.c
     src/build_info.c
     src/trinity_wdt.c

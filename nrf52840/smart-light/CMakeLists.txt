@@ -3,6 +3,7 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(smartlight_service)
 target_sources(app PRIVATE
     src/main.c
+    src/ble_gatt.c
     src/build_info.c
     src/trinity_wdt.c
     src/trinity_canary.c

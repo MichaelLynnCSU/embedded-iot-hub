@@ -1,3 +1,14 @@
+/*******************************************************************************
+ * \file field.overlay
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ * \date 01-01-2025
+ *
+ * \brief Field mode devicetree overlay for Pro Micro nRF52840 smart lock.
+ *
+ * \note    P0.29 vbat-div-en removed (2026-04-27):
+ *          Low-side GND switch removed from hardware. Divider hardwired
+ *          directly to GND. P0.29 node removed from overlay.
+ *******************************************************************************/
 /delete-node/ &storage_partition;
 
 / {
@@ -5,13 +16,6 @@
         zephyr,console = &uart0;
         zephyr,shell-uart = &uart0;
         zephyr,uart-mcumgr = &uart0;
-    };
-
-    vbat_div_en: vbat-div-en {
-        compatible = "gpio-leds";
-        vbat_enable: vbat-enable {
-            gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
-        };
     };
 
     zephyr,user {
@@ -62,8 +66,8 @@
         reg = <0>;
         zephyr,gain = "ADC_GAIN_1_6";
         zephyr,reference = "ADC_REF_INTERNAL";
-        zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
-        zephyr,input-positive = <NRF_SAADC_AIN0>;
+        zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40)>;
+        zephyr,input-positive = <NRF_SAADC_AIN0>; /* P0.02 -- Vbat/3 via 200k/100k divider */
         zephyr,resolution = <12>;
     };
 };

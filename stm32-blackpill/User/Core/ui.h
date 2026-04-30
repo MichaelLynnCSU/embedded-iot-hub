@@ -143,6 +143,9 @@ void ui_set_pir_count(uint32_t val);
 /** \brief Set PIR battery percent. \param val - 0-100. */
 void ui_set_pir_batt(uint8_t val);
 
+/** \brief Set PIR occupied state from sliding window. \param val - 0=empty, 1=occupied. */
+void ui_set_pir_occupied(uint8_t val);
+
 /** \brief Set reed door state. \param slot - 0-based index. \param state - 0=closed,1=open. */
 void ui_set_reed_state(uint8_t slot, uint8_t state);
 
