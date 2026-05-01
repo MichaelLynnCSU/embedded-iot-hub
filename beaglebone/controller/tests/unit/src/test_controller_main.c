@@ -1,4 +1,5 @@
 #include <CUnit/CUnit.h>
+#include "controller_internal.h"
 #include <CUnit/Basic.h>
 #include <stdint.h>
 #include <time.h>

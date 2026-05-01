@@ -51,7 +51,9 @@
 #define SEM_NAME           "/sensor_sem"                   /**< shared semaphore name */
 #define SENSOR_PIPE        "/tmp/sensor_pipe"              /**< sensor data named pipe */
 #define COMMAND_PIPE       "/tmp/controller_cmd"           /**< command named pipe */
+#ifndef DB_PATH
 #define DB_PATH            "/home/debian/db/sensors.db"   /**< SQLite database path */
+#endif
 #define CONTROLLER_LOG     "/var/log/data_controller.log" /**< log file path */
 #define CONTROLLER_LOG_OLD "/var/log/data_controller.log.old" /**< rotated log */
 #define UART_DEV           "/dev/ttyS1"                   /**< UART device for STM32 */
