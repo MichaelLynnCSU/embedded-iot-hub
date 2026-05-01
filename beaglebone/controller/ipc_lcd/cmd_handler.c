@@ -22,7 +22,8 @@
  *
  *          DB writes in process_sensor_frame() are batched in one
  *          Unit of Work transaction (db_begin/db_commit) to reduce
- *          SD card fsyncs on BeagleBone.
+ *          SD card fsyncs on BeagleBone. All writes — readings, motor,
+ *          and all active reed slots — share one BEGIN/COMMIT/fsync.
  *
  *          handle_get_room_status() owns the shm write — db_query_rooms()
  *          returns domain structs only (Repository pattern).
@@ -235,15 +236,16 @@ static void check_reed_online_state(int slot,
 }
 
 /******************************************************************************
- * \brief Process all reed slots from a received sensor data frame.
+ * \brief Update latest_data reed slots and detect state transitions.
  *
  * \param p_data - Pointer to received sensor data struct.
  *
  * \return void
  *
  * \details Detects generation changes and online/offline transitions,
- *          updates latest_data reed slots, saves active slots to DB,
- *          and logs active slot status.
+ *          updates latest_data reed slots, and logs active slot status.
+ *          DB writes are NOT done here — caller batches them into the
+ *          Unit of Work transaction in process_sensor_frame().
  *          Must be called with data_mutex held.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
@@ -289,12 +291,6 @@ static void process_reed_slots(const struct SensorData *p_data)
              p_data->reed_slots[i].state,
              p_data->reed_slots[i].batt,
              p_data->reed_slots[i].age);
-
-         db_save_reed(i + 1,
-                      p_data->reed_slots[i].name,
-                      p_data->reed_slots[i].state,
-                      p_data->reed_slots[i].batt,
-                      p_data->reed_slots[i].age);
       }
    }
 }
@@ -344,12 +340,15 @@ static void update_shm_rooms(const struct SensorData *p_data)
  * \details Updates latest_data, processes reed slots, pushes to shared
  *          memory, updates rooms, and saves all data to database in one
  *          Unit of Work transaction (one fsync on BeagleBone SD card).
+ *          All DB writes — readings, motor, and all active reed slots —
+ *          are batched inside a single BEGIN/COMMIT.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void process_sensor_frame(const struct SensorData *p_data)
 {
    struct CommandMsg auto_cmd = {.cmd = CMD_GET_LATEST}; /**< auto command */
+   int               i        = 0;                       /**< reed loop index */
 
    pthread_mutex_lock(&data_mutex);
 
@@ -397,10 +396,23 @@ static void process_sensor_frame(const struct SensorData *p_data)
    handle_get_latest(&auto_cmd);
    update_shm_rooms(p_data);
 
-   /* Unit of Work — batch all writes into one transaction / one fsync */
+   /* Unit of Work — all DB writes for this frame in one transaction.
+    * readings + motor + all active reed slots share one BEGIN/COMMIT
+    * and one fsync — meaningful speedup on BeagleBone eMMC/SD. */
    db_begin();
    db_save_reading(p_data);
    db_save_motor(p_data->motor_online, p_data->batt_motor);
+   for (i = 0; i < MAX_REEDS; i++)
+   {
+      if (p_data->reed_slots[i].active)
+      {
+         db_save_reed(i + 1,
+                      p_data->reed_slots[i].name,
+                      p_data->reed_slots[i].state,
+                      p_data->reed_slots[i].batt,
+                      p_data->reed_slots[i].age);
+      }
+   }
    db_commit();
 }
 
