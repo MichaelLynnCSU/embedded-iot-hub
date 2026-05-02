@@ -8,8 +8,11 @@
  *   2. Quick-start added to max17048_init() -- forces ModelGauge to restart
  *      SOC estimation from current voltage on boot.
  *
- * Calibration (2026-05-01):
- *   Fresh CR2032 reads ~3600-3700mV from VCELL register (multimeter ~3.5V).
+ * Calibration (2026-05-02):
+ *   Fresh CR2032 reads ~3150-3163mV from VCELL register under load.
+ *   3500+ mV readings observed on first boot are unsettled/unloaded artefacts --
+ *   not representative of real cell voltage. 3150mV is the consistent loaded value
+ *   across multiple nodes (ReedSensor1, ReedSensor2).
  *   Voltage is flat for most of cell life, drops sharply below 2800mV.
  *   Table thresholds based on empirical readings on this hardware.
  *
@@ -83,7 +86,7 @@ int max17048_voltage(const struct device *i2c_dev, uint32_t *response)
         /* VCELL register: 16-bit value, 78.125uV per LSB.
          * Returns uV -- callers divide by 1000 for mV.
          * Upstream formula retained -- no shift needed.
-         * Empirical calibration: fresh CR2032 reads ~3600-3700mV on this hardware.
+         * Empirical calibration: fresh CR2032 reads ~3150-3163mV under load on this hardware.
          * Reference: MAX17048 datasheet page 10, Table 2. */
         *response = ((uint32_t)raw_voltage * 78125) / 1000;
         return 0;
@@ -101,20 +104,23 @@ int max17048_percent(const struct device *i2c_dev, uint8_t *response)
 
         /* CR2032 voltage-to-SOC lookup table.
          * ModelGauge SOC register not used -- tuned for LiPo, not coin cell.
-         * Thresholds based on empirical VCELL readings on this hardware (2026-05-01):
-         *   Fresh CR2032 = ~3600-3700mV from VCELL register.
-         *   Voltage flat 3200-3600mV for most of cell life.
+         * Thresholds based on empirical VCELL readings on this hardware (2026-05-02):
+         *   Fresh CR2032 = ~3150-3163mV under load. Top threshold set to 3100mV so
+         *   all nodes report 100% on a fresh cell regardless of minor board-to-board
+         *   variation. First-boot readings above 3163mV are unsettled and not used
+         *   as the calibration reference.
+         *   Voltage flat 3100-3150mV for most of cell life.
          *   Drops sharply below 2800mV near end of life. */
-        if      (mv >= 3600) { *response = 100; }
-        else if (mv >= 3500) { *response = 90;  }
-        else if (mv >= 3400) { *response = 80;  }
-        else if (mv >= 3300) { *response = 70;  }
-        else if (mv >= 3200) { *response = 60;  }
-        else if (mv >= 3100) { *response = 50;  }
-        else if (mv >= 3000) { *response = 40;  }
-        else if (mv >= 2900) { *response = 30;  }
-        else if (mv >= 2800) { *response = 20;  }
-        else if (mv >= 2600) { *response = 10;  }
+        if      (mv >= 3100) { *response = 100; }
+        else if (mv >= 3000) { *response = 90;  }
+        else if (mv >= 2950) { *response = 80;  }
+        else if (mv >= 2900) { *response = 70;  }
+        else if (mv >= 2850) { *response = 60;  }
+        else if (mv >= 2800) { *response = 50;  }
+        else if (mv >= 2750) { *response = 40;  }
+        else if (mv >= 2700) { *response = 30;  }
+        else if (mv >= 2600) { *response = 20;  }
+        else if (mv >= 2400) { *response = 10;  }
         else if (mv >= 2000) { *response = 5;   }
         else                 { *response = 0;   }
 
@@ -161,7 +167,9 @@ static int max17048_init(const struct device *dev)
         /* Quick-start -- restart ModelGauge SOC estimation from current voltage.
          * Required for CR2032 on first boot to avoid 0% SOC reading.
          * Writes QUICKSTART_MODE (0x4000) to MODE register (0x06).
-         * No fuel_gauge API exposes this -- must write directly over I2C. */
+         * No fuel_gauge API exposes this -- must write directly over I2C.
+         * 125ms settle delay after quick-start; voltage reading taken after this
+         * point reflects loaded cell voltage (~3150mV on fresh CR2032). */
         {
                 uint8_t qs_buf[3] = { REGISTER_MODE, 0x40, 0x00 };
                 rc = i2c_write_dt(&cfg->i2c, qs_buf, sizeof(qs_buf));
