@@ -14,7 +14,7 @@
  *          - Board:    Pro Micro nRF52840
  *          - Reed pin: GPIO0 pin 11 (active-low, pull-up)
  *          - LED:      DT alias led0
- *          - Battery:  CR2032 direct on P0.02 (AIN0), no divider
+ *          - Battery:  MAX17048 fuel gauge over I2C1 (P1.13 SDA, P1.15 SCL)
  *
  * \note    WDT fix (2026-03-21):
  *          REED_POLL_MS reduced from 10000ms to 2000ms. trinity_wdt_kick()
@@ -29,11 +29,14 @@
  *          other code runs. Register is latched OR-history -- must be
  *          explicitly cleared to prevent stale bits surviving across boots.
  *
- * \note    Battery read before BLE (2026-04-22):
+ * \note    Battery read before BLE (2026-04-22, updated 2026-05-01):
  *          battery_read_soc() called before bt_enable() while VDD is
  *          stable. bt_enable() current spike collapses CR2032 rail and
  *          corrupts SAADC reading. Pre-populated into g_mfg_data via
- *          ble_adv_set_batt() so BLE thread uses it directly.
+ *          ble_adv_set_batt() so BLE thread uses it directly. With
+ *          MAX17048 the rail collapse is less critical (fuel gauge is
+ *          independent of SAADC) but the ordering is retained to ensure
+ *          the first advertisement always carries a valid SOC.
  *
  * \note    Battery divider removed (2026-04-22):
  *          Resistor divider physically removed. Vbat connects directly

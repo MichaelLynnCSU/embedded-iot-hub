@@ -3,25 +3,27 @@
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  * \date 01-01-2025
  *
- * \brief Battery voltage measurement for nRF52840 reed sensor node.
+ * \brief Battery measurement for nRF52840 reed sensor node.
  *
- * \details Reads VDD voltage via the nRF52840 internal SAADC VDD monitor.
- *          No external pin, no resistor divider, no loading of the CR2032.
+ * \details Reads SOC and voltage from MAX17048 fuel gauge over I2C1
+ *          (P1.13 SDA, P1.15 SCL). Uses Zephyr fuel_gauge API.
+ *          Returns -1 / 0 on error so callers can store NULL in SQLite.
+ *          SOC is clamped to 100 -- ModelGauge reports >100% on fresh
+ *          cells until the algorithm settles (~few minutes).
  *
  *          Hardware:
- *          - Board:    Teyleten Robot Pro Micro nRF52840
- *          - Regulator: HX3001 LDO, always present, outputs 2.5V
- *          - Power path: CR2032 (3V) → HX3001 → 2.5V VDD → nRF52840
- *          - B+ is accessible before the LDO on the coin cell holder positive
- *          - ADC channel: zephyr_user node index 0, NRF_SAADC_VDD (internal)
- *          - ADC: 12-bit, ADC_GAIN_1_6, ADC_REF_INTERNAL (0.6V)
- *          - Max measurable VDD: 3.6V (0.6V / (1/6) gain)
+ *          - Board:      Teyleten Robot Pro Micro nRF52840
+ *          - Fuel gauge: Adafruit MAX17048 breakout (PID 5580)
+ *          - I2C bus:    I2C1, nordic,nrf-twim, 100kHz
+ *          - SDA:        P1.13 (header pin SDA1)
+ *          - SCL:        P1.15 (header pin SCL1)
+ *          - Address:    0x36
  *
- * \warning NEXT DEVELOPER — READ THIS BEFORE CHANGING BATTERY MEASUREMENT.
- *          Four approaches were tested empirically on this exact board before
- *          arriving at the MAX17048. Do not re-attempt any of them. They have
- *          all been tried and the failure modes are fully understood. See notes
- *          below for the complete history.
+ * \warning NEXT DEVELOPER -- READ THIS BEFORE CHANGING BATTERY MEASUREMENT.
+ *          Five approaches were tested empirically on this exact hardware
+ *          before arriving at the working MAX17048 configuration. Do not
+ *          re-attempt any of them. They have all been tried and the failure
+ *          modes are fully understood.
  *
  * \note    BOARD TOPOLOGY (2026-04-22):
  *          The Teyleten Robot Pro Micro nRF52840 has a HX3001 LDO regulator
@@ -85,16 +87,47 @@
  *          Tested both with BLE active and pre-BLE (radio idle) -- both failed.
  *          Radio state is not the determining factor. Cell impedance is.
  *
- * \note    TEST 5 -- MAX17048 fuel gauge IC (CURRENT IMPLEMENTATION):
- *          Dedicated fuel gauge IC connected directly to B+ over I2C.
- *          The MAX17048 measures cell voltage using nanoamp-range bias current,
- *          completely independent of VDD rail and SAADC. No sampling window,
- *          no impedance loading, no interaction with BLE radio activity.
- *          ModelGauge algorithm provides accurate SOC without requiring a
- *          voltage-to-percent curve. This is the correct solution for CR2032
- *          monitoring on a board with a switching/LDO regulator in the power
- *          path. All previous SAADC-based approaches are dead ends on this
- *          hardware -- do not revisit them.
+ * \note    TEST 5 -- MAX17048 fuel gauge IC, first attempt (FAILED) (2026-05-01):
+ *          Adafruit MAX17048 breakout (PID 5580) connected over I2C1.
+ *          IC powered via VIN pin, SDA/SCL wired to P1.13/P1.15.
+ *          Result: Consistent NACK on address 0x36. Logic analyzer confirmed
+ *          address byte transmitted correctly but no ACK returned.
+ *          Root cause: On this specific Adafruit board revision, VIN and BAT
+ *          are NOT the same net. The MAX17048 CELL pin is only powered through
+ *          the BAT net (JST connector). Without battery on CELL, the IC
+ *          powers up but refuses all I2C transactions.
+ *          Note: The Adafruit datasheet and multiple online sources incorrectly
+ *          state that VIN and BAT are tied together. They are not on this
+ *          board revision. Confirmed by logic analyzer showing correct address
+ *          transmission with consistent NACK, and by multimeter showing VIN
+ *          powered but CELL floating.
+ *          Additional debugging performed:
+ *          - Swapped two brand new ICs -- same result, ruling out faulty IC.
+ *          - Tried nordic,nrf-twi vs nordic,nrf-twim -- twim required.
+ *          - Tried &pinctrl wrapper vs direct node reference -- direct
+ *            node reference required to avoid pin conflict with board dtsi.
+ *          - Confirmed pins P1.13/P1.15 correct via logic analyzer.
+ *          - Confirmed 100kHz clock-frequency required for stable operation.
+ *
+ * \note    TEST 6 -- MAX17048 with BAT jumper to VIN (CURRENT IMPLEMENTATION)
+ *          (2026-05-01):
+ *          Same wiring as Test 5 but with a jumper wire from BAT pad to VIN
+ *          pin on the Adafruit breakout, connecting the CELL input to the
+ *          CR2032 rail. Logic analyzer immediately showed full I2C transaction:
+ *          AW:36 ACK, Data write ACK, AR:36 ACK, Data read ACK, STOP.
+ *          SOC reads correctly, clamped to 100% (ModelGauge reports >100%
+ *          on fresh cells for a few minutes until algorithm settles).
+ *
+ * \note    MAX17048 wiring (2026-05-01):
+ *          Adafruit breakout PID 5580 -- THIS BOARD REVISION REQUIRES A
+ *          JUMPER FROM BAT PAD TO VIN PIN. Without this jumper the CELL
+ *          input floats and the IC NACKs all I2C transactions.
+ *          VIN  → CR2032 B+ (board VCC rail)
+ *          GND  → GND
+ *          SDA  → P1.13 (header pin SDA1) -- 10K pullup onboard
+ *          SCL  → P1.15 (header pin SCL1) -- 10K pullup onboard
+ *          BAT  → jumper to VIN (required -- see Test 5/6 notes above)
+ *          ALRT → floating
  *
  * \note    Enable pin removed (2026-03-29):
  *          Original design used P0.29 as a high-side enable switch.
@@ -103,99 +136,108 @@
  *          the ADC pin floated and saturated at raw=4095 (3.6V full
  *          scale), producing ghost voltages. Fix: removed enable pin
  *          entirely. No GPIO needed.
+ *
+ * \note    I2C driver fix (2026-05-01):
+ *          Board default for i2c1 is nordic,nrf-twi (legacy interrupt-driven
+ *          driver). This must be overridden to nordic,nrf-twim (EasyDMA) in
+ *          the overlay. The legacy driver causes NACK on address under BLE
+ *          radio activity due to timing conflicts. See promicro_nrf52840.overlay
+ *          for the compatible override and pinctrl configuration.
+ *          Direct node reference (&i2c1_default / &i2c1_sleep) required --
+ *          wrapping in &pinctrl {} causes duplicate label conflicts with the
+ *          board dtsi identical to the UART pin issue (2026-03-29).
  ******************************************************************************/
 
 #include "battery.h"
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/fuel_gauge.h>
 #include <zephyr/logging/log.h>
 #include "trinity_log.h"
 
 LOG_MODULE_REGISTER(battery, LOG_LEVEL_INF);
 
-#define VBAT_BUF_SIZE  48   /**< vbat log message buffer size */
+#define VBAT_BUF_SIZE   48    /**< vbat log message buffer size */
+#define SOC_MAX         100u  /**< clamp -- ModelGauge reports >100 on fresh cells */
 
-static const struct adc_dt_spec g_adc_channel =
-   ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 0);
+static const struct device *g_fg = NULL;
 
 int battery_init(void)
 {
-   int err = 0;
+   g_fg = DEVICE_DT_GET_ANY(maxim_max17048);
 
-   if (!adc_is_ready_dt(&g_adc_channel))
+   if (NULL == g_fg)
    {
-      LOG_ERR("ADC not ready");
+      LOG_ERR("MAX17048 device not found in DT");
       return -ENODEV;
    }
 
-   err = adc_channel_setup_dt(&g_adc_channel);
-   if (0 != err)
+   if (!device_is_ready(g_fg))
    {
-      LOG_ERR("ADC channel setup failed (err=%d)", err);
-      return err;
+      LOG_ERR("MAX17048 not ready");
+      g_fg = NULL;
+      return -ENODEV;
    }
 
+   LOG_INF("MAX17048 ready");
    return 0;
 }
 
 int battery_read_mv(void)
 {
-   int     err     = 0;
-   int16_t raw     = 0;
-   int32_t mv      = 0;
-   int     vbat_mv = 0;
+   union fuel_gauge_prop_val val;
+   int                       rc = 0;
 
-   struct adc_sequence seq =
+   if (NULL == g_fg) { return -EIO; }
+
+   rc = fuel_gauge_get_prop(g_fg, FUEL_GAUGE_VOLTAGE, &val);
+   if (0 != rc)
    {
-      .buffer      = &raw,
-      .buffer_size = sizeof(raw),
-   };
-
-   (void)adc_sequence_init_dt(&g_adc_channel, &seq);
-
-   err = adc_read_dt(&g_adc_channel, &seq);
-   LOG_INF("RAW ADC ONLY = %d", raw);
-   if (0 != err)
-   {
-      LOG_ERR("ADC read failed (err=%d)", err);
+      LOG_ERR("MAX17048 voltage read failed (rc=%d)", rc);
       return -EIO;
    }
 
-   mv = (int32_t)raw;
-   (void)adc_raw_to_millivolts_dt(&g_adc_channel, &mv);
-
-   /* MAX17048 handles cell measurement -- this path retained for reference
-    * only. See file header notes for full SAADC failure history. */
-   vbat_mv = (int)mv;
-
-   LOG_INF("raw=%d vdd_mv=%d", raw, vbat_mv);
-
-   return vbat_mv;
+   /* FUEL_GAUGE_VOLTAGE returns uV -- convert to mV */
+   return val.voltage / 1000;
 }
 
 uint8_t battery_read_soc(void)
 {
-   int mv = battery_read_mv();
-   if (0 > mv)
+   union fuel_gauge_prop_val val;
+   int                       rc  = 0;
+   char                      buf[VBAT_BUF_SIZE] = {0};
+   uint8_t                   soc = 0;
+
+   if (NULL == g_fg) { return 0; }
+
+   rc = fuel_gauge_get_prop(g_fg, FUEL_GAUGE_RELATIVE_STATE_OF_CHARGE, &val);
+   if (0 != rc)
    {
-      LOG_WRN("[BATT] Read failed (err=%d)", mv);
+      LOG_ERR("MAX17048 SOC read failed (rc=%d)", rc);
       return 0;
    }
-   uint8_t soc = mv_to_soc(mv);
-   LOG_INF("[BATT] %d mV -> %d%%", mv, soc);
+
+   /* Clamp to 100 -- ModelGauge reports >100% on fresh cells until
+    * the algorithm settles over the first few minutes of operation. */
+   soc = (val.relative_state_of_charge > SOC_MAX) ?
+         SOC_MAX : (uint8_t)val.relative_state_of_charge;
+
+   LOG_INF("[BATT] SOC=%d%%", soc);
+
+   (void)snprintf(buf, sizeof(buf), "EVENT: BATT_SOC %d%%\n", soc);
+   trinity_log_event(buf);
+
    return soc;
 }
 
 void battery_print_status(void)
 {
-   int  vbat_mv                 = 0;
-   char vbat_buf[VBAT_BUF_SIZE] = {0};
+   int  mv                 = 0;
+   char buf[VBAT_BUF_SIZE] = {0};
 
-   vbat_mv = battery_read_mv();
-   if (0 > vbat_mv) { LOG_ERR("Battery read failed"); return; }
+   mv = battery_read_mv();
+   if (0 > mv) { LOG_ERR("Battery read failed"); return; }
 
-   (void)snprintf(vbat_buf, sizeof(vbat_buf),
-                  "EVENT: BOOT | VBAT: %d mV\n", vbat_mv);
-   trinity_log_event(vbat_buf);
-   LOG_INF("VBAT: %d mV", vbat_mv);
+   (void)snprintf(buf, sizeof(buf), "EVENT: BOOT | VBAT: %d mV\n", mv);
+   trinity_log_event(buf);
+   LOG_INF("VBAT: %d mV", mv);
 }
