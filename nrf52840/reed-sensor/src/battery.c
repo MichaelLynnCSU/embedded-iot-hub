@@ -221,8 +221,7 @@ uint8_t battery_read_soc(void)
    soc = (val.relative_state_of_charge > SOC_MAX) ?
          SOC_MAX : (uint8_t)val.relative_state_of_charge;
 
-   LOG_INF("[BATT] SOC=%d%%", soc);
-
+   LOG_INF("[BATT] SOC=%d%% mV=%d", soc, battery_read_mv());
    (void)snprintf(buf, sizeof(buf), "EVENT: BATT_SOC %d%%\n", soc);
    trinity_log_event(buf);
 

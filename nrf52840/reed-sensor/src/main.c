@@ -229,6 +229,7 @@ int main(void)
      * bt_enable() surge collapses CR2032 rail and corrupts SAADC. */
     soc = battery_read_soc();
     ble_adv_set_batt(soc);
+    LOG_INF("Pre-BLE battery mV: %d", battery_read_mv());
     LOG_INF("Pre-BLE battery SOC: %d%%", soc);
     trinity_wdt_kick();
 

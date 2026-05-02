@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(reed_sensor)
+
 target_sources(app PRIVATE
     src/main.c
     src/ble_adv.c
@@ -12,4 +13,9 @@ target_sources(app PRIVATE
     src/trinity_stats.c
     src/trinity_fault.c
     src/trinity_boot.c
+    drivers/fuel_gauge/max17048/max17048.c
+)
+
+target_include_directories(app PRIVATE
+    drivers/fuel_gauge/max17048
 )
