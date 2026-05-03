@@ -1,12 +1,23 @@
 #ifndef MAIN_H
 #define MAIN_H
 #include <stdint.h>
+#include <zephyr/bluetooth/bluetooth.h>
 
-#define BATT_UPDATE_TICKS     150
-#define STATS_INTERVAL_TICKS   30
-#define LOOP_SLEEP_MS        2000
+/* Advertisement burst durations */
+#define ADV_BURST_PIR_MS      2000U   /* PIR wake   -- long burst  */
+#define ADV_BURST_TIMER_MS     300U   /* Timer wake -- short burst */
 
-#define MFG_DATA_SIZE           8    /* was 7 -- added occupied byte */
+/* Deep sleep heartbeat interval -- 10 seconds in microseconds.
+ * Hub must use this as the minimum vacancy timeout baseline.
+ * Hub should not declare vacant until at least 2x this interval
+ * has elapsed without an occupied=1 packet, to tolerate one
+ * missed timer packet without a false vacancy event. */
+#define DEEP_SLEEP_INTERVAL_US  (10ULL * 1000ULL * 1000ULL)
+
+/* WDT timeout -- burst sleep kicks before AND mid-burst if >= this value */
+#define WDT_TIMEOUT_MS        3000U
+
+#define MFG_DATA_SIZE           8
 #define MFG_COMPANY_ID_0     0xFF
 #define MFG_COMPANY_ID_1     0xFF
 #define MFG_MOTION_MSB_IDX      2
@@ -14,15 +25,7 @@
 #define MFG_MOTION_B1_IDX       4
 #define MFG_MOTION_LSB_IDX      5
 #define MFG_BATT_IDX            6
-#define MFG_OCCUPIED_IDX        7    /* 0=empty, 1=occupied          */
-
-#define WDT_TIMEOUT_MS       3000
-
-/* Sliding window: WINDOW_TICKS slots * LOOP_SLEEP_MS = window duration.
- * Default: 4 * 2000ms = 8s window.
- * OCCUPIED_THRESH: minimum event sum across window to assert occupied.    */
-#define WINDOW_TICKS            4
-#define OCCUPIED_THRESH         1
+#define MFG_OCCUPIED_IDX        7    /* 0=empty, 1=occupied */
 
 static inline void pack_motion_count(uint8_t *mfg, uint32_t count)
 {

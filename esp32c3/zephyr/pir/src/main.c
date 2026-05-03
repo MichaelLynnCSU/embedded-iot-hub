@@ -5,35 +5,141 @@
  *
  * \brief   ESP32-C3 PIR BLE motion sensor entry point.
  *
- * \note    WDT main-loop fix (2026-03-23):
- *          Previous code: k_sleep(K_SECONDS(10)) THEN trinity_wdt_kick().
- *          WDT timeout is 3s. The sleep fired before the kick -- device
- *          reset on every iteration in field mode. Fixed by moving the kick
- *          to the TOP of the loop before the sleep, and reducing sleep to
- *          2s so the pattern matches the other Trinity nodes. The 10s
- *          tick counter scaling is updated to preserve the original
- *          5-minute battery interval (150 ticks) and 60s stats interval
- *          (30 ticks) at the new 2s rate.
+ * \details Deep sleep architecture. main() runs once per wake cycle,
+ *          detects wake reason, advertises a burst, configures wake
+ *          sources, then calls esp_deep_sleep_start(). Every wake is
+ *          a full reboot -- there is no main loop.
  *
- * \note    WDT boot fix (2026-03-23):
- *          trinity_wdt_kick() added after trinity_wdt_init() and after
- *          bt_enable() (~1-2s blocking call) to prevent WDT firing during
- *          boot before the main loop starts kicking.
+ *          Wake sources (configured every cycle):
+ *          - GPIO3 (PIR)  -- event-driven, wakes on HIGH
+ *          - RTC timer    -- periodic heartbeat, DEEP_SLEEP_INTERVAL_US
  *
- * \note    Pre-init canary (2026-03-23):
- *          trinity_log.c now writes a .noinit canary at PRE_KERNEL_1 before
- *          any SYS_INIT driver runs. trinity_log_dump_previous() reports
- *          PRE_INIT_CRASH if the board died before trinity_log_init().
+ *          Burst duration:
+ *          - PIR wake     -- ADV_BURST_PIR_MS   (2000ms)
+ *          - Timer wake   -- ADV_BURST_TIMER_MS  (300ms)
+ *          - First boot   -- ADV_BURST_TIMER_MS  (300ms)
  *
- * \note    Occupied sliding window (2026-04-29):
- *          motion_count is a monotonic counter incremented by the PIR ISR.
- *          Each main-loop tick computes the delta since the previous tick
- *          and stores it in a ring buffer of WINDOW_TICKS slots.  The sum
- *          across the ring is compared to OCCUPIED_THRESH to derive a
- *          boolean occupied flag that is broadcast in MFG byte [7].
- *          One ISR in the window asserts occupied for the full window
- *          duration (WINDOW_TICKS * LOOP_SLEEP_MS ms) then clears
- *          automatically as the event rotates out the back of the ring.
+ *          Occupied flag:
+ *          Set in MFG payload byte[7] on PIR wake, clear on timer wake.
+ *          Hub owns all occupancy window and timeout logic -- no sliding
+ *          window on device. State resets every wake by design.
+ *
+ * \note    Architecture (2026-05-03):
+ *          Sliding window occupancy logic moved to hub.
+ *          Motivation: always-on BLE stack idles at ~52mA, limiting a
+ *          3000mAh cell to ~57 hours (2.4 days). Deep sleep architecture
+ *          measured at 19.93mA average over full wake/advertise/sleep
+ *          cycles (PPK2, nRF Power Profiler), extending runtime to
+ *          ~150 hours (~6.3 days) on the same cell. 2.6x improvement.
+ *
+ *          Device is now stateless per wake:
+ *          - PIR wake   -> occupied=1, motion_count++, 2s burst, sleep
+ *          - Timer wake -> occupied=0, 300ms burst, sleep
+ *          Hub uses motion_count (monotonic, NVS-persistent) to detect
+ *          missed BLE packets and owns all occupancy timeout logic.
+ *          No window state is kept on device -- intentional by design.
+ *
+ * \note    WDT (2026-03-23):
+ *          trinity_wdt_kick() called before any blocking operation.
+ *          WDT timeout is 3s. Kick is issued immediately before the
+ *          burst sleep to isolate the window to burst_ms only.
+ *          Mid-burst kick fires if burst_ms >= WDT_TIMEOUT_MS.
+ *
+ * \note    Deep sleep power (2026-05-03):
+ *          Always-on BLE advertising on ESP32-C3 idles at ~52mA due to
+ *          the BLE stack requiring CPU involvement. Deep sleep drops
+ *          average current to 19.93mA measured over real wake cycles.
+ *          esp_deep_sleep_start() is __noreturn__ -- every wake is a
+ *          full cold boot. Zephyr PM layer (CONFIG_PM) does not reach
+ *          true deep sleep on ESP32-C3; use ESP-IDF API directly.
+ *          CONFIG_PM=n in bench.conf -- USB console is incompatible with
+ *          deep sleep (USB peripheral loses power during sleep).
+ *
+ * \note    Motion count persistence (2026-05-03):
+ *          motion_count persisted via NVS (trinity_nvs_esp.c) on every
+ *          confirmed PIR wake. Survives deep sleep cycles, resets only
+ *          on power-on or hard reset.
+ *
+ *          RTC_DATA_ATTR was attempted first and does not work on this
+ *          toolchain/Zephyr version. See CHANGELOG below for full details.
+ *
+ *          Hub uses delta between received motion_count values to detect
+ *          missed BLE packets during lossy periods.
+ *          All other state resets on every wake by design.
+ *
+ *****************************************************************************
+ * CHANGELOG
+ *
+ * 2026-05-03 — Hardware: AM312 PIR false trigger fix
+ *   PROBLEM:  GPIO3 read 1.28V only when physically touching the wire or
+ *             board -- not the PIR firing. Body capacitance was sufficient
+ *             to lift a floating pin to ~1.28V, which crossed the ESP32-C3
+ *             GPIO HIGH threshold and triggered a spurious wake. A properly
+ *             driven signal would jump to 2.6-3V and hold there -- the
+ *             1.28V that only appeared on touch confirmed no actual driver
+ *             on the line.
+ *             AM312 OUT measured 2.6V when disconnected from ESP32,
+ *             collapsed to 1.28V the moment it was connected to GPIO3.
+ *             Root cause: AM312 output is essentially open-drain with a
+ *             weak internal pull-up. It cannot source enough current to
+ *             overcome the ESP32-C3 internal pull-down (~45kΩ). The two
+ *             were fighting and the pull-down was winning -- any real
+ *             motion signal was also being suppressed.
+ *   FIX:      Disabled the internal pull-down on GPIO3. AM312 now drives
+ *             cleanly to 2.6-3V on motion, returns to 0V at idle.
+ *             Debounce check (10ms settle + PIN re-read) retained in
+ *             software to catch any residual transient wakes.
+ *
+ * 2026-05-03 — Architecture: always-on BLE -> deep sleep
+ *   PROBLEM:  Always-on BLE advertising required continuous CPU involvement
+ *             on ESP32-C3, idling at ~52mA average. On a 3000mAh cell this
+ *             gives ~57 hours (2.4 days) of runtime.
+ *   FIX:      Replaced always-on loop with deep sleep architecture.
+ *             main() runs once per wake cycle, advertises a short burst,
+ *             then calls esp_deep_sleep_start() (noreturn). Every wake is
+ *             a full cold boot. Wake sources: GPIO3 (PIR) and RTC timer
+ *             (10s heartbeat). Average current measured at 19.93mA over
+ *             a 3m49s sample window capturing full wake/advertise/sleep
+ *             cycles (PPK2, nRF Power Profiler). Runtime on 3000mAh cell:
+ *             ~150 hours (~6.3 days). 2.6x improvement over always-on.
+ *             CONFIG_PM=n -- Zephyr PM layer does not reach true deep sleep
+ *             on ESP32-C3. ESP-IDF esp_deep_sleep_start() used directly.
+ *
+ * 2026-05-03 — Bug: motion_count not persisting across deep sleep
+ *   PROBLEM:  motion_count declared as `static RTC_DATA_ATTR uint32_t`.
+ *             The `static` storage class caused the compiler to commit the
+ *             symbol to DRAM first; RTC_DATA_ATTR section attribute was
+ *             silently ignored. Boot log confirmed: `load:0x50000000,
+ *             len:0xc` (12 bytes in RTC -- only the wake stub, not
+ *             motion_count). DRAM is reloaded from flash on every deep
+ *             sleep wake so motion_count reset to 0 every boot and count
+ *             always showed 1.
+ *             Root cause: Zephyr ESP32-C3 linker script has no proper
+ *             .rtc.data section. RTC_DATA_ATTR is a no-op for data
+ *             variables in this toolchain/Zephyr version combination.
+ *             Removing `static` was also attempted and did not change
+ *             placement -- confirmed by boot log showing len:0xc unchanged.
+ *   FIX:      Removed RTC_DATA_ATTR entirely. Added trinity_nvs_esp.c --
+ *             a dedicated NVS persistence module using storage_partition
+ *             (0x3b0000, 176KB). NVS is mounted independently of trinity
+ *             flash log (which uses log_partition -- no overlap, no
+ *             collision risk). motion_count is read from NVS on every
+ *             wake and written to NVS only on confirmed PIR wakes.
+ *             Flash wear is negligible at even 100 events/day.
+ *             count now accumulates correctly across all deep sleep cycles.
+ * 2026-05-03 — Hardware: AM312 false triggers on battery power
+ *   PROBLEM:  PIR count incrementing with no movement when running on
+ *             battery. AM312 was physically close to the LiPo cell.
+ *             Battery warms under load (BLE TX, flash writes) and the
+ *             thermal change falls within the AM312 detection cone.
+ *             PIR fired on the battery's IR signature -- a real detection
+ *             of a real heat source, not an electrical false trigger.
+ *             Did not occur on USB power because battery stays at ambient
+ *             temperature when not under load.
+ *   FIX:      Moved AM312 away from battery. Keep PIR and LiPo thermally
+ *             separated in final enclosure. If space is constrained, a
+ *             small aluminum tape barrier between battery and PIR face
+ *             will block the IR path.
  ******************************************************************************/
 
 #include <zephyr/kernel.h>
@@ -41,6 +147,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
+#include <esp_sleep.h>
 #include "ble_adv.h"
 #include "max17048.h"
 #include "trinity_log.h"
@@ -48,123 +155,154 @@
 
 LOG_MODULE_REGISTER(pir_main, LOG_LEVEL_INF);
 
-#define PIR_PIN    3
-#define GPIO_NODE  DT_NODELABEL(gpio0)
-
-static uint32_t motion_count = 0;
-static uint8_t  batt_soc     = 0;
-
-static struct gpio_callback pir_cb_data;
-
-/* Sliding window state */
-static uint8_t  window[WINDOW_TICKS];
-static int      win_head   = 0;
-static uint32_t prev_count = 0;
+#define PIR_PIN   3
+#define GPIO_NODE DT_NODELABEL(gpio0)
 
 /*----------------------------------------------------------------------------*/
 
-static void pir_callback(const struct device *dev,
-                          struct gpio_callback *cb,
-                          uint32_t pins)
+static void enter_deep_sleep(void)
 {
-    if (gpio_pin_get(dev, PIR_PIN))
-    {
-        motion_count++;
-        trinity_log_event("EVENT: MOTION\n");
-        LOG_INF("Motion detected! Count=%u  Batt=%d%%", motion_count, batt_soc);
-    }
+    /* Both wake sources re-armed every cycle -- deep sleep clears all
+     * wake config on exit. GPIO3 for motion events, RTC timer for
+     * periodic heartbeat so hub can detect device loss. */
+    esp_deep_sleep_enable_gpio_wakeup(1ULL << PIR_PIN,
+                                       ESP_GPIO_WAKEUP_GPIO_HIGH);
+    esp_sleep_enable_timer_wakeup(DEEP_SLEEP_INTERVAL_US);
+
+    LOG_INF("Entering deep sleep (timer=%llu us, GPIO%d wake)",
+            (unsigned long long)DEEP_SLEEP_INTERVAL_US, PIR_PIN);
+
+    /* Drain deferred log synchronously before sleep.
+     * CONFIG_LOG_PROCESS_THREAD_SLEEP_MS=1000 means the log thread will
+     * not flush before esp_deep_sleep_start() destroys RAM. */
+    trinity_log_flush();
+
+    esp_deep_sleep_start(); /* noreturn -- next line never executes */
 }
 
 /*----------------------------------------------------------------------------*/
 
 int main(void)
 {
-    int ret        = 0;
-    int tick       = 0;
-    int batt_tick  = 0;
-    int stats_tick = 0;
-    int mv         = 0;
+    int      ret       = 0;
+    int      mv        = 0;
+    uint8_t  batt_soc  = 0;
+    uint8_t  occupied  = 0;
+    uint32_t burst_ms  = 0;
+
+    esp_sleep_wakeup_cause_t wake_reason = esp_sleep_get_wakeup_cause();
 
     LOG_INF("===========================================");
     LOG_INF("  ESP32-C3 PIR BLE Motion Sensor");
+    LOG_INF("  Wake: %d", (int)wake_reason);
     LOG_INF("===========================================");
 
     trinity_log_dump_previous();
     trinity_log_init();
-    trinity_log_event("EVENT: BOOT\n");
-
     trinity_wdt_init();
     trinity_wdt_kick();
 
+    trinity_nvs_init();
+    uint32_t motion_count = trinity_nvs_read_motion_count();
+
     const struct device *gpio = DEVICE_DT_GET(GPIO_NODE);
-    if (!device_is_ready(gpio)) { LOG_ERR("GPIO not ready"); return 0; }
+    if (!device_is_ready(gpio))
+    {
+        LOG_ERR("GPIO not ready");
+        enter_deep_sleep();
+        return 0;
+    }
     gpio_pin_configure(gpio, PIR_PIN, GPIO_INPUT);
 
-    /* Kick before ble_adv_init -- bt_enable() blocks ~1-2s */
+    /* Determine burst duration and occupied flag from wake reason */
+    switch (wake_reason)
+    {
+        case ESP_SLEEP_WAKEUP_GPIO:
+            /* Debounce: confirm PIN is still HIGH after settle time.
+             * Rules out transient pulls during GPIO peripheral init
+             * that can misfire as a GPIO wake on some timer wakes.
+             *
+             * Also catches body capacitance false triggers -- a floating
+             * or weakly driven pin can be lifted by proximity/touch to
+             * ~1.28V which crosses the GPIO HIGH threshold. A real PIR
+             * signal holds 2.6-3V; anything that drops on re-read is
+             * rejected here. See CHANGELOG: AM312 false trigger fix. */
+            k_sleep(K_MSEC(10));
+            if (gpio_pin_get(gpio, PIR_PIN) != 1)
+            {
+                /* False wake -- treat as timer heartbeat */
+                LOG_WRN("GPIO wake but PIN low -- false trigger, treating as heartbeat");
+                occupied = 0;
+                burst_ms = ADV_BURST_TIMER_MS;
+                break;
+            }
+            motion_count++;
+            trinity_nvs_write_motion_count(motion_count);
+            occupied = 1;   /* hub starts/extends occupancy window on receipt */
+            burst_ms = ADV_BURST_PIR_MS;
+            trinity_log_event("EVENT: MOTION\n");
+            LOG_INF("PIR wake -- motion detected (count=%u)", motion_count);
+            break;
+
+        case ESP_SLEEP_WAKEUP_TIMER:
+            occupied = 0;   /* hub expires occupancy window after DEEP_SLEEP_INTERVAL_US + margin */
+            burst_ms = ADV_BURST_TIMER_MS;
+            LOG_INF("Timer wake -- heartbeat");
+            break;
+
+        default:
+            /* First boot or undefined wake */
+            occupied = 0;
+            burst_ms = ADV_BURST_TIMER_MS;
+            trinity_log_event("EVENT: BOOT\n");
+            LOG_INF("Cold boot");
+            break;
+    }
+
+    /* BLE init and start advertising */
     trinity_wdt_kick();
     ret = ble_adv_init();
-    if (0 != ret) { return 0; }
+    if (0 != ret)
+    {
+        LOG_ERR("BLE init failed (%d) -- sleeping", ret);
+        enter_deep_sleep();
+        return 0;
+    }
     trinity_wdt_kick();
 
+    /* Battery read */
     max17048_init();
     batt_soc = (uint8_t)max17048_read_soc();
     mv       = max17048_read_mv();
     LOG_INF("Battery: %d%% (%d mV)", batt_soc, mv);
-    ble_adv_update(motion_count, batt_soc, 0);
 
-    gpio_init_callback(&pir_cb_data, pir_callback, BIT(PIR_PIN));
-    gpio_add_callback(gpio, &pir_cb_data);
-    gpio_pin_interrupt_configure(gpio, PIR_PIN, GPIO_INT_EDGE_BOTH);
-    LOG_INF("PIR interrupt configured");
-    LOG_INF("*** System Ready ***");
+    /* Update advertisement payload -- must be called before any hub
+     * can act on the data. ble_adv_init() starts advertising with
+     * zeroed payload; this overwrites it with correct values. */
+    ble_adv_update(motion_count, batt_soc, occupied);
+    LOG_INF("Advertising %ums | count=%u occ=%d batt=%d%%",
+            burst_ms, motion_count, occupied, batt_soc);
 
-    while (1)
+    /* Kick immediately before burst sleep to give the full WDT_TIMEOUT_MS
+     * budget to the burst. Mid-burst kick required if burst >= WDT timeout. */
+    trinity_wdt_kick();
+    if (burst_ms >= WDT_TIMEOUT_MS)   /* fix: was > 2000U, missed exact 2000ms PIR burst */
     {
+        k_sleep(K_MSEC(burst_ms / 2U));
         trinity_wdt_kick();
-        k_sleep(K_MSEC(LOOP_SLEEP_MS));
-
-        /* --- sliding window update ----------------------------------------
-         * delta: events fired by ISR since the last tick.
-         * Store in current ring slot, advance head, sum all slots.
-         * NOTE: motion_count is written by ISR and read here without a lock.
-         * On ESP32-C3 (single-core RV32) a 32-bit load is atomic.  If this
-         * code is ever ported to a multi-core target use atomic_t instead.
-         * ----------------------------------------------------------------- */
-        uint32_t delta = motion_count - prev_count;
-        prev_count = motion_count;
-
-        window[win_head] = (uint8_t)(delta > 255U ? 255U : delta);
-        win_head = (win_head + 1) % WINDOW_TICKS;
-
-        uint32_t win_sum = 0;
-        for (int i = 0; i < WINDOW_TICKS; i++) { win_sum += window[i]; }
-        uint8_t occupied = (win_sum >= OCCUPIED_THRESH) ? 1U : 0U;
-        /* ----------------------------------------------------------------- */
-
-        ble_adv_update(motion_count, batt_soc, occupied);
-
-        if (tick % 30 == 0)
-        {
-            LOG_INF("[%d] Motion count: %u  Batt=%d%%  Occupied=%d",
-                    tick, motion_count, batt_soc, occupied);
-        }
-        tick++;
-
-        if (++batt_tick >= BATT_UPDATE_TICKS)
-        {
-            batt_tick = 0;
-            batt_soc  = (uint8_t)max17048_read_soc();
-            mv        = max17048_read_mv();
-            LOG_INF("Battery updated: %d%% (%d mV)", batt_soc, mv);
-        }
-
-        if (++stats_tick >= STATS_INTERVAL_TICKS)
-        {
-            stats_tick = 0;
-            trinity_log_heap_stats();
-            trinity_log_task_stats();
-        }
+        k_sleep(K_MSEC(burst_ms / 2U));
+    }
+    else
+    {
+        k_sleep(K_MSEC(burst_ms));
     }
 
-    return 0;
+    trinity_wdt_kick();
+
+    /* Shut down BLE before entering deep sleep */
+    bt_disable();
+
+    enter_deep_sleep(); /* noreturn */
+
+    return 0; /* unreachable */
 }

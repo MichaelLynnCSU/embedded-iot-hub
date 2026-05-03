@@ -1,8 +1,8 @@
 / {
     zephyr,user {
-        pir_gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+        pir_gpios = <&gpio0 3 (GPIO_ACTIVE_HIGH)>;
     };
-    
+
     chosen {
         zephyr,console = &usb_serial;
         zephyr,shell-uart = &usb_serial;
@@ -63,14 +63,36 @@
         #address-cells = <1>;
         #size-cells = <1>;
 
+        /*
+         * storage_partition -- owned by trinity_nvs_esp.c (NVS).
+         *
+         * Used for persistent counters that must survive deep sleep
+         * cycles. motion_count is stored here because RTC_DATA_ATTR
+         * is a no-op on this Zephyr/ESP32-C3 toolchain combination --
+         * the linker script has no .rtc.data section so variables
+         * silently land in DRAM and reset to 0 on every wake.
+         *
+         * 176KB gives decades of NVS write endurance at 100 PIR
+         * events/day. Do not place trinity flash log entries here --
+         * that uses log_partition below (raw flash_area API, no NVS).
+         */
         storage_partition: partition@3b0000 {
             label = "storage";
             reg = <0x3b0000 0x2C000>;
         };
 
+        /*
+         * log_partition -- owned by trinity_flash_esp.c (raw flash).
+         *
+         * Trinity crash log and event log. Uses flash_area API directly,
+         * not NVS. Intentionally separate from storage_partition to
+         * avoid any possibility of NVS sector management overwriting
+         * crash log entries. Do not mount NVS on this partition.
+         */
         log_partition: partition@3dc000 {
             label = "log-partition";
             reg = <0x3dc000 0x4000>;
         };
     };
 };
+

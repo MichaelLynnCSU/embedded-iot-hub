@@ -11,6 +11,7 @@ project(pir_ble)
 #   fault_esp  -> flash (via write_panic), canary (via g_init_stage)
 target_sources(app PRIVATE
     src/main.c
+    src/trinity_nvs_esp.c
     src/ble_adv.c
     src/max17048.c
     src/build_info.c

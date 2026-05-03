@@ -1,6 +1,6 @@
 / {
     zephyr,user {
-        pir_gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+        pir_gpios = <&gpio0 3 (GPIO_ACTIVE_HIGH)>;
     };
     chosen {
         zephyr,console = &uart0;

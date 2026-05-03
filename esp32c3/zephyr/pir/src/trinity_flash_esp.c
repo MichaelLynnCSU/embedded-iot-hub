@@ -13,6 +13,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/drivers/flash.h>
+#include <zephyr/logging/log_ctrl.h>
 #include <zephyr/init.h>
 #include <string.h>
 #include <stdio.h>
@@ -248,4 +249,16 @@ int trinity_log_init(void)
    trinity_log_stats_init();
 
    return 0;
+}
+
+void trinity_log_flush(void)
+{
+   /* Switch Zephyr deferred log backend to synchronous blocking mode and
+    * drain the buffer before deep sleep or any __noreturn path.
+    *
+    * Required because CONFIG_LOG_MODE_DEFERRED=y with
+    * CONFIG_LOG_PROCESS_THREAD_SLEEP_MS=1000 means the log thread will
+    * not wake and flush before esp_deep_sleep_start() destroys RAM.
+    * log_panic() is the canonical Zephyr pre-crash/pre-sleep flush. */
+   log_panic();
 }

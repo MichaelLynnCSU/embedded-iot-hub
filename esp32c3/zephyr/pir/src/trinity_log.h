@@ -42,7 +42,8 @@ int  trinity_log_init(void);
 void trinity_log_dump_previous(void);
 int  trinity_log_erase(void);
 void trinity_log_event(const char *p_msg);
-
+void trinity_log_event(const char *p_msg);
+void trinity_log_flush(void);     /* drain deferred log before sleep or __noreturn paths */
 /**************************** WATCHDOG ****************************************/
 
 void trinity_wdt_init(void);
@@ -57,5 +58,11 @@ void trinity_log_task_stats(void);
 
 void trinity_canary_set_booted(void);
 int  trinity_log_stats_init(void);
+
+/**************************** NVS PERSISTENCE *********************************/
+
+int      trinity_nvs_init(void);
+uint32_t trinity_nvs_read_motion_count(void);
+int      trinity_nvs_write_motion_count(uint32_t val);
 
 #endif /* INCLUDE_TRINITY_LOG_H_ */
