@@ -82,8 +82,14 @@ static void print_mac(void)
 
 /*----------------------------------------------------------------------------*/
 
-int ble_adv_init(void)
+int ble_adv_init(uint32_t motion_count, uint8_t batt_soc, uint8_t occupied)
 {
+    /* Pre-populate payload before advertising starts -- hub may catch
+     * the first packet before ble_adv_update() is called. */
+    pack_motion_count(mfg_data, motion_count);
+    mfg_data[MFG_BATT_IDX]     = batt_soc;
+    mfg_data[MFG_OCCUPIED_IDX] = occupied;
+
     int ret = bt_enable(NULL);
     if (0 != ret)
     {
@@ -101,14 +107,4 @@ int ble_adv_init(void)
     LOG_INF("Advertising started (payload zeroed -- call ble_adv_update() to populate)");
     print_mac();
     return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-
-void ble_adv_update(uint32_t motion_count, uint8_t batt_soc, uint8_t occupied)
-{
-    pack_motion_count(mfg_data, motion_count);
-    mfg_data[MFG_BATT_IDX]     = batt_soc;
-    mfg_data[MFG_OCCUPIED_IDX] = occupied;
-    bt_le_adv_update_data(adv_data, ARRAY_SIZE(adv_data), NULL, 0);
 }

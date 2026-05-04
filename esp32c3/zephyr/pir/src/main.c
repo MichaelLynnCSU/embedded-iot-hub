@@ -259,9 +259,20 @@ int main(void)
             break;
     }
 
-    /* BLE init and start advertising */
     trinity_wdt_kick();
-    ret = ble_adv_init();
+
+    /* Battery read */
+    max17048_init();
+    batt_soc = (uint8_t)max17048_read_soc();
+    mv       = max17048_read_mv();
+    LOG_INF("Battery: %d%% (%d mV)", batt_soc, mv);
+    LOG_INF("Advertising %ums | count=%u occ=%d batt=%d%%",
+            burst_ms, motion_count, occupied, batt_soc);
+
+    trinity_wdt_kick();
+
+    /* BLE init and start advertising */
+    ret = ble_adv_init(motion_count, batt_soc, occupied);
     if (0 != ret)
     {
         LOG_ERR("BLE init failed (%d) -- sleeping", ret);
@@ -270,22 +281,6 @@ int main(void)
     }
     trinity_wdt_kick();
 
-    /* Battery read */
-    max17048_init();
-    batt_soc = (uint8_t)max17048_read_soc();
-    mv       = max17048_read_mv();
-    LOG_INF("Battery: %d%% (%d mV)", batt_soc, mv);
-
-    /* Update advertisement payload -- must be called before any hub
-     * can act on the data. ble_adv_init() starts advertising with
-     * zeroed payload; this overwrites it with correct values. */
-    ble_adv_update(motion_count, batt_soc, occupied);
-    LOG_INF("Advertising %ums | count=%u occ=%d batt=%d%%",
-            burst_ms, motion_count, occupied, batt_soc);
-
-    /* Kick immediately before burst sleep to give the full WDT_TIMEOUT_MS
-     * budget to the burst. Mid-burst kick required if burst >= WDT timeout. */
-    trinity_wdt_kick();
     if (burst_ms >= WDT_TIMEOUT_MS)   /* fix: was > 2000U, missed exact 2000ms PIR burst */
     {
         k_sleep(K_MSEC(burst_ms / 2U));

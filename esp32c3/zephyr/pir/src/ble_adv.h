@@ -18,15 +18,6 @@
  *
  * \return 0 on success, negative errno on failure.
  */
-int ble_adv_init(void);
-
-/**
- * \brief  Update manufacturer data payload and refresh advertisement.
- *
- * \param  motion_count  Current PIR motion event count.
- * \param  batt_soc      Battery SOC percent (0-100).
- * \param  occupied      1 if room occupied (sliding window), 0 otherwise.
- */
-void ble_adv_update(uint32_t motion_count, uint8_t batt_soc, uint8_t occupied);
+int ble_adv_init(uint32_t motion_count, uint8_t batt_soc, uint8_t occupied);
 
 #endif /* BLE_ADV_H */

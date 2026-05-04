@@ -1,1 +1,0 @@
-"mcuboot":"/home/hailviral-server/zephyrproject/bootloader/mcuboot":"/home/hailviral-server/zephyrproject/bootloader/mcuboot/boot/zephyr/sysbuild"
