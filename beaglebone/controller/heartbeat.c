@@ -109,7 +109,9 @@ void *heartbeat_monitor_thread(void *p_arg)
 
    (void)p_arg;
 
-   LOG("[HB] Monitor thread started (timeout=%ds)", HB_TIMEOUT_SEC);
+   LOG("[HB] Monitor thread started (per-device timeouts: PIR=%ds LGT=%ds LCK=%ds MTR=%ds)",
+       hb_timeout_sec[DEV_PIR], hb_timeout_sec[DEV_LIGHT],
+       hb_timeout_sec[DEV_LOCK], hb_timeout_sec[DEV_MOTOR]);
 
    while (running)
    {
@@ -122,7 +124,7 @@ void *heartbeat_monitor_thread(void *p_arg)
       for (i = 0; i < DEV_COUNT; i++)
       {
          is_online = (uint8_t)((0 < g_devices[i].last_seen) &&
-                               ((now - g_devices[i].last_seen) < HB_TIMEOUT_SEC));
+                               ((now - g_devices[i].last_seen) < hb_timeout_sec[i]));
 
          if (is_online != g_devices[i].online)
          {

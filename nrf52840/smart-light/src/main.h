@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define STATS_INTERVAL_SEC   60
-#define IDLE_HEARTBEAT_SEC   120
+#define IDLE_HEARTBEAT_SEC   240
 #define RELAY_PIN            11
 #define MFG_COMPANY_ID       0xAD
 #define MFG_DATA_SIZE        2

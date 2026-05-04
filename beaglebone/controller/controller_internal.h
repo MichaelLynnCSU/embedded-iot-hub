@@ -62,7 +62,6 @@
 #define MAX_ROOMS       10   /**< maximum room sensors in SensorData */
 #define MAX_REEDS       6    /**< must match ESP32 tcp_manager.c and ble_scan.c */
 #define UART_LINE_LEN   64   /**< UART line buffer size bytes */
-#define HB_TIMEOUT_SEC  10   /**< heartbeat timeout in seconds */
 
 /** \brief Room name field sizes */
 #define ROOM_NAME_SIZE  32   /**< room name string buffer size */
@@ -277,5 +276,14 @@ void process_command(struct CommandMsg *p_cmd);
 /* -- data_controller ------------------------------------------------------ */
 
 int init_shared_memory(void);
+
+/** \brief Per-device heartbeat timeout seconds */
+static const int hb_timeout_sec[DEV_COUNT] =
+{
+   30,   /**< DEV_PIR   — motion critical, short timeout */
+   300,  /**< DEV_LIGHT — 240s firmware HB, 300s timeout */
+   300,  /**< DEV_LOCK  — 240s firmware HB, 300s timeout */
+   300,  /**< DEV_MOTOR — on-demand TCP only */
+};
 
 #endif /* INCLUDE_CONTROLLER_INTERNAL_H_ */

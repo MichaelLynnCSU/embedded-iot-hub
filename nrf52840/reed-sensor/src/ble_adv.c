@@ -35,7 +35,7 @@
 
 LOG_MODULE_REGISTER(ble_adv, LOG_LEVEL_INF);
 
-#define HEARTBEAT_INTERVAL_SEC  120
+#define HEARTBEAT_INTERVAL_SEC  240
 
 K_MSGQ_DEFINE(g_ble_msgq, sizeof(uint8_t), 8, 4);
 

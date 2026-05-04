@@ -273,10 +273,10 @@ static inline const char *logic_motor_state_label(MOTOR_STATE_E state)
 /************************* HEARTBEAT PURE LOGIC *******************************/
 
 /* ---- Pure logic: heartbeat online check ---- */
-static inline uint8_t logic_hb_is_online(time_t last_seen, time_t now)
+static inline uint8_t logic_hb_is_online(time_t last_seen, time_t now, int timeout_sec)
 {
     if (0 == last_seen) { return 0; }
-    return (uint8_t)((now - last_seen) < HB_TIMEOUT_SEC);
+    return (uint8_t)((now - last_seen) < timeout_sec);
 }
 
 /* ---- Pure logic: heartbeat state changed ---- */

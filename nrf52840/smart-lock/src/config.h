@@ -12,7 +12,7 @@
 
 /* ── Timing ────────────────────────────────────────────────────────────────── */
 #define STATS_INTERVAL_SEC  60   /**< Statistics report interval (seconds)    */
-#define IDLE_HEARTBEAT_SEC  120  /**< Idle heartbeat advertisement (seconds)  */
+#define IDLE_HEARTBEAT_SEC  240  /**< Idle heartbeat advertisement (seconds)  */
 #define BATT_UPDATE_SEC     300  /**< Battery SOC refresh interval (seconds)  */
 
 /* ── BLE manufacturer data layout ─────────────────────────────────────────── */
