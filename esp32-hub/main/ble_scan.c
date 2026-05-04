@@ -68,6 +68,7 @@
 #define ROOM_SENSOR_SLOT0_ID   1             /**< room sensor ID for slot 0 */
 #define ROOM_SENSOR_SLOT1_ID   7             /**< room sensor ID for slot 1 */
 #define AGE_MAX_VALUE          0xFFFE        /**< max reportable age value */
+#define PIR_EVENT_BUF_SIZE  16u  /**< circular buffer depth for occ=1 timestamps */ 
 
 static const char *TAG = "BLE_SCAN"; /**< ESP log tag */
 
@@ -87,6 +88,9 @@ int g_pir_batt     = -1;                  /**< PIR battery SOC percent */
 int motion_count = DEFAULT_MOTION_COUNT; /**< legacy alias for g_motion_count */
 int pir_batt     = -1;                  /**< legacy alias for g_pir_batt */
 int g_pir_occupied = 0;                  /* 0=empty, 1=occupied */
+static uint32_t g_pir_event_buf[PIR_EVENT_BUF_SIZE]; /**< occ=1 event timestamps ms */
+static int      g_pir_event_head    = 0;             /**< next write index */
+static uint32_t g_pir_last_hold_ms  = 0;             /**< timestamp when hold last started */
 
 static bool g_pir_seen   = false; /**< PIR first-seen flag */
 static bool g_lock_seen  = false; /**< lock first-seen flag */
@@ -449,6 +453,78 @@ static void update_room_for_slot(int slot, uint8_t door_state)
 }
 
 /******************************************************************************
+ * \brief Update PIR sliding window and recompute g_pir_occupied.
+ *
+ * \param now_ms   - Current tick count in ms.
+ * \param occ      - Raw occupied flag from BLE advertisement (0 or 1).
+ *
+ * \return void
+ *
+ * \details Implements a time-based sliding window over occ=1 events.
+ *          On each call with occ=1, the current timestamp is written
+ *          into a circular buffer. The window then counts how many
+ *          buffered timestamps fall within the last PIR_WINDOW_SEC.
+ *          If the count meets PIR_WINDOW_THRESHOLD, the hold timer is
+ *          (re)started. g_pir_occupied is 1 for the duration of the
+ *          hold and 0 once PIR_HOLD_SEC elapses with no new trigger.
+ *
+ *          Window size:  PIR_WINDOW_SEC       (60s)
+ *          Threshold:    PIR_WINDOW_THRESHOLD  (2 events)
+ *          Hold:         PIR_HOLD_SEC          (600s / 10 min)
+ *
+ *          The 10s device heartbeat (occ=0) is the resolution floor --
+ *          the window cannot meaningfully be smaller than ~20-30s.
+ *          motion_count delta can be used to detect missed occ=1 bursts
+ *          during lossy BLE periods.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+static void pir_window_update(uint32_t now_ms, int occ)
+{
+    uint32_t window_ms  = 0u; /**< window width in ms */
+    uint32_t hold_ms    = 0u; /**< hold duration in ms */
+    int      count      = 0;  /**< events inside window */
+    int      i          = 0;  /**< loop index */
+
+    window_ms = PIR_WINDOW_SEC  * 1000u;
+    hold_ms   = PIR_HOLD_SEC    * 1000u;
+
+    /* Stamp event into circular buffer on occ=1 */
+    if (1 == occ)
+    {
+        g_pir_event_buf[g_pir_event_head] = now_ms;
+        g_pir_event_head = (g_pir_event_head + 1) % PIR_EVENT_BUF_SIZE;
+    }
+
+    /* Count events inside the sliding window */
+    for (i = 0; i < PIR_EVENT_BUF_SIZE; i++)
+    {
+        if ((g_pir_event_buf[i] > 0u) &&
+            ((now_ms - g_pir_event_buf[i]) <= window_ms))
+        {
+            count++;
+        }
+    }
+
+    /* Restart hold timer if threshold met */
+    if (count >= (int)PIR_WINDOW_THRESHOLD)
+    {
+        g_pir_last_hold_ms = now_ms;
+    }
+
+    /* Occupied for duration of hold after last threshold crossing */
+    if ((g_pir_last_hold_ms > 0u) &&
+        ((now_ms - g_pir_last_hold_ms) <= hold_ms))
+    {
+        g_pir_occupied = 1;
+    }
+    else
+    {
+        g_pir_occupied = 0;
+    }
+}
+
+/******************************************************************************
  * \brief Handle PIR motion sensor advertisement.
  *
  * \param p_adv    - Pointer to raw advertisement data.
@@ -501,7 +577,8 @@ static void handle_pir(const uint8_t *p_adv,
 
    if (mfg_len >= (MFG_PIR_OCCUPIED_IDX + 1))
    {
-      g_pir_occupied = (int)p_mfg[MFG_PIR_OCCUPIED_IDX];
+      uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+      pir_window_update(now_ms, (int)p_mfg[MFG_PIR_OCCUPIED_IDX]);
    }
 
    stamp_device(DEV_IDX_PIR);
@@ -512,6 +589,7 @@ static void handle_pir(const uint8_t *p_adv,
       bus_publish_pir(count, pir_batt);
       ESP_LOGI(TAG, ">>> PIR count=%u batt=%d%%", count, pir_batt);
    }
+   ESP_LOGI(TAG, ">>> even if no change PIR count=%u batt=%d%%", count, pir_batt);
 }
 
 /******************************************************************************

@@ -88,6 +88,10 @@
 /** \brief Room sensor count */
 #define ROOM_COUNT                  2  /**< number of room sensors in rooms[] */
 
+/** \brief PIR sliding window occupancy */
+#define PIR_WINDOW_SEC        60u   /**< sliding window width seconds */
+#define PIR_WINDOW_THRESHOLD  2u    /**< occ=1 events in window to declare occupied */
+#define PIR_HOLD_SEC          600u  /**< hold occupied seconds after last trigger */
 /************************ STRUCTURE/UNION DATA TYPES **************************/
 
 /**
