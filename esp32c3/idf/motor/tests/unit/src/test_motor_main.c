@@ -7,6 +7,10 @@ void tearDown(void) {}
 
 /******************************************************************************
  * Timing constants
+ *
+ * MOTOR_LOOP_MS raised from 100ms to 5000ms (2026-05-04).
+ * Knob ADC and temp logic moved to hub -- 5s resolution sufficient.
+ * Hub sends PWM updates on its own TCP_SEND_INTERVAL cadence.
  ******************************************************************************/
 void test_stats_interval_ms(void)
 {
@@ -15,7 +19,9 @@ void test_stats_interval_ms(void)
 
 void test_motor_loop_ms(void)
 {
-    TEST_ASSERT_EQUAL_UINT32(100u, MOTOR_LOOP_MS);
+    /* Raised from 100ms -- knob ADC removed, hub owns all control decisions.
+     * 5s loop is sufficient resolution for PWM application and battery reads. */
+    TEST_ASSERT_EQUAL_UINT32(5000u, MOTOR_LOOP_MS);
 }
 
 void test_recv_timeout_ms(void)
@@ -34,101 +40,21 @@ void test_batt_interval_ms(void)
 }
 
 /******************************************************************************
- * Default values
+ * Motor run protection
+ *
+ * MIN_RUN_SEC enforced by hub state machine. Motor must run for at least
+ * 10 minutes once started to protect against rapid stop/start cycling
+ * near the temperature threshold which can damage the motor.
  ******************************************************************************/
-void test_default_aws_low(void)
+void test_min_run_sec(void)
 {
-    TEST_ASSERT_EQUAL_INT(20, DEFAULT_AWS_LOW);
+    TEST_ASSERT_EQUAL_INT(600, MIN_RUN_SEC);
 }
 
-void test_default_aws_high(void)
+void test_min_run_sec_is_10_minutes(void)
 {
-    TEST_ASSERT_EQUAL_INT(35, DEFAULT_AWS_HIGH);
-}
-
-void test_default_avg_temp(void)
-{
-    TEST_ASSERT_EQUAL_INT(25, DEFAULT_AVG_TEMP);
-}
-
-void test_default_temp_in_range(void)
-{
-    TEST_ASSERT_TRUE(DEFAULT_AVG_TEMP >= DEFAULT_AWS_LOW);
-    TEST_ASSERT_TRUE(DEFAULT_AVG_TEMP <= DEFAULT_AWS_HIGH);
-}
-
-/******************************************************************************
- * PWM duty interpolation
- ******************************************************************************/
-void test_duty_at_low_temp(void)
-{
-    uint32_t duty = motor_temp_to_duty(DEFAULT_AWS_LOW,
-                                       DEFAULT_AWS_LOW, DEFAULT_AWS_HIGH);
-    TEST_ASSERT_EQUAL_UINT32(0, duty);
-}
-
-void test_duty_at_high_temp(void)
-{
-    uint32_t duty = motor_temp_to_duty(DEFAULT_AWS_HIGH,
-                                       DEFAULT_AWS_LOW, DEFAULT_AWS_HIGH);
-    TEST_ASSERT_EQUAL_UINT32(PWM_DUTY_MAX, duty);
-}
-
-void test_duty_at_midpoint(void)
-{
-    int mid = (DEFAULT_AWS_LOW + DEFAULT_AWS_HIGH) / 2;
-    uint32_t duty = motor_temp_to_duty(mid, DEFAULT_AWS_LOW, DEFAULT_AWS_HIGH);
-    TEST_ASSERT_TRUE(duty > 0);
-    TEST_ASSERT_TRUE(duty < PWM_DUTY_MAX);
-}
-
-void test_duty_clamps_below_low(void)
-{
-    uint32_t duty = motor_temp_to_duty(DEFAULT_AWS_LOW - 10,
-                                       DEFAULT_AWS_LOW, DEFAULT_AWS_HIGH);
-    TEST_ASSERT_EQUAL_UINT32(0, duty);
-}
-
-void test_duty_clamps_above_high(void)
-{
-    uint32_t duty = motor_temp_to_duty(DEFAULT_AWS_HIGH + 10,
-                                       DEFAULT_AWS_LOW, DEFAULT_AWS_HIGH);
-    TEST_ASSERT_EQUAL_UINT32(PWM_DUTY_MAX, duty);
-}
-
-void test_duty_zero_range_returns_zero(void)
-{
-    /* high == low -- guard against divide by zero */
-    uint32_t duty = motor_temp_to_duty(25, 25, 25);
-    TEST_ASSERT_EQUAL_UINT32(0, duty);
-}
-
-/******************************************************************************
- * Log throttle
- ******************************************************************************/
-void test_log_throttle_n(void)
-{
-    TEST_ASSERT_EQUAL_UINT32(20u, LOG_THROTTLE_N);
-}
-
-void test_log_throttle_fires_on_20th(void)
-{
-    uint32_t count = 0;
-    int fired = 0;
-    for (int i = 0; i < 20; i++) {
-        if (++count % LOG_THROTTLE_N == 0) { fired++; }
-    }
-    TEST_ASSERT_EQUAL_INT(1, fired);
-}
-
-void test_log_throttle_fires_on_40th(void)
-{
-    uint32_t count = 0;
-    int fired = 0;
-    for (int i = 0; i < 40; i++) {
-        if (++count % LOG_THROTTLE_N == 0) { fired++; }
-    }
-    TEST_ASSERT_EQUAL_INT(2, fired);
+    TEST_ASSERT_EQUAL_INT(600, MIN_RUN_SEC);
+    TEST_ASSERT_EQUAL_INT(10, MIN_RUN_SEC / 60);
 }
 
 /******************************************************************************
@@ -137,6 +63,12 @@ void test_log_throttle_fires_on_40th(void)
 void test_pwm_duty_max(void)
 {
     TEST_ASSERT_EQUAL_UINT32((1 << 13) - 1, PWM_DUTY_MAX);
+}
+
+void test_pwm_duty_max_13bit(void)
+{
+    /* Hub sends pwm as 0-PWM_DUTY_MAX. Clamp enforced in parse_tcp_json(). */
+    TEST_ASSERT_EQUAL_UINT32(8191u, PWM_DUTY_MAX);
 }
 
 /******************************************************************************
@@ -201,37 +133,27 @@ void test_batt_sag_reject_mv(void)
  ******************************************************************************/
 void test_adc_ceiling_db12(void)
 {
-    /* ADC_ATTEN_DB_12 empirical ceiling = 3379mV.
-     * Back-calculated from known pin voltage: 1800 × 4095 / 2181 = 3379mV.
-     * No gain term on ESP32-C3 -- attenuation only. */
     TEST_ASSERT_EQUAL_INT32(3379, 3379);
     TEST_ASSERT_EQUAL_INT32(4095, ADC_MAX_RAW);
 }
 
 void test_adc_decode_chain_9v_nominal(void)
 {
-    /* Step 1: empirical ceiling and step size -- no gain stage on ESP32-C3 */
     int32_t ceiling_mv = 3379;
     int32_t steps      = 4095;
-    float   step_mv    = (float)ceiling_mv / (float)steps;  /* ~0.825mV */
+    float   step_mv    = (float)ceiling_mv / (float)steps;
 
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.825f, step_mv);
 
-    /* Step 2: empirical pin voltage on fresh battery → raw count.
-     * Fresh battery ~9.7V × 1/5 divider = 1944mV at ADC pin. */
     int32_t pin_mv_expected = 1944;
     int32_t raw             = (pin_mv_expected * steps) / ceiling_mv;
 
     TEST_ASSERT_INT_WITHIN(2, 2356, raw);
 
-    /* Step 3: raw → pin_mv (matches battery_read_mv() linear conversion) */
     int32_t pin_mv = (raw * ceiling_mv) / steps;
 
     TEST_ASSERT_INT_WITHIN(5, 1944, pin_mv);
 
-    /* Step 4: undo divider -- R1=4k, R2=1k, ratio=1/5, multiply by 5.
-     * No gain term here unlike the nRF which carries ADC_GAIN_1_6 through
-     * the chain. DIVIDER_RATIO_DEN=5 is the only multiplier needed. */
     int32_t vbat_mv = pin_mv * DIVIDER_RATIO_DEN / DIVIDER_RATIO_NUM;
 
     TEST_ASSERT_INT_WITHIN(50, 9720, vbat_mv);
@@ -239,37 +161,20 @@ void test_adc_decode_chain_9v_nominal(void)
 
 void test_adc_fresh_battery_under_ceiling(void)
 {
-    /* Fresh 9V PP3 alkaline can read ~9.8V off load.
-     * 9800mV × (1/5) = 1960mV -- must stay under 3379mV ADC ceiling.
-     * Previous ceiling of 2200mV (DB_6) was too close -- 1.8V saturated
-     * raw=4095, blinding SOC protection and contributing to 3 dead batteries. */
     int32_t worst_case_pin_mv = 9800 / 5;
     TEST_ASSERT_LESS_THAN(3379, worst_case_pin_mv);
 }
 
 /******************************************************************************
  * ADC calibration
- *
- * Calibration is mandatory after any divider or attenuation change.
- * Sequence: (1) confirm raw not saturating, (2) fresh battery in,
- * (3) read vbat_mv from log -> CAL_DEN, (4) multimeter at terminals
- * -> CAL_NUM. Ratio corrects ADC nonlinearity uniformly across range.
- *
- * Current cal (tuned 2026-04-27):
- *   CAL_NUM = 9500  (multimeter at terminals, fresh battery)
- *   CAL_DEN = 9720  (firmware vbat_mv before correction, fresh battery)
- *   Corrects ADC ~2% over-read downward uniformly.
  ******************************************************************************/
 void test_cal_ratio_corrects_downward(void)
 {
-    /* ADC over-reads on this hardware -- cal must reduce vbat_mv */
     TEST_ASSERT_LESS_THAN(ADC_CAL_DEN, ADC_CAL_NUM);
 }
 
 void test_cal_applied_to_fresh_battery(void)
 {
-    /* vbat_mv before cal = 9720mV (empirical log).
-     * After cal: 9720 × 9500 / 9720 = 9500mV = VBAT_FULL_MV. */
     int32_t pre_cal  = 9720;
     int32_t post_cal = (pre_cal * ADC_CAL_NUM) / ADC_CAL_DEN;
     TEST_ASSERT_INT_WITHIN(10, VBAT_FULL_MV, post_cal);
@@ -277,7 +182,6 @@ void test_cal_applied_to_fresh_battery(void)
 
 void test_cal_num_den_nonzero(void)
 {
-    /* Guard against divide-by-zero in battery_read_mv() */
     TEST_ASSERT_NOT_EQUAL(0, ADC_CAL_NUM);
     TEST_ASSERT_NOT_EQUAL(0, ADC_CAL_DEN);
 }
@@ -332,8 +236,6 @@ void test_mv_to_soc_midpoint(void)
  ******************************************************************************/
 void test_sag_reject_exactly_at_threshold_passes(void)
 {
-    /* A reading exactly BATT_SAG_REJECT_MV below last good is NOT rejected.
-     * Reject condition is strictly less than (last_good - threshold). */
     int last_good_mv = 9000;
     int reading_mv   = last_good_mv - BATT_SAG_REJECT_MV;
     TEST_ASSERT_FALSE(reading_mv < (last_good_mv - BATT_SAG_REJECT_MV));
@@ -348,7 +250,6 @@ void test_sag_reject_one_below_threshold_rejected(void)
 
 void test_sag_reject_first_reading_always_accepted(void)
 {
-    /* last_good == 0 means no baseline yet -- first reading always accepted */
     int last_good_mv = 0;
     int reading_mv   = 8500;
     TEST_ASSERT_FALSE((last_good_mv > 0) &&
@@ -364,20 +265,10 @@ int main(void)
     RUN_TEST(test_recv_timeout_ms);
     RUN_TEST(test_accept_timeout_sec);
     RUN_TEST(test_batt_interval_ms);
-    RUN_TEST(test_default_aws_low);
-    RUN_TEST(test_default_aws_high);
-    RUN_TEST(test_default_avg_temp);
-    RUN_TEST(test_default_temp_in_range);
-    RUN_TEST(test_duty_at_low_temp);
-    RUN_TEST(test_duty_at_high_temp);
-    RUN_TEST(test_duty_at_midpoint);
-    RUN_TEST(test_duty_clamps_below_low);
-    RUN_TEST(test_duty_clamps_above_high);
-    RUN_TEST(test_duty_zero_range_returns_zero);
-    RUN_TEST(test_log_throttle_n);
-    RUN_TEST(test_log_throttle_fires_on_20th);
-    RUN_TEST(test_log_throttle_fires_on_40th);
+    RUN_TEST(test_min_run_sec);
+    RUN_TEST(test_min_run_sec_is_10_minutes);
     RUN_TEST(test_pwm_duty_max);
+    RUN_TEST(test_pwm_duty_max_13bit);
     RUN_TEST(test_tcp_port);
     RUN_TEST(test_batt_json_buf_fits_worst_case);
     RUN_TEST(test_batt_sag_reject_mv);

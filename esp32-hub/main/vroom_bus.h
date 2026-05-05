@@ -7,22 +7,31 @@
  *
  * \details Publish/subscribe event bus connecting BLE scan, UART, and
  *          TCP/AWS consumer tasks. Each sensor type has a dedicated
- *          FreeRTOS queue and a corresponding event bit doorbell.
+ *          per-subscriber private mailbox (depth-1 queue). Publishers
+ *          fan out payloads to all subscriber mailboxes at publish time,
+ *          then signal only the subscribers that registered interest in
+ *          that event bit.
  *
- *          Pattern: producer pushes payload to queue, then signals all
- *          subscriber event groups. Consumers wait on their own event
- *          group then drain the queue.
+ *          Pattern: producer calls bus_publish_*() which writes payload
+ *          to every interested subscriber's private mailbox, then sets
+ *          the matching event bit on those subscriber event groups only.
+ *          Consumers wait on their own event group then read from their
+ *          own mailboxes — no shared queues, no races.
  *
  *          Call order:
- *          1. bus_init()                — create all queues (app_main)
+ *          1. bus_init()                — initialise bus (app_main)
  *          2. bus_register_subscriber() — register consumers (pre-task)
  *          3. bus_publish_*()           — called by producers at runtime
  *
- * \note    Motor battery field added (2026-04-08):
- *          MOTOR_PAYLOAD_T gains batt field (motor supply voltage in mV).
- *          bus_publish_motor() gains batt parameter to match.
- *          All callers updated — bus_publish_motor(0) becomes
- *          bus_publish_motor(0, -1) on disconnect paths.
+ * \note    Mailbox refactor (2026-05-05):
+ *          Replaced single shared queues with per-subscriber private
+ *          mailboxes (depth 1, xQueueOverwrite). Eliminates the race
+ *          condition where tcp_manager and aws_manager competed for the
+ *          same queue item. bus_register_subscriber() now takes an
+ *          EventBits_t mask so each subscriber is only woken for the
+ *          bits it cares about. Return type changed from
+ *          EventGroupHandle_t to BUS_SUBSCRIBER_T.
+ *          Callers in main.c updated accordingly.
  ******************************************************************************/
 
 #ifndef INCLUDE_VROOM_BUS_H_
@@ -37,52 +46,42 @@
 /******************************** CONSTANTS ***********************************/
 
 /** \brief Event bits — one per device/transport type */
-#define EVT_BLE_PIR          (1 << 0) /**< PIR motion event */
-#define EVT_BLE_REED         (1 << 1) /**< reed sensor event */
-#define EVT_BLE_LOCK         (1 << 2) /**< smart lock event */
-#define EVT_BLE_LIGHT        (1 << 3) /**< smart light event */
-#define EVT_UART_TEMP        (1 << 4) /**< UART temperature event */
-#define EVT_MOTOR_STATUS     (1 << 5) /**< motor controller status event */
+#define EVT_BLE_PIR          (1 << 0) /**< PIR motion event          */
+#define EVT_BLE_REED         (1 << 1) /**< reed sensor event         */
+#define EVT_BLE_LOCK         (1 << 2) /**< smart lock event          */
+#define EVT_BLE_LIGHT        (1 << 3) /**< smart light event         */
+#define EVT_UART_TEMP        (1 << 4) /**< UART temperature event    */
+#define EVT_MOTOR_STATUS     (1 << 5) /**< motor controller event    */
 #define EVT_TCP_CONNECTED    (1 << 6) /**< TCP connection established */
-#define EVT_TCP_DISCONNECTED (1 << 7) /**< TCP connection lost */
+#define EVT_TCP_DISCONNECTED (1 << 7) /**< TCP connection lost        */
 #define EVT_AWS_CONNECTED    (1 << 8) /**< AWS connection established */
-#define EVT_ALL_MASK         (0x1FF)  /**< mask of all event bits */
-
-/** \brief Queue depths — sized for burst scenarios */
-#define Q_DEPTH_PIR          4  /**< PIR queue depth */
-#define Q_DEPTH_REED         8  /**< reed queue depth (two reeds bursting) */
-#define Q_DEPTH_LOCK         4  /**< lock queue depth */
-#define Q_DEPTH_LIGHT        4  /**< light queue depth */
-#define Q_DEPTH_TEMP         4  /**< temperature queue depth */
-#define Q_DEPTH_MOTOR        4  /**< motor queue depth */
+#define EVT_ALL_MASK         (0x1FF)  /**< mask of all event bits     */
 
 /** \brief Maximum number of bus subscribers */
 #define BUS_MAX_SUBSCRIBERS  4  /**< increase if more consumers are added */
-
-/******************************* ENUMERATIONS *********************************/
 
 /************************ STRUCTURE/UNION DATA TYPES **************************/
 
 /** \brief PIR motion sensor bus payload. */
 typedef struct
 {
-   uint32_t count; /*!< motion event count */
-   int      batt;  /*!< battery SOC percent */
+   uint32_t count; /*!< motion event count    */
+   int      batt;  /*!< battery SOC percent   */
 } PIR_PAYLOAD_T;
 
 /** \brief Reed sensor bus payload. */
 typedef struct
 {
-   uint8_t id;      /*!< slot ID 1=Reed1, 2=Reed2, ... */
-   uint8_t state;   /*!< 0=closed, 1=open, 0xFF=unknown */
-   int     batt;    /*!< battery SOC percent */
-   uint8_t mac[6];  /*!< device MAC address */
+   uint8_t id;     /*!< slot ID 1=Reed1, 2=Reed2, ... */
+   uint8_t state;  /*!< 0=closed, 1=open, 0xFF=unknown */
+   int     batt;   /*!< battery SOC percent            */
+   uint8_t mac[6]; /*!< device MAC address             */
 } REED_PAYLOAD_T;
 
 /** \brief Smart lock bus payload. */
 typedef struct
 {
-   uint8_t state; /*!< lock state */
+   uint8_t state; /*!< lock state          */
    int     batt;  /*!< battery SOC percent */
 } LOCK_PAYLOAD_T;
 
@@ -101,30 +100,42 @@ typedef struct
 /** \brief Motor controller status bus payload. */
 typedef struct
 {
-   uint8_t online; /*!< 1=connected, 0=offline */
+   uint8_t online; /*!< 1=connected, 0=offline              */
    int     batt;   /*!< supply voltage in mV, -1 if unknown */
 } MOTOR_PAYLOAD_T;
 
-/*************************** QUEUE HANDLES ************************************/
-
-extern QueueHandle_t q_pir;   /**< PIR motion event queue */
-extern QueueHandle_t q_reed;  /**< reed sensor event queue */
-extern QueueHandle_t q_lock;  /**< smart lock event queue */
-extern QueueHandle_t q_light; /**< smart light event queue */
-extern QueueHandle_t q_temp;  /**< UART temperature event queue */
-extern QueueHandle_t q_motor; /**< motor status event queue */
+/** \brief Per-subscriber mailbox set.
+ *
+ *  \details Each subscriber owns a private copy of every mailbox.
+ *           Publishers write to all interested subscribers at publish
+ *           time via xQueueOverwrite — depth-1 queues always hold the
+ *           latest value and never block the publisher.
+ *           The mask field controls which event bits wake this subscriber.
+ */
+typedef struct
+{
+   EventGroupHandle_t events;   /*!< wakeup signal — doorbell only        */
+   EventBits_t        mask;     /*!< bits this subscriber cares about     */
+   QueueHandle_t      mb_pir;   /*!< private PIR mailbox   (depth 1)      */
+   QueueHandle_t      mb_reed;  /*!< private reed mailbox  (depth 1)      */
+   QueueHandle_t      mb_lock;  /*!< private lock mailbox  (depth 1)      */
+   QueueHandle_t      mb_light; /*!< private light mailbox (depth 1)      */
+   QueueHandle_t      mb_temp;  /*!< private temp mailbox  (depth 1)      */
+   QueueHandle_t      mb_motor; /*!< private motor mailbox (depth 1)      */
+} BUS_SUBSCRIBER_T;
 
 /*************************** FUNCTION PROTOTYPES *****************************/
 
-/** \brief Initialize the vroom bus — create all queues.
+/** \brief Initialize the vroom bus.
  *  \return void
  *  \warning Call once from app_main before any tasks start. */
 void bus_init(void);
 
-/** \brief Register a new bus subscriber.
- *  \return EventGroupHandle_t - Subscriber event group, NULL if table full.
+/** \brief Register a new bus subscriber with an interest mask.
+ *  \param mask - EVT_* bits this subscriber wants to be woken for.
+ *  \return BUS_SUBSCRIBER_T - Subscriber handle. Check .events != NULL.
  *  \warning Not thread-safe. Call only from app_main before tasks start. */
-EventGroupHandle_t bus_register_subscriber(void);
+BUS_SUBSCRIBER_T bus_register_subscriber(EventBits_t mask);
 
 /** \brief Publish a PIR motion event.
  *  \param count - Motion event count.
@@ -138,9 +149,9 @@ void bus_publish_pir(uint32_t count, int batt);
  *  \param batt  - Battery SOC percent.
  *  \param p_mac - Pointer to 6-byte MAC address, or NULL.
  *  \return void */
-void bus_publish_reed(uint8_t id,
-                      uint8_t state,
-                      int batt,
+void bus_publish_reed(uint8_t        id,
+                      uint8_t        state,
+                      int            batt,
                       const uint8_t *p_mac);
 
 /** \brief Publish a smart lock event.

@@ -10,6 +10,12 @@
  *          constants, task stack sizes, default values, and shared
  *          room sensor type definition.
  *
+ * \note    PI controller defaults (2026-05-04):
+ *          DEFAULT_AWS_LOW, DEFAULT_AWS_HIGH, DEFAULT_AWS_MOTOR removed.
+ *          Replaced with DEFAULT_AWS_KP/KI/KD/SETPOINT consumed by
+ *          aws_manager.c and forwarded to tcp_manager.c via getters.
+ *          PWM_DUTY_MAX added — maximum duty count sent to C3 motor node.
+ *
  * \warning AWS_LAMBDA_URL and network IPs are defined in network_config.h
  *          which is gitignored. Copy network_config.h.template to
  *          network_config.h and fill in values before building.
@@ -76,11 +82,17 @@
 #define STACK_SIZE_AWS_SEND         6144  /**< AWS send task stack */
 
 /** \brief Default sensor values on startup */
-#define DEFAULT_AVG_TEMP            25  /**< default average temperature C */
-#define DEFAULT_AWS_LOW             20  /**< default motor low threshold C */
-#define DEFAULT_AWS_HIGH            35  /**< default motor high threshold C */
-#define DEFAULT_AWS_MOTOR           0   /**< default motor control mode */
-#define DEFAULT_MOTION_COUNT        0   /**< default PIR motion count */
+#define DEFAULT_AVG_TEMP            25     /**< default average temperature C */
+#define DEFAULT_MOTION_COUNT        0      /**< default PIR motion count */
+
+/** \brief PI controller defaults — held until first Lambda response arrives */
+#define DEFAULT_AWS_KP              1.0f   /**< proportional gain */
+#define DEFAULT_AWS_KI              0.05f  /**< integral gain */
+#define DEFAULT_AWS_KD              0.0f   /**< derivative gain (PID-ready) */
+#define DEFAULT_AWS_SETPOINT        25     /**< target temperature degrees C */
+
+/** \brief PWM duty count ceiling sent to C3 motor node */
+#define PWM_DUTY_MAX                1023   /**< 10-bit PWM full scale */
 
 /** \brief HTTP response buffer size */
 #define HTTP_RESPONSE_BUFFER_SIZE   512  /**< AWS Lambda response buffer bytes */

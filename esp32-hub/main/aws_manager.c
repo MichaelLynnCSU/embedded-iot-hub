@@ -8,7 +8,8 @@
  * \details Maintains a local snapshot of all BLE and UART sensor state
  *          by draining the vroom bus queues on every wakeup. Sends a
  *          consolidated JSON payload to AWS Lambda every 5 minutes.
- *          Parses the Lambda response for motor/light control updates.
+ *          Parses the Lambda response for PI controller parameters and
+ *          light control updates.
  *
  *          Send interval: AWS_SEND_INTERVAL_MS (5 minutes)
  *          Drain interval: 2 seconds (keeps state fresh between sends,
@@ -18,11 +19,22 @@
  *          avg_temp, motion_count, light_state, lock_state,
  *          batt_pir, batt_dr1, batt_dr2, batt_lck, motor_online, rooms[]
  *
+ *          Lambda response fields (PI controller):
+ *          kp, ki, kd, setpoint
+ *          Consumed by tcp_manager.c via aws_get_kp/ki/kd/setpoint().
+ *
  * \note    WDT fix (2026-03-21):
  *          DRAIN_INTERVAL_MS reduced from 10000 ms to 2000 ms so the
  *          xEventGroupWaitBits timeout is well within the 5 s WDT window.
  *          trinity_wdt_kick() added at the top of the main while(1) loop.
  *          trinity_log_event() renamed to trinity_log_event() throughout.
+ *
+ * \note    PI controller params (2026-05-04):
+ *          g_aws_low, g_aws_high, g_aws_motor removed. Lambda response
+ *          now carries kp, ki, kd (float) and setpoint (int). These are
+ *          stored in module-level globals and exposed via getter functions
+ *          declared in aws_manager.h. tcp_manager.c reads them on each
+ *          PI loop iteration.
  ******************************************************************************/
 
 #include "config.h"
@@ -47,9 +59,11 @@
 
 static const char *TAG = "AWS_MGR"; /**< ESP log tag */
 
-static int g_aws_low   = DEFAULT_AWS_LOW;   /**< motor low temp threshold */
-static int g_aws_high  = DEFAULT_AWS_HIGH;  /**< motor high temp threshold */
-static int g_aws_motor = DEFAULT_AWS_MOTOR; /**< motor control mode */
+/* PI controller parameters — updated by Lambda response, read by tcp_manager */
+static float g_aws_kp       = DEFAULT_AWS_KP;       /**< proportional gain */
+static float g_aws_ki       = DEFAULT_AWS_KI;        /**< integral gain */
+static float g_aws_kd       = DEFAULT_AWS_KD;        /**< derivative gain */
+static int   g_aws_setpoint = DEFAULT_AWS_SETPOINT;  /**< temperature setpoint (degrees) */
 
 static char g_response_buffer[HTTP_RESPONSE_BUFFER_SIZE]; /**< HTTP response buf */
 static int  g_response_len = 0;                           /**< response byte count */
@@ -77,7 +91,7 @@ static AWS_STATE_T g_state =
    .dr2_batt  = -1,
 };
 
-static void drain_queues(EventBits_t bits)
+static void drain_queues(BUS_SUBSCRIBER_T sub)
 {
    PIR_PAYLOAD_T   p_pir;
    REED_PAYLOAD_T  p_reed;
@@ -86,55 +100,43 @@ static void drain_queues(EventBits_t bits)
    TEMP_PAYLOAD_T  p_temp;
    MOTOR_PAYLOAD_T p_motor;
 
-   if (0 != (bits & EVT_BLE_PIR))
+   /* ---- PIR ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_pir, &p_pir, 0))
    {
-      while (pdTRUE == xQueueReceive(q_pir, &p_pir, 0))
-      {
-         g_state.motion_count = p_pir.count;
-         g_state.pir_batt     = p_pir.batt;
-      }
+      g_state.motion_count = p_pir.count;
+      g_state.pir_batt     = p_pir.batt;
    }
 
-   if (0 != (bits & EVT_BLE_REED))
+   /* ---- REED ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_reed, &p_reed, 0))
    {
-      while (pdTRUE == xQueueReceive(q_reed, &p_reed, 0))
-      {
-         if (1 == p_reed.id) { g_state.dr1_batt = p_reed.batt; }
-         else                { g_state.dr2_batt = p_reed.batt; }
-      }
+      if (1 == p_reed.id) { g_state.dr1_batt = p_reed.batt; }
+      else                { g_state.dr2_batt = p_reed.batt; }
    }
 
-   if (0 != (bits & EVT_BLE_LOCK))
+   /* ---- LOCK ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_lock, &p_lock, 0))
    {
-      while (pdTRUE == xQueueReceive(q_lock, &p_lock, 0))
-      {
-         g_state.lock_state = p_lock.state;
-         g_state.lock_batt  = p_lock.batt;
-      }
+      g_state.lock_state = p_lock.state;
+      g_state.lock_batt  = p_lock.batt;
    }
 
-   if (0 != (bits & EVT_BLE_LIGHT))
+   /* ---- LIGHT ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_light, &p_light, 0))
    {
-      while (pdTRUE == xQueueReceive(q_light, &p_light, 0))
-      {
-         g_state.light_state = p_light.state;
-      }
+      g_state.light_state = p_light.state;
    }
 
-   if (0 != (bits & EVT_UART_TEMP))
+   /* ---- TEMP ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_temp, &p_temp, 0))
    {
-      while (pdTRUE == xQueueReceive(q_temp, &p_temp, 0))
-      {
-         g_state.avg_temp = p_temp.avg_temp;
-      }
+      g_state.avg_temp = p_temp.avg_temp;
    }
 
-   if (0 != (bits & EVT_MOTOR_STATUS))
+   /* ---- MOTOR ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_motor, &p_motor, 0))
    {
-      while (pdTRUE == xQueueReceive(q_motor, &p_motor, 0))
-      {
-         g_state.motor_online = p_motor.online;
-      }
+      g_state.motor_online = p_motor.online;
    }
 }
 
@@ -215,31 +217,40 @@ static bool send_to_aws(const char *p_post_data)
    return success;
 }
 
+/** \brief Parse Lambda response for PI controller params and light command.
+ *
+ *  Expected JSON keys: "kp" (float), "ki" (float), "kd" (float),
+ *  "setpoint" (int), "light" (int, optional).
+ *  Unknown keys are silently ignored so Lambda can add fields freely.
+ */
 static void parse_control_response(void)
 {
-   cJSON *p_json  = NULL;
-   cJSON *p_low   = NULL;
-   cJSON *p_high  = NULL;
-   cJSON *p_motor = NULL;
-   cJSON *p_light = NULL;
+   cJSON *p_json     = NULL;
+   cJSON *p_kp       = NULL;
+   cJSON *p_ki       = NULL;
+   cJSON *p_kd       = NULL;
+   cJSON *p_setpoint = NULL;
+   cJSON *p_light    = NULL;
 
    if (0 == g_response_len) { return; }
 
    p_json = cJSON_Parse(g_response_buffer);
    if (NULL == p_json) { return; }
 
-   p_low   = cJSON_GetObjectItem(p_json, "low");
-   p_high  = cJSON_GetObjectItem(p_json, "high");
-   p_motor = cJSON_GetObjectItem(p_json, "motor");
-   p_light = cJSON_GetObjectItem(p_json, "light");
+   p_kp       = cJSON_GetObjectItem(p_json, "kp");
+   p_ki       = cJSON_GetObjectItem(p_json, "ki");
+   p_kd       = cJSON_GetObjectItem(p_json, "kd");
+   p_setpoint = cJSON_GetObjectItem(p_json, "setpoint");
+   p_light    = cJSON_GetObjectItem(p_json, "light");
 
-   if (NULL != p_low)   { g_aws_low   = p_low->valueint;  }
-   if (NULL != p_high)  { g_aws_high  = p_high->valueint; }
-   if (NULL != p_motor) { g_aws_motor = p_motor->valueint; }
-   if (NULL != p_light) { ble_send_light_command(p_light->valueint); }
+   if (NULL != p_kp)       { g_aws_kp       = (float)p_kp->valuedouble;       }
+   if (NULL != p_ki)       { g_aws_ki       = (float)p_ki->valuedouble;       }
+   if (NULL != p_kd)       { g_aws_kd       = (float)p_kd->valuedouble;       }
+   if (NULL != p_setpoint) { g_aws_setpoint = p_setpoint->valueint;            }
+   if (NULL != p_light)    { ble_send_light_command(p_light->valueint);        }
 
-   ESP_LOGI(TAG, "Control updated: LOW=%d HIGH=%d MOTOR=%d",
-            g_aws_low, g_aws_high, g_aws_motor);
+   ESP_LOGI(TAG, "Control updated: kp=%.3f ki=%.3f kd=%.3f setpoint=%d",
+            g_aws_kp, g_aws_ki, g_aws_kd, g_aws_setpoint);
 
    cJSON_Delete(p_json);
 }
@@ -312,13 +323,23 @@ static void send_state_to_aws(void)
    cJSON_free(p_post);
 }
 
+/*******************************************************************************
+ * Public getter functions — thread-safe for single-word reads on Xtensa.
+ * kp/ki/kd are float (4 bytes, naturally aligned) — atomic on ESP32.
+ ******************************************************************************/
+
+float aws_get_kp(void)       { return g_aws_kp;       }
+float aws_get_ki(void)       { return g_aws_ki;       }
+float aws_get_kd(void)       { return g_aws_kd;       }
+int   aws_get_setpoint(void) { return g_aws_setpoint; }
+
 void aws_manager_init(void)
 {
    ESP_LOGI(TAG, "AWS manager initialized");
 }
 
 void aws_manager_task(EventGroupHandle_t p_wifi_eg,
-                      EventGroupHandle_t p_events)
+                      BUS_SUBSCRIBER_T   sub)
 {
    EventBits_t bits      = 0;
    TickType_t  last_send = 0;
@@ -336,13 +357,9 @@ void aws_manager_task(EventGroupHandle_t p_wifi_eg,
       /* ---- Trinity: kick WDT every DRAIN_INTERVAL_MS (2 s) ---- */
       trinity_wdt_kick();
 
-      bits = xEventGroupWaitBits(p_events,
-                                  EVT_ALL_MASK,
-                                  pdTRUE,
-                                  pdFALSE,
-                                  pdMS_TO_TICKS(DRAIN_INTERVAL_MS));
-
-      drain_queues(bits);
+      (void)xEventGroupWaitBits(sub.events, sub.mask, pdTRUE, pdFALSE,
+                           pdMS_TO_TICKS(DRAIN_INTERVAL_MS));
+      drain_queues(sub);
 
       now = xTaskGetTickCount();
       if ((now - last_send) < pdMS_TO_TICKS(AWS_SEND_INTERVAL_MS))

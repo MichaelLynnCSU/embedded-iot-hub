@@ -15,7 +15,7 @@
 #define INCLUDE_TCP_MANAGER_H_
 
 #include "freertos/event_groups.h"
-
+#include "vroom_bus.h"
 /*************************** FUNCTION PROTOTYPES *****************************/
 
 /** \brief Initialize the TCP manager.
@@ -29,6 +29,6 @@ void tcp_manager_init(void);
  *  \return void */
 void tcp_manager_task(EventGroupHandle_t p_system_eg,
                       EventGroupHandle_t p_wifi_eg,
-                      EventGroupHandle_t p_events);
+                      BUS_SUBSCRIBER_T   sub);
 
 #endif /* INCLUDE_TCP_MANAGER_H_ */

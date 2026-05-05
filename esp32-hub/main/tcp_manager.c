@@ -38,21 +38,30 @@
  *
  * \note    Motor battery (2026-04-08, updated 2026-04-27):
  *          TCP_STATE_T gains motor_batt field (SOC percent, -1 = unknown).
- *          Motor node previously sent raw millivolts and hub converted with
- *          motor_mv_to_percent(). Motor now sends SOC percent directly:
- *          {"batt_motor": <percent>}. motor_mv_to_percent() removed.
- *          Hub stores and forwards percent unchanged -- no hardcoded
- *          voltage thresholds or math on the hub side.
+ *          Motor node sends SOC percent directly: {"batt_motor": <percent>}.
+ *          Hub stores and forwards percent unchanged.
  *
- * \note    BB logging fix (2026-04-27):
- *          run_bb_state_machine() was missing ESP_LOGI calls present in
- *          run_c3_state_machine(), making it impossible to tell from logs
- *          whether the BeagleBone connection succeeded or failed.
- *          Added: connecting attempt log, immediate-connect log, EINPROGRESS
- *          log, connected-via-select log, and timeout log.
- *          Also fixed build_and_send() where the [BEAGLEBONE] success log
- *          printed local variable `count` (always 0) instead of
- *          g_state.reed_count.
+ * \note    PI controller + on-demand C3 connection (2026-05-04):
+ *          PI controller moved to pi_controller.c.
+ *          Motor state machine moved to motor_sm.c.
+ *          This file now owns: connection state machines, queue drain,
+ *          JSON send functions, and the main task loop only.
+ *
+ * \note    Motor health ping (2026-05-04):
+ *          ping_motor_for_health() lives in motor_sm.c and returns
+ *          MOTOR_PING_RESULT_T. This file applies the result to g_state
+ *          and publishes to the vroom bus.
+ *
+ * \note    motor_online ownership fix (2026-05-05):
+ *          motor_online is owned by three paths only:
+ *            - ping success        -> motor_online = 1
+ *            - socket send fault   -> motor_online = 0  (force reconnect path)
+ *            - send_pwm success    -> motor_online = 1
+ *          disconnect_c3() no longer zeros motor_online -- planned teardown
+ *          when motor is IDLE is not a fault. drain_queues() no longer writes
+ *          motor_online from the bus queue -- the queue is consumed by
+ *          aws_manager; looping it back here caused the ping result to be
+ *          overwritten by a stale {online=0} publish from disconnect_c3.
  ******************************************************************************/
 
 #include "config.h"
@@ -71,52 +80,53 @@
 #include "ble_manager.h"
 #include "uart_manager.h"
 #include "tcp_manager.h"
+#include "aws_manager.h"
 #include "vroom_bus.h"
 #include "trinity_log.h"
+#include "pi_controller.h"
+#include "motor_sm.h"
 
-#define MAX_REEDS               6         /**< must match ble_scan.c and BeagleBone */
-#define REED_OFFLINE_S          150       /**< reed offline threshold seconds */
-#define BB_CONNECT_TIMEOUT_MS   2000      /**< BeagleBone connect timeout ms */
-#define C3_CONNECT_TIMEOUT_MS   10000     /**< C3 motor connect timeout ms */
-#define BLOCK_COUNT_MAX         5         /**< max consecutive send blocks */
-#define SOCK_POLL_DELAY_MS      100       /**< delay when no connections ready ms */
-#define SOCK_RETRY_DELAY_MS     1000      /**< socket creation retry delay ms */
-#define REED_NAME_BUF_SIZE      32        /**< reed slot name buffer size */
-#define SOCK_INVALID            -1        /**< sentinel for invalid socket fd */
-#define TCP_STATE_DISCONNECTED  0         /**< socket state: disconnected */
-#define TCP_STATE_CONNECTING    1         /**< socket state: connect in progress */
-#define TCP_STATE_CONNECTED     2         /**< socket state: connected */
+#define MAX_REEDS               6
+#define REED_OFFLINE_S          150
+#define BB_CONNECT_TIMEOUT_MS   2000
+#define C3_CONNECT_TIMEOUT_MS   10000
+#define BLOCK_COUNT_MAX         5
+#define SOCK_POLL_DELAY_MS      100
+#define SOCK_RETRY_DELAY_MS     1000
+#define REED_NAME_BUF_SIZE      32
+#define SOCK_INVALID            -1
+#define TCP_STATE_DISCONNECTED  0
+#define TCP_STATE_CONNECTING    1
+#define TCP_STATE_CONNECTED     2
 
-static const char *TAG = "TCP_MGR"; /**< ESP log tag */
+static const char *TAG = "TCP_MGR";
 
-/** \brief Per-reed slot state snapshot for TCP JSON payload */
 typedef struct
 {
-   int      batt;    /*!< battery SOC percent */
-   uint16_t age;     /*!< seconds since last advertisement */
-   bool     active;  /*!< slot has been seen at least once */
-   uint8_t  state;   /*!< 0=closed 1=open 0xFF=unknown */
-   uint8_t  offline; /*!< 1=SLOT_OFFLINE, tile visible with red dot */
-   uint16_t gen;     /*!< generation counter, increments on device swap */
+   int      batt;
+   uint16_t age;
+   bool     active;
+   uint8_t  state;
+   uint8_t  offline;
+   uint16_t gen;
 } REED_SLOT_STATE_T;
 
-/** \brief Local snapshot of all sensor state for TCP JSON payload */
 typedef struct
 {
-   int              avg_temp;               /*!< average temperature from STM32 */
-   uint32_t         motion_count;           /*!< PIR motion event count */
-   int              pir_batt;               /*!< PIR battery SOC percent */
-   int              pir_occupied;           /* 0=empty, 1=occupied  -- new */
-   uint8_t          light_state;            /*!< smart light relay state */
-   uint8_t          lock_state;             /*!< smart lock state */
-   int              lock_batt;              /*!< smart lock battery SOC */
-   uint8_t          motor_online;           /*!< C3 motor controller online flag */
-   int              motor_batt;             /*!< motor battery SOC percent, -1=unknown */
-   REED_SLOT_STATE_T reed_slots[MAX_REEDS]; /*!< per-reed slot state */
-   uint16_t         age_pir;               /*!< PIR device age seconds */
-   uint16_t         age_lgt;               /*!< light device age seconds */
-   uint16_t         age_lck;               /*!< lock device age seconds */
-   int              reed_count;            /*!< snapshotted reed count -- see phantom widget fix note */
+   int               avg_temp;
+   uint32_t          motion_count;
+   int               pir_batt;
+   int               pir_occupied;
+   uint8_t           light_state;
+   uint8_t           lock_state;
+   int               lock_batt;
+   uint8_t           motor_online;
+   int               motor_batt;
+   REED_SLOT_STATE_T reed_slots[MAX_REEDS];
+   uint16_t          age_pir;
+   uint16_t          age_lgt;
+   uint16_t          age_lck;
+   int               reed_count;
 } TCP_STATE_T;
 
 static TCP_STATE_T g_state =
@@ -130,7 +140,9 @@ static TCP_STATE_T g_state =
    .age_lck    = 0xFFFF,
 };
 
-static void drain_queues(EventBits_t bits)
+/*----------------------------------------------------------------------------*/
+
+static void drain_queues(BUS_SUBSCRIBER_T sub)
 {
    PIR_PAYLOAD_T   p_pir;
    REED_PAYLOAD_T  p_reed;
@@ -139,96 +151,77 @@ static void drain_queues(EventBits_t bits)
    TEMP_PAYLOAD_T  p_temp;
    MOTOR_PAYLOAD_T p_motor;
    int             slot        = 0;
-   int             count       = 0;
-   int             i           = 0;
-   uint16_t        age         = 0xFFFF;
-   uint8_t         slot_state  = 0xFF;
-   uint16_t        gen         = 0;
    const char     *p_state_str = NULL;
 
-   if (0 != (bits & EVT_BLE_PIR))
+   /* ---- LOCK first: latency sensitive ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_lock, &p_lock, 0))
    {
-      while (pdTRUE == xQueueReceive(q_pir, &p_pir, 0))
-      {
-         g_state.motion_count = p_pir.count;
-         g_state.pir_batt     = p_pir.batt;
-      }
-      g_state.pir_occupied = ble_get_pir_occupied();
+      g_state.lock_state = p_lock.state;
+      g_state.lock_batt  = p_lock.batt;
    }
 
-   if (0 != (bits & EVT_BLE_REED))
+   /* ---- REED ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_reed, &p_reed, 0))
    {
-      while (pdTRUE == xQueueReceive(q_reed, &p_reed, 0))
+      slot = (int)p_reed.id - 1;
+      if ((0 <= slot) && (slot < MAX_REEDS))
       {
-         slot = (int)p_reed.id - 1;
-
-         if ((0 <= slot) && (slot < MAX_REEDS))
-         {
-            g_state.reed_slots[slot].batt   = p_reed.batt;
-            g_state.reed_slots[slot].active = true;
-            g_state.reed_slots[slot].state  = p_reed.state;
-         }
-
-         if (0 == p_reed.state)       { p_state_str = "closed";  }
-         else if (1 == p_reed.state)  { p_state_str = "open";    }
-         else                         { p_state_str = "unknown"; }
-
-         if (1 == p_reed.id)       { ble_update_room_sensor(1, p_state_str); }
-         else if (2 == p_reed.id)  { ble_update_room_sensor(7, p_state_str); }
+         g_state.reed_slots[slot].batt   = p_reed.batt;
+         g_state.reed_slots[slot].active = true;
+         g_state.reed_slots[slot].state  = p_reed.state;
       }
+
+      if (0 == p_reed.state)      { p_state_str = "closed";  }
+      else if (1 == p_reed.state) { p_state_str = "open";    }
+      else                        { p_state_str = "unknown"; }
+
+      if (1 == p_reed.id)      { ble_update_room_sensor(1, p_state_str); }
+      else if (2 == p_reed.id) { ble_update_room_sensor(7, p_state_str); }
    }
 
-   if (0 != (bits & EVT_BLE_LOCK))
+   /* ---- PIR ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_pir, &p_pir, 0))
    {
-      while (pdTRUE == xQueueReceive(q_lock, &p_lock, 0))
-      {
-         g_state.lock_state = p_lock.state;
-         g_state.lock_batt  = p_lock.batt;
-      }
+      g_state.motion_count = p_pir.count;
+      g_state.pir_batt     = p_pir.batt;
    }
 
-   if (0 != (bits & EVT_BLE_LIGHT))
+   /* ---- LIGHT ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_light, &p_light, 0))
    {
-      while (pdTRUE == xQueueReceive(q_light, &p_light, 0))
-      {
-         g_state.light_state = p_light.state;
-      }
+      g_state.light_state = p_light.state;
    }
 
-   if (0 != (bits & EVT_UART_TEMP))
+   /* ---- TEMP ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_temp, &p_temp, 0))
    {
-      while (pdTRUE == xQueueReceive(q_temp, &p_temp, 0))
+      g_state.avg_temp = p_temp.avg_temp;
+   }
+
+   /* ---- MOTOR: drain only, motor_online owned by ping/fault paths ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_motor, &p_motor, 0))
+   {
+      if (p_motor.batt >= 0)
       {
-         g_state.avg_temp = p_temp.avg_temp;
+         g_state.motor_batt = p_motor.batt;
       }
    }
 
-   if (0 != (bits & EVT_MOTOR_STATUS))
-   {
-      while (pdTRUE == xQueueReceive(q_motor, &p_motor, 0))
-      {
-         g_state.motor_online = p_motor.online;
-         /* Only update batt when online -- preserve last known on disconnect.
-          * Motor sends SOC percent directly -- no conversion needed. */
-         if (p_motor.online && (p_motor.batt >= 0))
-         {
-            g_state.motor_batt = p_motor.batt;
-         }
-      }
-   }
+   /* ---- snapshot BLE state after mailboxes drained ---- */
+   g_state.pir_occupied = ble_get_pir_occupied();
+   g_state.age_pir      = ble_get_device_age_s(BLE_DEV_PIR);
+   g_state.age_lgt      = ble_get_device_age_s(BLE_DEV_LIGHT);
+   g_state.age_lck      = ble_get_device_age_s(BLE_DEV_LOCK);
 
-   g_state.age_pir = ble_get_device_age_s(BLE_DEV_PIR);
-   g_state.age_lgt = ble_get_device_age_s(BLE_DEV_LIGHT);
-   g_state.age_lck = ble_get_device_age_s(BLE_DEV_LOCK);
-
-   count = ble_get_reed_count();
+   int      count = ble_get_reed_count();
+   int      i     = 0;
+   uint16_t age   = 0xFFFF;
+   uint8_t  slot_state = 0xFF;
+   uint16_t gen   = 0;
 
    for (i = 0; (i < count) && (i < MAX_REEDS); i++)
    {
-      age        = 0xFFFF;
-      slot_state = 0xFF;
-      gen        = 0;
-
+      age = 0xFFFF; slot_state = 0xFF; gen = 0;
       (void)ble_get_reed_slot_info(i, NULL, NULL, &age, &slot_state, &gen);
       g_state.reed_slots[i].age     = age;
       g_state.reed_slots[i].active  = true;
@@ -241,32 +234,26 @@ static void drain_queues(EventBits_t bits)
       if (g_state.reed_slots[i].active)
       {
          ESP_LOGI(TAG, "[REED] slot=%d state=%d batt=%d age=%d offline=%d gen=%d",
-                  i + 1,
-                  g_state.reed_slots[i].state,
-                  g_state.reed_slots[i].batt,
-                  g_state.reed_slots[i].age,
-                  g_state.reed_slots[i].offline,
+                  i + 1, g_state.reed_slots[i].state, g_state.reed_slots[i].batt,
+                  g_state.reed_slots[i].age, g_state.reed_slots[i].offline,
                   g_state.reed_slots[i].gen);
       }
    }
 }
 
-static void handle_c3_send_error(int *p_sock,
-                                  int *p_block_count,
-                                  int *p_state)
+/*----------------------------------------------------------------------------*/
+
+static void handle_c3_send_error(int *p_sock, int *p_block_count, int *p_state)
 {
    if ((EAGAIN == errno) || (EWOULDBLOCK == errno))
    {
       (*p_block_count)++;
       ESP_LOGW(TAG, "[C3_MOTOR] Send would block (%d)", *p_block_count);
-
       if (*p_block_count >= BLOCK_COUNT_MAX)
       {
          trinity_log_event("EVENT: TCP_C3_FORCE_RECONNECT\n");
          close(*p_sock);
-         *p_sock        = SOCK_INVALID;
-         *p_state       = TCP_STATE_DISCONNECTED;
-         *p_block_count = 0;
+         *p_sock = SOCK_INVALID; *p_state = TCP_STATE_DISCONNECTED; *p_block_count = 0;
          g_state.motor_online = 0;
          bus_publish_motor(0, -1);
       }
@@ -275,70 +262,54 @@ static void handle_c3_send_error(int *p_sock,
    {
       trinity_log_event("EVENT: TCP_C3_DISCONNECTED\n");
       close(*p_sock);
-      *p_sock        = SOCK_INVALID;
-      *p_state       = TCP_STATE_DISCONNECTED;
-      *p_block_count = 0;
-      bus_publish_motor(0, -1);
-      g_state.motor_online = 0;
+      *p_sock = SOCK_INVALID; *p_state = TCP_STATE_DISCONNECTED; *p_block_count = 0;
+      /* Do not zero motor_online here -- ping owns that state when IDLE.
+       * aws_manager will get the correct value on next send. */
    }
 }
 
-static void handle_bb_send_error(int *p_sock,
-                                  int *p_block_count,
-                                  int *p_state)
+/*----------------------------------------------------------------------------*/
+
+static void handle_bb_send_error(int *p_sock, int *p_block_count, int *p_state)
 {
    if ((EAGAIN == errno) || (EWOULDBLOCK == errno))
    {
       (*p_block_count)++;
       ESP_LOGW(TAG, "[BEAGLEBONE] Send would block (%d)", *p_block_count);
-
       if (*p_block_count >= BLOCK_COUNT_MAX)
       {
          trinity_log_event("EVENT: TCP_BB_FORCE_RECONNECT\n");
          close(*p_sock);
-         *p_sock        = SOCK_INVALID;
-         *p_state       = TCP_STATE_DISCONNECTED;
-         *p_block_count = 0;
+         *p_sock = SOCK_INVALID; *p_state = TCP_STATE_DISCONNECTED; *p_block_count = 0;
       }
    }
    else
    {
       trinity_log_event("EVENT: TCP_BB_DISCONNECTED\n");
       close(*p_sock);
-      *p_sock        = SOCK_INVALID;
-      *p_state       = TCP_STATE_DISCONNECTED;
-      *p_block_count = 0;
+      *p_sock = SOCK_INVALID; *p_state = TCP_STATE_DISCONNECTED; *p_block_count = 0;
    }
 }
 
-static void build_and_send(int *p_bb_sock,
-                            int *p_c3_sock,
-                            int *p_bb_block_count,
-                            int *p_c3_block_count,
-                            int *p_bb_state,
-                            int *p_c3_state)
+/*----------------------------------------------------------------------------*/
+
+static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
 {
-   cJSON   *p_root     = NULL;
-   cJSON   *p_reeds    = NULL;
-   cJSON   *p_rooms    = NULL;
-   cJSON   *p_entry    = NULL;
-   cJSON   *p_rx_json  = NULL;
-   cJSON   *p_batt     = NULL;
-   char    *p_msg      = NULL;
+   cJSON   *p_root  = NULL;
+   cJSON   *p_reeds = NULL;
+   cJSON   *p_rooms = NULL;
+   cJSON   *p_entry = NULL;
+   char    *p_msg   = NULL;
    char     name[REED_NAME_BUF_SIZE] = {0};
-   char     rx[64]     = {0};
    uint8_t  door_state = 0xFF;
    uint16_t gen        = 0;
    int      i          = 0;
    int      sent       = 0;
-   int      rlen       = 0;
+
+   if ((TCP_STATE_CONNECTED != *p_bb_state) || (SOCK_INVALID == *p_bb_sock)) { return; }
 
    p_root = cJSON_CreateObject();
-   if (NULL == p_root)
-   {
-      ESP_LOGE(TAG, "cJSON root alloc failed");
-      return;
-   }
+   if (NULL == p_root) { ESP_LOGE(TAG, "cJSON root alloc failed (BB)"); return; }
 
    (void)cJSON_AddNumberToObject(p_root, "avg_temp",     g_state.avg_temp);
    (void)cJSON_AddNumberToObject(p_root, "motion_count", g_state.motion_count);
@@ -348,24 +319,20 @@ static void build_and_send(int *p_bb_sock,
    (void)cJSON_AddNumberToObject(p_root, "age_lgt",      g_state.age_lgt);
    (void)cJSON_AddNumberToObject(p_root, "age_lck",      g_state.age_lck);
    (void)cJSON_AddNumberToObject(p_root, "batt_pir",     g_state.pir_batt);
-   (void)cJSON_AddNumberToObject(p_root, "pir_occupied",  g_state.pir_occupied);
+   (void)cJSON_AddNumberToObject(p_root, "pir_occupied", g_state.pir_occupied);
    (void)cJSON_AddNumberToObject(p_root, "batt_lck",     g_state.lock_batt);
    (void)cJSON_AddNumberToObject(p_root, "batt_motor",   g_state.motor_batt);
    (void)cJSON_AddNumberToObject(p_root, "motor_online", g_state.motor_online);
 
    g_state.reed_count = ble_get_reed_count();
    p_reeds = cJSON_CreateArray();
-
    if (NULL != p_reeds)
    {
       for (i = 0; (i < g_state.reed_count) && (i < MAX_REEDS); i++)
       {
          (void)memset(name, 0, sizeof(name));
-         door_state = 0xFF;
-         gen        = 0;
-
+         door_state = 0xFF; gen = 0;
          (void)ble_get_reed_slot_info(i, name, NULL, NULL, &door_state, &gen);
-
          p_entry = cJSON_CreateObject();
          if (NULL != p_entry)
          {
@@ -379,12 +346,10 @@ static void build_and_send(int *p_bb_sock,
             (void)cJSON_AddItemToArray(p_reeds, p_entry);
          }
       }
-
       (void)cJSON_AddItemToObject(p_root, "reeds", p_reeds);
    }
 
    p_rooms = cJSON_CreateArray();
-
    if (NULL != p_rooms)
    {
       for (i = 0; i < ROOM_COUNT; i++)
@@ -399,95 +364,109 @@ static void build_and_send(int *p_bb_sock,
             (void)cJSON_AddItemToArray(p_rooms, p_entry);
          }
       }
-
       (void)cJSON_AddItemToObject(p_root, "rooms", p_rooms);
    }
 
    p_msg = cJSON_PrintUnformatted(p_root);
    cJSON_Delete(p_root);
+   if (NULL == p_msg) { ESP_LOGE(TAG, "cJSON serialize failed (BB)"); return; }
 
-   if (NULL == p_msg)
+   sent = send(*p_bb_sock, p_msg, strlen(p_msg), 0);
+   if (0 > sent)
    {
-      ESP_LOGE(TAG, "cJSON serialize failed");
-      return;
+      handle_bb_send_error(p_bb_sock, p_bb_block_count, p_bb_state);
    }
-
-   if ((TCP_STATE_CONNECTED == *p_c3_state) &&
-       (SOCK_INVALID != *p_c3_sock))
+   else
    {
-      sent = send(*p_c3_sock, p_msg, strlen(p_msg), 0);
-      if (0 > sent)
-      {
-         handle_c3_send_error(p_c3_sock, p_c3_block_count, p_c3_state);
-      }
-      else
-      {
-         *p_c3_block_count = 0;
-         ESP_LOGI(TAG, "[C3_MOTOR] Sent %d bytes", sent);
-         g_state.motor_online = 1;
-
-         /* Drain battery response from motor -- arrives as SOC percent.
-          * {"batt_motor": <percent>} -- store directly, no conversion. */
-         rlen = recv(*p_c3_sock, rx, sizeof(rx) - 1, MSG_DONTWAIT);
-         if (rlen > 0)
-         {
-            rx[rlen]  = '\0';
-            p_rx_json = cJSON_Parse(rx);
-            if (NULL != p_rx_json)
-            {
-               p_batt = cJSON_GetObjectItem(p_rx_json, "batt_motor");
-               if ((NULL != p_batt) && (p_batt->valueint >= 0))
-               {
-                  g_state.motor_batt = p_batt->valueint;
-                  ESP_LOGI(TAG, "[C3_MOTOR] batt_motor=%d%%", g_state.motor_batt);
-               }
-               cJSON_Delete(p_rx_json);
-            }
-         }
-      }
+      *p_bb_block_count = 0;
+      ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u occ=%d lgt=%d lck=%d reeds=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d",
+               g_state.avg_temp, (unsigned)g_state.motion_count, g_state.pir_occupied,
+               g_state.light_state, g_state.lock_state, g_state.reed_count,
+               (int)g_state.motor_online, g_state.motor_batt,
+               g_state.pir_batt, g_state.lock_batt);
    }
-
-   if ((TCP_STATE_CONNECTED == *p_bb_state) &&
-       (SOCK_INVALID != *p_bb_sock))
-   {
-      sent = send(*p_bb_sock, p_msg, strlen(p_msg), 0);
-      if (0 > sent)
-      {
-         handle_bb_send_error(p_bb_sock, p_bb_block_count, p_bb_state);
-      }
-      else
-      {
-         *p_bb_block_count = 0;
-         ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u occ=%d lgt=%d lck=%d reeds=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d",
-                  g_state.avg_temp,
-                  (unsigned)g_state.motion_count,
-                  g_state.pir_occupied,
-                  g_state.light_state,
-                  g_state.lock_state,
-                  g_state.reed_count,
-                  (int)g_state.motor_online,
-                  g_state.motor_batt,
-                  g_state.pir_batt,
-                  g_state.lock_batt);
-      }
-   }
-
    cJSON_free(p_msg);
 }
 
-static void run_c3_state_machine(int *p_sock,
-                                  int *p_state,
-                                  int *p_block_count,
-                                  uint32_t *p_connect_start,
-                                  struct sockaddr_in *p_addr,
-                                  uint32_t now)
+/*----------------------------------------------------------------------------*/
+
+static void send_pwm_to_c3(int *p_c3_sock, int *p_c3_block_count,
+                            int *p_c3_state, float pwm_pct)
 {
-   int            flags = 0;
-   int            ret   = 0;
-   int            err   = 0;
-   socklen_t      el    = sizeof(err);
-   fd_set         writefds;
-   fd_set         errorfds;
+   cJSON  *p_root    = NULL;
+   cJSON  *p_rx_json = NULL;
+   cJSON  *p_batt    = NULL;
+   char   *p_msg     = NULL;
+   char    rx[64]    = {0};
+   int     duty      = 0;
+   int     sent      = 0;
+   int     rlen      = 0;
+
+   if ((TCP_STATE_CONNECTED != *p_c3_state) || (SOCK_INVALID == *p_c3_sock)) { return; }
+
+   duty   = (int)((pwm_pct / PWM_OUT_MAX) * (float)PWM_DUTY_MAX);
+   p_root = cJSON_CreateObject();
+   if (NULL == p_root) { ESP_LOGE(TAG, "cJSON root alloc failed (C3)"); return; }
+
+   (void)cJSON_AddNumberToObject(p_root, "pwm", duty);
+   p_msg = cJSON_PrintUnformatted(p_root);
+   cJSON_Delete(p_root);
+   if (NULL == p_msg) { ESP_LOGE(TAG, "cJSON serialize failed (C3)"); return; }
+
+   sent = send(*p_c3_sock, p_msg, strlen(p_msg), 0);
+   if (0 > sent)
+   {
+      handle_c3_send_error(p_c3_sock, p_c3_block_count, p_c3_state);
+   }
+   else
+   {
+      *p_c3_block_count    = 0;
+      g_state.motor_online = 1;
+      ESP_LOGI(TAG, "[C3_MOTOR] Sent pwm=%d (%.1f%%) bytes=%d", duty, pwm_pct, sent);
+
+      rlen = recv(*p_c3_sock, rx, sizeof(rx) - 1, MSG_DONTWAIT);
+      if (rlen > 0)
+      {
+         rx[rlen]  = '\0';
+         p_rx_json = cJSON_Parse(rx);
+         if (NULL != p_rx_json)
+         {
+            p_batt = cJSON_GetObjectItem(p_rx_json, "batt_motor");
+            if ((NULL != p_batt) && (p_batt->valueint >= 0))
+            {
+               g_state.motor_batt = p_batt->valueint;
+               ESP_LOGI(TAG, "[C3_MOTOR] batt_motor=%d%%", g_state.motor_batt);
+            }
+            cJSON_Delete(p_rx_json);
+         }
+      }
+   }
+   cJSON_free(p_msg);
+}
+
+/*----------------------------------------------------------------------------*/
+
+static void disconnect_c3(int *p_sock, int *p_state, int *p_block_count)
+{
+   if (SOCK_INVALID != *p_sock)
+   {
+      close(*p_sock);
+      *p_sock = SOCK_INVALID; *p_state = TCP_STATE_DISCONNECTED; *p_block_count = 0;
+   }
+   /* Do not zero motor_online or publish offline -- ping owns that state
+    * when motor is IDLE. This is planned teardown, not a fault. */
+   ESP_LOGI(TAG, "[C3_MOTOR] Disconnected (motor idle)");
+}
+
+/*----------------------------------------------------------------------------*/
+
+static void run_c3_state_machine(int *p_sock, int *p_state, int *p_block_count,
+                                  uint32_t *p_connect_start,
+                                  struct sockaddr_in *p_addr, uint32_t now)
+{
+   int flags = 0, ret = 0, err = 0;
+   socklen_t el = sizeof(err);
+   fd_set writefds, errorfds;
    struct timeval tv;
 
    switch (*p_state)
@@ -495,85 +474,69 @@ static void run_c3_state_machine(int *p_sock,
       case TCP_STATE_DISCONNECTED:
       {
          if (SOCK_INVALID != *p_sock) { close(*p_sock); *p_sock = SOCK_INVALID; }
-
          *p_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
          if (0 > *p_sock) { vTaskDelay(pdMS_TO_TICKS(SOCK_RETRY_DELAY_MS)); break; }
-
          flags = fcntl(*p_sock, F_GETFL, 0);
          ESP_LOGI(TAG, "[C3_MOTOR] Connecting to %s:%d", C3_MOTOR_IP, C3_MOTOR_PORT);
          (void)fcntl(*p_sock, F_SETFL, flags | O_NONBLOCK);
-
          ret = connect(*p_sock, (struct sockaddr *)p_addr, sizeof(*p_addr));
-
          if (0 == ret)
          {
             *p_state = TCP_STATE_CONNECTED; *p_block_count = 0;
-            ESP_LOGI(TAG, "[C3_MOTOR] Connected");
-            bus_publish_motor(1, -1);
+            ESP_LOGI(TAG, "[C3_MOTOR] Connected"); bus_publish_motor(1, -1);
          }
          else if (EINPROGRESS == errno)
          {
-            *p_connect_start = now;
-            *p_state         = TCP_STATE_CONNECTING;
+            *p_connect_start = now; *p_state = TCP_STATE_CONNECTING;
+            ESP_LOGI(TAG, "[C3_MOTOR] Connect in progress...");
          }
-         else
-         {
-            close(*p_sock); *p_sock = SOCK_INVALID;
-            vTaskDelay(pdMS_TO_TICKS(CONNECTION_RETRY_DELAY_MS));
-         }
+         else { close(*p_sock); *p_sock = SOCK_INVALID; vTaskDelay(pdMS_TO_TICKS(CONNECTION_RETRY_DELAY_MS)); }
          break;
       }
-
       case TCP_STATE_CONNECTING:
       {
          if ((now - *p_connect_start) > C3_CONNECT_TIMEOUT_MS)
          {
+            ESP_LOGW(TAG, "[C3_MOTOR] Connect timed out after %d ms", C3_CONNECT_TIMEOUT_MS);
             close(*p_sock); *p_sock = SOCK_INVALID; *p_state = TCP_STATE_DISCONNECTED;
-            vTaskDelay(pdMS_TO_TICKS(CONNECTION_RETRY_DELAY_MS));
-            break;
+            vTaskDelay(pdMS_TO_TICKS(CONNECTION_RETRY_DELAY_MS)); break;
          }
-
          FD_ZERO(&writefds); FD_ZERO(&errorfds);
          FD_SET(*p_sock, &writefds); FD_SET(*p_sock, &errorfds);
          tv.tv_sec = 0; tv.tv_usec = 10000;
-
          if (0 < select(*p_sock + 1, NULL, &writefds, &errorfds, &tv))
          {
             (void)getsockopt(*p_sock, SOL_SOCKET, SO_ERROR, &err, &el);
-
             if (FD_ISSET(*p_sock, &errorfds) || (0 != err))
             {
+               ESP_LOGW(TAG, "[C3_MOTOR] Connect error (SO_ERROR=%d)", err);
                close(*p_sock); *p_sock = SOCK_INVALID; *p_state = TCP_STATE_DISCONNECTED;
                vTaskDelay(pdMS_TO_TICKS(CONNECTION_RETRY_DELAY_MS));
             }
             else if (FD_ISSET(*p_sock, &writefds))
             {
                trinity_log_event("EVENT: TCP_C3_CONNECTED\n");
+               ESP_LOGI(TAG, "[C3_MOTOR] Connected via select");
                *p_state = TCP_STATE_CONNECTED; *p_block_count = 0;
                bus_publish_motor(1, -1);
             }
          }
          break;
       }
-
-      case TCP_STATE_CONNECTED:  break;
+      case TCP_STATE_CONNECTED: break;
       default: *p_state = TCP_STATE_DISCONNECTED; break;
    }
 }
 
-static void run_bb_state_machine(int *p_sock,
-                                  int *p_state,
-                                  int *p_block_count,
+/*----------------------------------------------------------------------------*/
+
+static void run_bb_state_machine(int *p_sock, int *p_state, int *p_block_count,
                                   uint32_t *p_connect_start,
-                                  struct sockaddr_in *p_addr,
-                                  uint32_t now)
+                                  struct sockaddr_in *p_addr, uint32_t now)
 {
-   int            flags = 0;
-   int            ret   = 0;
-   int            err   = 0;
-   socklen_t      el    = sizeof(err);
-   fd_set         writefds;
-   fd_set         errorfds;
+   int flags = 0, ret = 0, err = 0;
+   socklen_t el = sizeof(err);
+   fd_set writefds, errorfds;
    struct timeval tv;
 
    switch (*p_state)
@@ -581,16 +544,12 @@ static void run_bb_state_machine(int *p_sock,
       case TCP_STATE_DISCONNECTED:
       {
          if (SOCK_INVALID != *p_sock) { close(*p_sock); *p_sock = SOCK_INVALID; }
-
          *p_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
          if (0 > *p_sock) { vTaskDelay(pdMS_TO_TICKS(SOCK_RETRY_DELAY_MS)); break; }
-
          flags = fcntl(*p_sock, F_GETFL, 0);
          ESP_LOGI(TAG, "[BEAGLEBONE] Connecting to %s:%d", BEAGLEBONE_IP, BEAGLEBONE_PORT);
          (void)fcntl(*p_sock, F_SETFL, flags | O_NONBLOCK);
-
          ret = connect(*p_sock, (struct sockaddr *)p_addr, sizeof(*p_addr));
-
          if (0 == ret)
          {
             trinity_log_event("EVENT: TCP_BB_CONNECTED\n");
@@ -610,25 +569,20 @@ static void run_bb_state_machine(int *p_sock,
          }
          break;
       }
-
       case TCP_STATE_CONNECTING:
       {
          if ((now - *p_connect_start) > BB_CONNECT_TIMEOUT_MS)
          {
             ESP_LOGW(TAG, "[BEAGLEBONE] Connect timed out after %d ms", BB_CONNECT_TIMEOUT_MS);
             close(*p_sock); *p_sock = SOCK_INVALID; *p_state = TCP_STATE_DISCONNECTED;
-            vTaskDelay(pdMS_TO_TICKS(CONNECTION_RETRY_DELAY_MS));
-            break;
+            vTaskDelay(pdMS_TO_TICKS(CONNECTION_RETRY_DELAY_MS)); break;
          }
-
          FD_ZERO(&writefds); FD_ZERO(&errorfds);
          FD_SET(*p_sock, &writefds); FD_SET(*p_sock, &errorfds);
          tv.tv_sec = 0; tv.tv_usec = 10000;
-
          if (0 < select(*p_sock + 1, NULL, &writefds, &errorfds, &tv))
          {
             (void)getsockopt(*p_sock, SOL_SOCKET, SO_ERROR, &err, &el);
-
             if (FD_ISSET(*p_sock, &errorfds) || (0 != err))
             {
                ESP_LOGW(TAG, "[BEAGLEBONE] Connect error (SO_ERROR=%d)", err);
@@ -644,11 +598,12 @@ static void run_bb_state_machine(int *p_sock,
          }
          break;
       }
-
-      case TCP_STATE_CONNECTED:  break;
+      case TCP_STATE_CONNECTED: break;
       default: *p_state = TCP_STATE_DISCONNECTED; break;
    }
 }
+
+/*----------------------------------------------------------------------------*/
 
 void tcp_manager_init(void)
 {
@@ -657,18 +612,21 @@ void tcp_manager_init(void)
 
 void tcp_manager_task(EventGroupHandle_t p_system_eg,
                       EventGroupHandle_t p_wifi_eg,
-                      EventGroupHandle_t p_events)
+                      BUS_SUBSCRIBER_T   sub)
 {
-   int      c3_sock          = SOCK_INVALID;
-   int      bb_sock          = SOCK_INVALID;
-   int      c3_state         = TCP_STATE_DISCONNECTED;
-   int      bb_state         = TCP_STATE_DISCONNECTED;
-   int      c3_block_count   = 0;
-   int      bb_block_count   = 0;
-   uint32_t c3_connect_start = 0;
-   uint32_t bb_connect_start = 0;
-   uint32_t now              = 0;
-   EventBits_t bits          = 0;
+   int         c3_sock          = SOCK_INVALID;
+   int         bb_sock          = SOCK_INVALID;
+   int         c3_state         = TCP_STATE_DISCONNECTED;
+   int         bb_state         = TCP_STATE_DISCONNECTED;
+   int         c3_block_count   = 0;
+   int         bb_block_count   = 0;
+   uint32_t    c3_connect_start = 0;
+   uint32_t    bb_connect_start = 0;
+   uint32_t    now              = 0;
+   float       pi_out           = 0.0f;
+   float       eff_pwm          = 0.0f;
+   bool        do_connect       = false;
+   bool        do_disconnect    = false;
 
    (void)p_system_eg;
 
@@ -678,7 +636,6 @@ void tcp_manager_task(EventGroupHandle_t p_system_eg,
       .sin_port        = htons(C3_MOTOR_PORT),
       .sin_addr.s_addr = inet_addr(C3_MOTOR_IP),
    };
-
    struct sockaddr_in bb_addr =
    {
       .sin_family      = AF_INET,
@@ -693,33 +650,49 @@ void tcp_manager_task(EventGroupHandle_t p_system_eg,
    while (1)
    {
       trinity_wdt_kick();
-
       now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-      run_c3_state_machine(&c3_sock, &c3_state, &c3_block_count,
-                            &c3_connect_start, &c3_addr, now);
+      pi_out  = run_pi_controller(now);
+      eff_pwm = run_motor_sm(pi_out, now, &do_connect, &do_disconnect);
+
+      /* Idle health ping -- keeps BeagleBone timeout satisfied */
+      if ((MOTOR_IDLE == motor_sm_get_state()) && motor_sm_ping_due(now))
+      {
+         MOTOR_PING_RESULT_T ping = ping_motor_for_health(&c3_addr, now);
+         if (ping.success)
+         {
+            g_state.motor_batt   = ping.batt_pct;
+            g_state.motor_online = 1;
+            bus_publish_motor(1, g_state.motor_batt);
+            trinity_log_event("EVENT: MOTOR_PING_OK\n");
+            ESP_LOGI(TAG, "[MOTOR_PING] OK -- batt_motor=%d%%", g_state.motor_batt);
+         }
+      }
+
+      if (do_disconnect)
+      {
+         disconnect_c3(&c3_sock, &c3_state, &c3_block_count);
+      }
+      else if (do_connect || (eff_pwm > 0.0f))
+      {
+         run_c3_state_machine(&c3_sock, &c3_state, &c3_block_count,
+                               &c3_connect_start, &c3_addr, now);
+      }
 
       run_bb_state_machine(&bb_sock, &bb_state, &bb_block_count,
                             &bb_connect_start, &bb_addr, now);
 
-      if ((TCP_STATE_CONNECTED != c3_state) &&
-          (TCP_STATE_CONNECTED != bb_state))
+      if (TCP_STATE_CONNECTED != bb_state)
       {
          vTaskDelay(pdMS_TO_TICKS(SOCK_POLL_DELAY_MS));
          continue;
       }
 
-      bits = xEventGroupWaitBits(p_events,
-                                  EVT_ALL_MASK,
-                                  pdTRUE,
-                                  pdFALSE,
-                                  pdMS_TO_TICKS(TCP_SEND_INTERVAL_MS));
+      (void)xEventGroupWaitBits(sub.events, sub.mask, pdTRUE, pdFALSE,
+                           pdMS_TO_TICKS(TCP_SEND_INTERVAL_MS));
+      drain_queues(sub);
 
-      drain_queues(bits);
-
-      g_state.motor_online = (TCP_STATE_CONNECTED == c3_state) ? 1 : 0;
-      build_and_send(&bb_sock, &c3_sock,
-                     &bb_block_count, &c3_block_count,
-                     &bb_state, &c3_state);
+      send_to_bb(&bb_sock, &bb_block_count, &bb_state);
+      send_pwm_to_c3(&c3_sock, &c3_block_count, &c3_state, eff_pwm);
    }
 }

@@ -62,8 +62,8 @@ ROOM_SENSOR_T rooms[] =
    {7, "bedroom", "closed", "closet_door"},
 };
 
-typedef struct { EventGroupHandle_t bus_events; } TCP_TASK_PARAMS_T;
-typedef struct { EventGroupHandle_t bus_events; } AWS_TASK_PARAMS_T;
+typedef struct { BUS_SUBSCRIBER_T sub; } TCP_TASK_PARAMS_T;
+typedef struct { BUS_SUBSCRIBER_T sub; } AWS_TASK_PARAMS_T;
 
 static TCP_TASK_PARAMS_T g_tcp_params;
 static AWS_TASK_PARAMS_T g_aws_params;
@@ -187,12 +187,12 @@ void app_main(void)
 
    bus_init();
 
-   g_tcp_params.bus_events = bus_register_subscriber();
-   g_aws_params.bus_events = bus_register_subscriber();
+   g_tcp_params.sub = bus_register_subscriber(EVT_ALL_MASK);
+   g_aws_params.sub = bus_register_subscriber(EVT_UART_TEMP | EVT_MOTOR_STATUS);
 
-   if ((NULL == g_tcp_params.bus_events) || (NULL == g_aws_params.bus_events))
+   if ((NULL == g_tcp_params.sub.events) || (NULL == g_aws_params.sub.events))
    {
-      ESP_LOGE(TAG, "Bus subscriber registration failed");
+     ESP_LOGE(TAG, "Bus subscriber registration failed");
    }
 
    uart_hw_init();
@@ -205,6 +205,9 @@ void app_main(void)
 
    (void)xEventGroupSetBits(g_system_eg, ALL_TASKS_CREATED_BIT);
    ESP_LOGI(TAG, "System ready - tasks starting");
+   ESP_LOGI("RAM", "Free heap: %lu", esp_get_free_heap_size());
+   ESP_LOGI("RAM", "Min free heap: %lu", esp_get_minimum_free_heap_size());
+   ESP_LOGI("RAM", "Free DRAM: %lu", heap_caps_get_free_size(MALLOC_CAP_8BIT));
 }
 
 /******************************************************************************
@@ -271,12 +274,10 @@ static void tcp_task(void *p_arg)
 
    (void)xEventGroupWaitBits(g_system_eg, ALL_TASKS_CREATED_BIT,
                                pdFALSE, pdTRUE, portMAX_DELAY);
-
-   /* ---- Trinity: defer WDT registration until WiFi is up ---- */
    wait_for_wifi_kicked();
    trinity_wdt_add();
 
-   tcp_manager_task(g_system_eg, g_wifi_eg, p_params->bus_events);
+   tcp_manager_task(g_system_eg, g_wifi_eg, p_params->sub);
    vTaskDelete(NULL);
 }
 
@@ -286,11 +287,9 @@ static void aws_task(void *p_arg)
 
    (void)xEventGroupWaitBits(g_system_eg, ALL_TASKS_CREATED_BIT,
                                pdFALSE, pdTRUE, portMAX_DELAY);
-
-   /* ---- Trinity: defer WDT registration until WiFi is up ---- */
    wait_for_wifi_kicked();
    trinity_wdt_add();
 
-   aws_manager_task(g_wifi_eg, p_params->bus_events);
+   aws_manager_task(g_wifi_eg, p_params->sub);
    vTaskDelete(NULL);
 }

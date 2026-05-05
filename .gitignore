@@ -108,3 +108,4 @@ STM32*.cfg
 **/build_test/**/build_info.yml.bak
 nrf52840/reed-sensor/build_test/
 nrf52840/smart-lock/build_test/
+esp32c3/zephyr/pir/build_test/

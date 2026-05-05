@@ -4,6 +4,16 @@
  * \date    01-01-2025
  *
  * \brief   Entry point for ESP32-C3 motor controller node.
+ *
+ * \details Initialises hardware, WiFi, and spawns two tasks:
+ *          - tcp_rx_task:  accepts hub connection, dispatches {"pwm": X}
+ *          - motor_task:   applies PWM duty, reports battery SOC
+ *
+ * \note    Power saving (2026-05-04):
+ *          Knob ADC removed -- motor is now a pure PWM receiver. Hub owns
+ *          all temperature sensing and PID control. adc_init() removed from
+ *          startup. battery_init() retains its own ADC handle internally.
+ *          motor_task enters light sleep when PWM=0 and no client connected.
  ******************************************************************************/
 
 #include "wifi.h"
@@ -14,7 +24,6 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "trinity_log.h"
-#include "esp_adc/adc_oneshot.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -26,8 +35,6 @@ static const char *TAG = "APP_MAIN";
 
 void app_main(void)
 {
-    adc_oneshot_unit_handle_t adc_handle = NULL;
-
     (void)nvs_flash_init();
     trinity_log_dump_previous();
     trinity_log_init();
@@ -45,9 +52,8 @@ void app_main(void)
     }
 
     pwm_init();
-    adc_init(&adc_handle);
 
-    if (0 != battery_init(adc_handle))
+    if (0 != battery_init())
     {
         ESP_LOGW(TAG, "Battery init failed -- batt_motor will not report");
     }

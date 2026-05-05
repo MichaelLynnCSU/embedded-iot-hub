@@ -7,6 +7,9 @@
  *
  * \details Provides initialization and task entry point for sending
  *          consolidated sensor state to AWS Lambda every 5 minutes.
+ *          Parses the Lambda response for PI controller parameters
+ *          (kp, ki, kd, setpoint) and exposes them via getter functions
+ *          for consumption by tcp_manager.c.
  *          See aws_manager.c for implementation details.
  ******************************************************************************/
 
@@ -14,7 +17,7 @@
 #define INCLUDE_AWS_MANAGER_H_
 
 #include "freertos/event_groups.h"
-
+#include "vroom_bus.h"
 /*************************** FUNCTION PROTOTYPES *****************************/
 
 /** \brief Initialize the AWS manager.
@@ -26,6 +29,22 @@ void aws_manager_init(void);
  *  \param p_events  - Vroom bus event group for sensor events.
  *  \return void */
 void aws_manager_task(EventGroupHandle_t p_wifi_eg,
-                      EventGroupHandle_t p_events);
+                      BUS_SUBSCRIBER_T   sub);
+
+/** \brief Get the PI controller proportional gain from last Lambda response.
+ *  \return kp as float */
+float aws_get_kp(void);
+
+/** \brief Get the PI controller integral gain from last Lambda response.
+ *  \return ki as float */
+float aws_get_ki(void);
+
+/** \brief Get the PI controller derivative gain from last Lambda response.
+ *  \return kd as float */
+float aws_get_kd(void);
+
+/** \brief Get the temperature setpoint from last Lambda response.
+ *  \return setpoint in same units as avg_temp (integer degrees) */
+int aws_get_setpoint(void);
 
 #endif /* INCLUDE_AWS_MANAGER_H_ */

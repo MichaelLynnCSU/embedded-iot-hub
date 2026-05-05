@@ -6,20 +6,32 @@
  * \brief Vroom event bus implementation for ESP32 hub node.
  *
  * \details Provides a publish/subscribe event bus connecting BLE scan,
- *          UART, and TCP/AWS consumer tasks. Each sensor type has a
- *          dedicated FreeRTOS queue. Subscribers receive event group
- *          bits on each publish.
+ *          UART, and TCP/AWS consumer tasks. Each subscriber owns a
+ *          private mailbox set (one depth-1 queue per device type).
+ *          Publishers fan out payloads to all interested subscriber
+ *          mailboxes at publish time via xQueueOverwrite, then signal
+ *          only the subscribers that registered interest in that bit.
  *
  *          Design principles:
- *          - Producers never block — xQueueSend with timeout=0
- *          - Full queues drop and log — BLE scan callbacks never stall
+ *          - Producers never block — xQueueOverwrite always succeeds
+ *          - Latest value wins — depth-1 mailbox holds most recent payload
+ *          - No shared queues — each subscriber owns its mailboxes
+ *          - No races — fanout happens at publish time, not read time
+ *          - Targeted wakeup — subscribers only wake for their mask bits
  *          - Subscriber registration is single-threaded at init time
  *          - No mutex needed on sub_count — registration before tasks start
  *
  *          Call order:
- *          1. bus_init()               — create all queues
+ *          1. bus_init()                — initialise bus (app_main)
  *          2. bus_register_subscriber() — register consumers (pre-task)
- *          3. bus_publish_*()          — called by producers at runtime
+ *          3. bus_publish_*()           — called by producers at runtime
+ *
+ * \note    Mailbox refactor (2026-05-05):
+ *          Replaced single shared queues (q_pir, q_reed, etc.) with
+ *          per-subscriber private mailboxes. xQueueSend + drop-and-log
+ *          replaced by xQueueOverwrite — publishers never drop, never
+ *          block. bus_signal() now checks subscriber mask before setting
+ *          bits so idle tasks are not woken unnecessarily.
  ******************************************************************************/
 
 #include "vroom_bus.h"
@@ -28,92 +40,93 @@
 
 static const char *TAG = "VROOM_BUS"; /**< ESP log tag */
 
-QueueHandle_t q_pir;   /**< PIR motion event queue */
-QueueHandle_t q_reed;  /**< reed sensor event queue */
-QueueHandle_t q_lock;  /**< smart lock event queue */
-QueueHandle_t q_light; /**< smart light event queue */
-QueueHandle_t q_temp;  /**< UART temperature event queue */
-QueueHandle_t q_motor; /**< motor status event queue */
-
-static EventGroupHandle_t g_subscribers[BUS_MAX_SUBSCRIBERS]; /**< subscriber table */
-static int                g_sub_count = 0;                    /**< registered count */
+static BUS_SUBSCRIBER_T g_subscribers[BUS_MAX_SUBSCRIBERS]; /**< subscriber table */
+static int              g_sub_count = 0;                    /**< registered count  */
 
 /******************************************************************************
- * \brief Register a new bus subscriber and return its event group handle.
+ * \brief Register a new bus subscriber with an interest mask.
  *
- * \return EventGroupHandle_t - Subscriber event group, or NULL if table full.
+ * \param mask - EVT_* bits this subscriber wants to be woken for.
+ *               Use EVT_ALL_MASK to receive every event.
+ *
+ * \return BUS_SUBSCRIBER_T - Subscriber handle. Check .events != NULL
+ *         before use — NULL indicates the subscriber table is full.
  *
  * \warning Not thread-safe. Call only from app_main before tasks start.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
-EventGroupHandle_t bus_register_subscriber(void)
+BUS_SUBSCRIBER_T bus_register_subscriber(EventBits_t mask)
 {
-   EventGroupHandle_t grp = NULL; /**< new subscriber event group */
+   BUS_SUBSCRIBER_T sub = {0}; /**< zeroed subscriber handle */
 
    if (g_sub_count >= BUS_MAX_SUBSCRIBERS)
    {
       ESP_LOGE(TAG, "Subscriber table full (max=%d)", BUS_MAX_SUBSCRIBERS);
-      return NULL;
+      return sub;
    }
 
-   grp = xEventGroupCreate();
-   g_subscribers[g_sub_count] = grp;
+   sub.events   = xEventGroupCreate();
+   sub.mask     = mask;
+   sub.mb_pir   = xQueueCreate(1, sizeof(PIR_PAYLOAD_T));
+   sub.mb_reed  = xQueueCreate(1, sizeof(REED_PAYLOAD_T));
+   sub.mb_lock  = xQueueCreate(1, sizeof(LOCK_PAYLOAD_T));
+   sub.mb_light = xQueueCreate(1, sizeof(LIGHT_PAYLOAD_T));
+   sub.mb_temp  = xQueueCreate(1, sizeof(TEMP_PAYLOAD_T));
+   sub.mb_motor = xQueueCreate(1, sizeof(MOTOR_PAYLOAD_T));
+
+   if ((NULL == sub.events)   || (NULL == sub.mb_pir)  ||
+       (NULL == sub.mb_reed)  || (NULL == sub.mb_lock) ||
+       (NULL == sub.mb_light) || (NULL == sub.mb_temp) ||
+       (NULL == sub.mb_motor))
+   {
+      ESP_LOGE(TAG, "Subscriber mailbox alloc failed — check heap");
+      return sub;
+   }
+
+   g_subscribers[g_sub_count] = sub;
    g_sub_count++;
 
-   ESP_LOGI(TAG, "Subscriber registered (%d/%d)",
-            g_sub_count, BUS_MAX_SUBSCRIBERS);
+   ESP_LOGI(TAG, "Subscriber registered (%d/%d) mask=0x%03lX",
+            g_sub_count, BUS_MAX_SUBSCRIBERS, (unsigned long)mask);
 
-   return grp;
+   return sub;
 }
 
 /******************************************************************************
- * \brief Fan out event bits to all registered subscribers.
- *
- * \param bits - Event bits to set on each subscriber event group.
- *
- * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
-static void bus_signal(uint32_t bits)
-{
-   int i = 0; /**< loop index */
-
-   for (i = 0; i < g_sub_count; i++)
-   {
-      (void)xEventGroupSetBits(g_subscribers[i], bits);
-   }
-}
-
-/******************************************************************************
- * \brief Initialize the vroom bus — create all queues.
+ * \brief Initialize the vroom bus.
  *
  * \return void
  *
  * \details Must be called once from app_main before any publish or
- *          subscriber registration. Logs error if any queue fails.
+ *          subscriber registration.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void bus_init(void)
 {
-   q_pir   = xQueueCreate(Q_DEPTH_PIR,   sizeof(PIR_PAYLOAD_T));
-   q_reed  = xQueueCreate(Q_DEPTH_REED,  sizeof(REED_PAYLOAD_T));
-   q_lock  = xQueueCreate(Q_DEPTH_LOCK,  sizeof(LOCK_PAYLOAD_T));
-   q_light = xQueueCreate(Q_DEPTH_LIGHT, sizeof(LIGHT_PAYLOAD_T));
-   q_temp  = xQueueCreate(Q_DEPTH_TEMP,  sizeof(TEMP_PAYLOAD_T));
-   q_motor = xQueueCreate(Q_DEPTH_MOTOR, sizeof(MOTOR_PAYLOAD_T));
+   ESP_LOGI(TAG, "Bus initialized");
+}
 
-   if ((NULL == q_pir)   || (NULL == q_reed)  ||
-       (NULL == q_lock)  || (NULL == q_light) ||
-       (NULL == q_temp)  || (NULL == q_motor))
+/******************************************************************************
+ * \brief Signal subscribers that registered interest in these bits.
+ *
+ * \param bits - Event bits to fan out.
+ *
+ * \return void
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+static void bus_signal(EventBits_t bits)
+{
+   int i = 0; /**< loop index */
+
+   for (i = 0; i < g_sub_count; i++)
    {
-      ESP_LOGE(TAG, "Queue creation failed — check heap");
-   }
-   else
-   {
-      ESP_LOGI(TAG, "Bus initialized, all queues ready");
+      if (0 != (g_subscribers[i].mask & bits))
+      {
+         (void)xEventGroupSetBits(g_subscribers[i].events, bits);
+      }
    }
 }
 
@@ -125,22 +138,25 @@ void bus_init(void)
  *
  * \return void
  *
- * \details Drops event and logs warning if queue is full.
+ * \details Writes payload to every interested subscriber's private
+ *          mailbox via xQueueOverwrite — always succeeds, latest value
+ *          wins. Signals only subscribers with EVT_BLE_PIR in their mask.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void bus_publish_pir(uint32_t count, int batt)
 {
    PIR_PAYLOAD_T p = { .count = count, .batt = batt }; /**< PIR payload */
+   int           i = 0;                                 /**< loop index  */
 
-   if (pdTRUE != xQueueSend(q_pir, &p, 0))
+   for (i = 0; i < g_sub_count; i++)
    {
-      ESP_LOGW(TAG, "[PIR] Queue full, dropping event");
+      if (0 != (g_subscribers[i].mask & EVT_BLE_PIR))
+      {
+         (void)xQueueOverwrite(g_subscribers[i].mb_pir, &p);
+      }
    }
-   else
-   {
-      bus_signal(EVT_BLE_PIR);
-   }
+   bus_signal(EVT_BLE_PIR);
 }
 
 /******************************************************************************
@@ -153,27 +169,30 @@ void bus_publish_pir(uint32_t count, int batt)
  *
  * \return void
  *
- * \details Drops event and logs warning if queue is full.
+ * \details Writes payload to every interested subscriber's private
+ *          mailbox via xQueueOverwrite — always succeeds, latest value
+ *          wins. Signals only subscribers with EVT_BLE_REED in their mask.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void bus_publish_reed(uint8_t id, uint8_t state, int batt, const uint8_t *p_mac)
 {
    REED_PAYLOAD_T p = { .id = id, .state = state, .batt = batt }; /**< reed payload */
+   int            i = 0;                                           /**< loop index   */
 
    if (NULL != p_mac)
    {
       (void)memcpy(p.mac, p_mac, 6);
    }
 
-   if (pdTRUE != xQueueSend(q_reed, &p, 0))
+   for (i = 0; i < g_sub_count; i++)
    {
-      ESP_LOGW(TAG, "[REED] Queue full, dropping event");
+      if (0 != (g_subscribers[i].mask & EVT_BLE_REED))
+      {
+         (void)xQueueOverwrite(g_subscribers[i].mb_reed, &p);
+      }
    }
-   else
-   {
-      bus_signal(EVT_BLE_REED);
-   }
+   bus_signal(EVT_BLE_REED);
 }
 
 /******************************************************************************
@@ -184,22 +203,25 @@ void bus_publish_reed(uint8_t id, uint8_t state, int batt, const uint8_t *p_mac)
  *
  * \return void
  *
- * \details Drops event and logs warning if queue is full.
+ * \details Writes payload to every interested subscriber's private
+ *          mailbox via xQueueOverwrite — always succeeds, latest value
+ *          wins. Signals only subscribers with EVT_BLE_LOCK in their mask.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void bus_publish_lock(uint8_t state, int batt)
 {
    LOCK_PAYLOAD_T p = { .state = state, .batt = batt }; /**< lock payload */
+   int            i = 0;                                 /**< loop index   */
 
-   if (pdTRUE != xQueueSend(q_lock, &p, 0))
+   for (i = 0; i < g_sub_count; i++)
    {
-      ESP_LOGW(TAG, "[LOCK] Queue full, dropping event");
+      if (0 != (g_subscribers[i].mask & EVT_BLE_LOCK))
+      {
+         (void)xQueueOverwrite(g_subscribers[i].mb_lock, &p);
+      }
    }
-   else
-   {
-      bus_signal(EVT_BLE_LOCK);
-   }
+   bus_signal(EVT_BLE_LOCK);
 }
 
 /******************************************************************************
@@ -209,22 +231,25 @@ void bus_publish_lock(uint8_t state, int batt)
  *
  * \return void
  *
- * \details Drops event and logs warning if queue is full.
+ * \details Writes payload to every interested subscriber's private
+ *          mailbox via xQueueOverwrite — always succeeds, latest value
+ *          wins. Signals only subscribers with EVT_BLE_LIGHT in their mask.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void bus_publish_light(uint8_t state)
 {
    LIGHT_PAYLOAD_T p = { .state = state }; /**< light payload */
+   int             i = 0;                  /**< loop index    */
 
-   if (pdTRUE != xQueueSend(q_light, &p, 0))
+   for (i = 0; i < g_sub_count; i++)
    {
-      ESP_LOGW(TAG, "[LIGHT] Queue full, dropping event");
+      if (0 != (g_subscribers[i].mask & EVT_BLE_LIGHT))
+      {
+         (void)xQueueOverwrite(g_subscribers[i].mb_light, &p);
+      }
    }
-   else
-   {
-      bus_signal(EVT_BLE_LIGHT);
-   }
+   bus_signal(EVT_BLE_LIGHT);
 }
 
 /******************************************************************************
@@ -234,45 +259,52 @@ void bus_publish_light(uint8_t state)
  *
  * \return void
  *
- * \details Drops event and logs warning if queue is full.
+ * \details Writes payload to every interested subscriber's private
+ *          mailbox via xQueueOverwrite — always succeeds, latest value
+ *          wins. Signals only subscribers with EVT_UART_TEMP in their mask.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void bus_publish_temp(int avg_temp)
 {
    TEMP_PAYLOAD_T p = { .avg_temp = avg_temp }; /**< temp payload */
+   int            i = 0;                         /**< loop index   */
 
-   if (pdTRUE != xQueueSend(q_temp, &p, 0))
+   for (i = 0; i < g_sub_count; i++)
    {
-      ESP_LOGW(TAG, "[TEMP] Queue full, dropping event");
+      if (0 != (g_subscribers[i].mask & EVT_UART_TEMP))
+      {
+         (void)xQueueOverwrite(g_subscribers[i].mb_temp, &p);
+      }
    }
-   else
-   {
-      bus_signal(EVT_UART_TEMP);
-   }
+   bus_signal(EVT_UART_TEMP);
 }
 
 /******************************************************************************
  * \brief Publish a motor controller status event to the bus.
  *
  * \param online - 1 if motor controller is connected, 0 if offline.
+ * \param batt   - Supply voltage in mV, -1 if unknown or offline.
  *
  * \return void
  *
- * \details Drops event and logs warning if queue is full.
+ * \details Writes payload to every interested subscriber's private
+ *          mailbox via xQueueOverwrite — always succeeds, latest value
+ *          wins. Signals only subscribers with EVT_MOTOR_STATUS in mask.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void bus_publish_motor(uint8_t online, int batt)
 {
    MOTOR_PAYLOAD_T p = { .online = online, .batt = batt }; /**< motor payload */
+   int             i = 0;                                   /**< loop index    */
 
-   if (pdTRUE != xQueueSend(q_motor, &p, 0))
+   for (i = 0; i < g_sub_count; i++)
    {
-      ESP_LOGW(TAG, "[MOTOR] Queue full, dropping event");
+      if (0 != (g_subscribers[i].mask & EVT_MOTOR_STATUS))
+      {
+         (void)xQueueOverwrite(g_subscribers[i].mb_motor, &p);
+      }
    }
-   else
-   {
-      bus_signal(EVT_MOTOR_STATUS);
-   }
+   bus_signal(EVT_MOTOR_STATUS);
 }
