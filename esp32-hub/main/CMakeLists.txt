@@ -9,6 +9,8 @@ idf_component_register(
         "ble_light.c"
         "ble_lock.c"
         "tcp_manager.c"
+        "motor_sm.c"
+        "pi_controller.c"
         "aws_manager.c"
         "build_info.c"
         "vroom_bus.c"

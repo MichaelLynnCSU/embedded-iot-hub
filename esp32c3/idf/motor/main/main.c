@@ -5,19 +5,26 @@
  *
  * \brief   Entry point for ESP32-C3 motor controller node.
  *
- * \details Initialises hardware, WiFi, and spawns two tasks:
- *          - tcp_rx_task:  accepts hub connection, dispatches {"pwm": X}
- *          - motor_task:   applies PWM duty, reports battery SOC
+ * \details Initialises hardware, WiFi, and spawns one task:
+ *          - motor_task: connects to hub, applies PWM duty, deep sleeps.
  *
- * \note    Power saving (2026-05-04):
- *          Knob ADC removed -- motor is now a pure PWM receiver. Hub owns
- *          all temperature sensing and PID control. adc_init() removed from
- *          startup. battery_init() retains its own ADC handle internally.
- *          motor_task enters light sleep when PWM=0 and no client connected.
+ *          tcp_rx_task removed -- motor is now the TCP client (tcp_client.c).
+ *          There is no persistent listen socket. Each wake from deep sleep
+ *          runs app_main fresh, calls tcp_client_exchange() once via
+ *          motor_task, then returns to deep sleep.
+ *
+ * \note    Arch change (2026-05-XX):
+ *          tcp_server.h replaced with tcp_client.h.
+ *          TCP_TASK_STACK and tcp_rx_task spawn removed.
+ *          MOTOR_TASK_STACK unchanged.
+ *
+ * \note    Power saving (2026-05-04, carried forward):
+ *          Knob ADC removed. battery_init() retains its own ADC handle.
+ *          motor_task enters deep sleep when exchange complete.
  ******************************************************************************/
 
 #include "wifi.h"
-#include "tcp_server.h"
+#include "tcp_client.h"
 #include "motor_control.h"
 #include "battery.h"
 #include "main.h"
@@ -27,7 +34,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define TCP_TASK_STACK   6144
 #define MOTOR_TASK_STACK 4096
 #define TASK_PRIORITY    5
 
@@ -35,31 +41,45 @@ static const char *TAG = "APP_MAIN";
 
 void app_main(void)
 {
+    ESP_LOGI(TAG, "[MAIN] nvs_flash_init");
     (void)nvs_flash_init();
+
+    ESP_LOGI(TAG, "[MAIN] trinity_log_dump_previous");
     trinity_log_dump_previous();
+
+    ESP_LOGI(TAG, "[MAIN] trinity_log_init");
     trinity_log_init();
 
     ESP_LOGI(TAG, "ESP32-C3 Motor Controller Starting");
 
+    ESP_LOGI(TAG, "[MAIN] trinity_wdt_init");
     trinity_wdt_init();
 
+    ESP_LOGI(TAG, "[MAIN] wifi_init");
     wifi_init();
+    ESP_LOGI(TAG, "[MAIN] wifi_init done");
 
+    ESP_LOGI(TAG, "[MAIN] motor_init");
     if (0 != motor_init())
     {
         ESP_LOGE(TAG, "Motor GPIO init failed -- halting");
         return;
     }
 
+    ESP_LOGI(TAG, "[MAIN] pwm_init");
     pwm_init();
 
+    ESP_LOGI(TAG, "[MAIN] battery_init");
     if (0 != battery_init())
     {
         ESP_LOGW(TAG, "Battery init failed -- batt_motor will not report");
     }
 
     trinity_log_event("EVENT: HARDWARE_READY\n");
+    ESP_LOGI(TAG, "[MAIN] HARDWARE_READY -- spawning motor_task");
 
-    xTaskCreate(tcp_rx_task, "tcp_rx", TCP_TASK_STACK,  NULL, TASK_PRIORITY, NULL);
-    xTaskCreate(motor_task,  "motor",  MOTOR_TASK_STACK, NULL, TASK_PRIORITY, NULL);
+    xTaskCreate(motor_task, "motor", MOTOR_TASK_STACK, NULL, TASK_PRIORITY, NULL);
+    ESP_LOGI(TAG, "[MAIN] motor_task spawned");
+
+    ESP_LOGI(TAG, "[MAIN] app_main returning");
 }

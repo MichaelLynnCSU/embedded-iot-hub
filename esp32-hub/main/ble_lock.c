@@ -20,6 +20,13 @@
  *          Thread safety:
  *          - g_lock_mux (portMUX) guards g_lock_connecting/g_lock_connected
  *          - All state mutations outside ISR context use taskENTER_CRITICAL
+ *
+ * \note    Bus publish fix (2026-05-05):
+ *          bus_publish_lock() was never called anywhere in this file.
+ *          q_lock was always empty so tcp_manager never forwarded lock
+ *          state or battery to BeagleBone. Fixed by publishing at all
+ *          three receive points: advertisement, GATT state read, and
+ *          GATT battery read.
  ******************************************************************************/
 
 #include "config.h"
@@ -31,6 +38,7 @@
 #include "ble_manager.h"
 #include "ble_internal.h"
 #include "trinity_log.h"
+#include "vroom_bus.h"
 #include <string.h>
 
 #define LOCK_CONN_ID_INVALID   0xFFFF  /**< sentinel for no active connection */
@@ -112,6 +120,7 @@ static void do_connect_lock(void)
  * \return void
  *
  * \details Called by ble_scan.c on every SmartLock advertisement.
+ *          Publishes to q_lock so tcp_manager forwards to BeagleBone.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -119,6 +128,8 @@ void ble_lock_update_adv(uint8_t state, uint8_t batt)
 {
    g_current_lock_state = state;
    g_lock_batt          = (int)batt;
+   ESP_LOGI(TAG, "[LOCK] Adv rx: state=%d batt=%d%%", state, batt);
+   bus_publish_lock(state, (int)batt);
 }
 
 /******************************************************************************
@@ -266,7 +277,8 @@ static void handle_search_complete(esp_gatt_if_t gattc_if)
          if (LOCK_STATE_CHAR_UUID == uuid)
          {
             g_lock_char_handle = p_elems[i].char_handle;
-            ESP_LOGI(TAG, "[LOCK] State char found, reading...");
+            ESP_LOGI(TAG, "[LOCK] State char found handle=0x%04x, reading...",
+                     g_lock_char_handle);
             (void)esp_ble_gattc_read_char(gattc_if,
                                            g_lock_conn_id,
                                            g_lock_char_handle,
@@ -294,7 +306,8 @@ static void handle_search_complete(esp_gatt_if_t gattc_if)
          else if (LOCK_BATT_CHAR_UUID == uuid)
          {
             g_lock_batt_handle = p_elems[i].char_handle;
-            ESP_LOGI(TAG, "[LOCK] Battery char found, reading...");
+            ESP_LOGI(TAG, "[LOCK] Battery char found handle=0x%04x, reading...",
+                     g_lock_batt_handle);
             (void)esp_ble_gattc_read_char(gattc_if,
                                            g_lock_conn_id,
                                            g_lock_batt_handle,
@@ -408,7 +421,8 @@ void ble_lock_handle_event(esp_gattc_cb_event_t event,
               p_param->search_res.srvc_id.uuid.uuid.uuid16))
          {
             g_lock_service_handle = p_param->search_res.start_handle;
-            ESP_LOGI(TAG, "[LOCK] Service found");
+            ESP_LOGI(TAG, "[LOCK] Service found handle=0x%04x",
+                     g_lock_service_handle);
          }
 
          break;
@@ -441,15 +455,22 @@ void ble_lock_handle_event(esp_gattc_cb_event_t event,
                 (0 != g_lock_batt_handle))
             {
                g_lock_batt = (int)p_param->read.value[0];
-               ESP_LOGI(TAG, "[LOCK] Battery=%d%%", g_lock_batt);
+               ESP_LOGI(TAG, "[LOCK] GATT batt rx: batt=%d%%", g_lock_batt);
+               bus_publish_lock(g_current_lock_state, g_lock_batt);
             }
             else
             {
                g_current_lock_state = p_param->read.value[0];
                stamp_device(DEV_IDX_LOCK);
-               ESP_LOGI(TAG, "[LOCK] State=%d batt=%d%%",
+               ESP_LOGI(TAG, "[LOCK] GATT state rx: state=%d batt=%d%%",
                         g_current_lock_state, g_lock_batt);
+               bus_publish_lock(g_current_lock_state, g_lock_batt);
             }
+         }
+         else
+         {
+            ESP_LOGW(TAG, "[LOCK] GATT read failed: status=%d len=%d",
+                     p_param->read.status, p_param->read.value_len);
          }
 
          if (-1 != g_pending_lock_state)
@@ -473,8 +494,9 @@ void ble_lock_handle_event(esp_gattc_cb_event_t event,
          if (LOCK_STATE_LEN == p_param->notify.value_len)
          {
             g_current_lock_state = p_param->notify.value[0];
-            ESP_LOGI(TAG, "[LOCK] State notified=%d",
-                     g_current_lock_state);
+            ESP_LOGI(TAG, "[LOCK] GATT notify rx: state=%d batt=%d%%",
+                     g_current_lock_state, g_lock_batt);
+            bus_publish_lock(g_current_lock_state, g_lock_batt);
          }
 
          break;
@@ -591,7 +613,7 @@ void ble_send_lock_command(uint8_t state)
                                    ESP_GATT_AUTH_REQ_NONE);
    if (ESP_OK == ret)
    {
-      ESP_LOGI(TAG, "[LOCK] Command sent: %d", state);
+      ESP_LOGI(TAG, "[LOCK] Command sent: state=%d", state);
       g_pending_lock_state = -1;
    }
    else

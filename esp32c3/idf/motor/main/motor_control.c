@@ -5,21 +5,43 @@
  *
  * \brief   Motor control task and JSON parser for ESP32-C3 motor node.
  *
- * \details PWM duty is derived from temperature (AWS mode) or knob ADC
- *          (manual mode). Battery is read every BATT_INTERVAL_MS and
- *          reported to the hub as SOC percent -- matching the nRF52840
- *          smart-lock convention so the hub treats both nodes identically.
+ * \details Pure PWM receiver. Hub sends {"pwm": X} over TCP and this node
+ *          applies the duty directly via LEDC. All temperature sensing,
+ *          PID control, and duty calculation run on the ESP32 hub.
+ *          Battery SOC is read and sent back during tcp_client_exchange().
  *
- * \note    Battery reporting (2026-04-27):
- *          Previously sent raw millivolts: {"batt_motor": 9145}
- *          Now sends SOC percent:          {"batt_motor": 87}
- *          mv_to_soc() defined in battery.h -- same pattern as smart-lock.
- *          Hub no longer needs to hardcode voltage thresholds or do math.
- *          BATT_JSON_BUF_SIZE in main.h covers {"batt_motor":100} + null.
+ * \note    Deep sleep idle (2026-05-XX):
+ *          tcp_server.c removed -- motor is now the TCP client. Connection is
+ *          ephemeral: wake, connect, receive PWM, send batt, sleep.
+ *          Idle vTaskDelay() loop replaced with esp_deep_sleep_start() so
+ *          the radio and CPU power rail are fully gated between wakes.
+ *          MOTOR_DEEP_SLEEP_US defined in main.h (default 30 s).
+ *
+ *          g_client_sock / g_client_sock_valid removed -- battery reporting
+ *          now happens inside tcp_client_exchange() immediately after the PWM
+ *          frame is received, before the socket closes.
+ *
+ *          get_pwm_duty() accessor added so tcp_client.c can read the duty
+ *          that parse_tcp_json() last wrote without accessing g_pwm_duty
+ *          directly.
+ *
+ * \note    Power saving (2026-05-04, carried forward):
+ *          Knob ADC and temp/PID logic already removed. Hub owns all control
+ *          decisions. Node applies whatever duty it receives.
+ *
+ * \note    WDT fix (2026-05-04, carried forward):
+ *          WiFi wait uses 1 s kicked loop. Deep sleep replaces both the old
+ *          vTaskDelay() idle path and the broken esp_light_sleep_start()
+ *          path -- no WIFI_PS_NONE conflict because the radio is fully off
+ *          during deep sleep.
+ *
+ * \note    Battery reporting (2026-04-27, carried forward):
+ *          Sends SOC percent {"batt_motor": 87}, not raw mV.
+ *          mv_to_soc() defined in battery.h.
  ******************************************************************************/
 
 #include "motor_control.h"
-#include "tcp_server.h"
+#include "tcp_client.h"
 #include "wifi.h"
 #include "battery.h"
 #include "main.h"
@@ -28,39 +50,28 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
-#include "esp_adc/adc_oneshot.h"
 #include "cJSON.h"
-#include "lwip/sockets.h"
 #include "trinity_log.h"
 
 static const char *TAG = "MOTOR_CTRL";
 
-/* All motor GPIO pins owned here -- not in main.c */
 #define MOTOR_PWM_PIN        GPIO_NUM_2
 #define MOTOR_IN1_PIN        GPIO_NUM_3
 #define MOTOR_IN2_PIN        GPIO_NUM_4
 
-#define KNOB_ADC_CHANNEL     ADC_CHANNEL_0
 #define PWM_TIMER            LEDC_TIMER_0
 #define PWM_MODE             LEDC_LOW_SPEED_MODE
 #define PWM_CHANNEL          LEDC_CHANNEL_0
 #define PWM_DUTY_RES_LEDC    LEDC_TIMER_13_BIT
 #define PWM_FREQUENCY        2000
-#define MOTOR_EVENT_BUF_SIZE 48
 
-static adc_oneshot_unit_handle_t s_adc1_handle;
+static volatile uint32_t g_pwm_duty         = 0;
+static int               g_batt_last_good_mv = 0;
 
-static int     g_aws_motor = 0;
-static int     g_aws_low   = DEFAULT_AWS_LOW;
-static int     g_aws_high  = DEFAULT_AWS_HIGH;
-static uint8_t g_avg_temp  = DEFAULT_AVG_TEMP;
-static uint16_t g_knob_adc = 0;
-
-/* Last accepted battery reading in mV. Used to detect and reject WiFi TX
- * burst sag artifacts. Initialised to 0 -- first reading always accepted. */
-static int g_batt_last_good_mv = 0;
+#define LOOP_SLICE_MS   1000u
 
 /*----------------------------------------------------------------------------*/
 
@@ -88,44 +99,37 @@ int motor_init(void)
 
 void motor_enable(void)
 {
+    ESP_LOGI(TAG, "[MOTOR] motor_enable()");
     (void)gpio_set_level(MOTOR_IN1_PIN, 1);
     (void)gpio_set_level(MOTOR_IN2_PIN, 0);
 }
 
 /*----------------------------------------------------------------------------*/
 
+uint32_t get_pwm_duty(void)
+{
+    return g_pwm_duty;
+}
+
+/*----------------------------------------------------------------------------*/
+
 void parse_tcp_json(const char *p_buf)
 {
-    static uint32_t update_log_count = 0;
-    cJSON  *p_json  = NULL;
-    cJSON  *p_low   = NULL;
-    cJSON  *p_high  = NULL;
-    cJSON  *p_motor = NULL;
-    cJSON  *p_temp  = NULL;
-    char    buf[MOTOR_EVENT_BUF_SIZE] = {0};
+    cJSON   *p_json = NULL;
+    cJSON   *p_pwm  = NULL;
+    uint32_t duty   = 0;
 
     p_json = cJSON_Parse(p_buf);
     if (NULL == p_json) { return; }
 
-    p_low   = cJSON_GetObjectItem(p_json, "low");
-    p_high  = cJSON_GetObjectItem(p_json, "high");
-    p_motor = cJSON_GetObjectItem(p_json, "motor");
-    p_temp  = cJSON_GetObjectItem(p_json, "avg_temp");
-
-    if (NULL != p_low)  { g_aws_low  = p_low->valueint;  }
-    if (NULL != p_high) { g_aws_high = p_high->valueint; }
-    if (NULL != p_motor)
+    p_pwm = cJSON_GetObjectItem(p_json, "pwm");
+    if (NULL != p_pwm)
     {
-        g_aws_motor = p_motor->valueint;
-        (void)snprintf(buf, sizeof(buf), "EVENT: MOTOR=%d\n", g_aws_motor);
-        trinity_log_event(buf);
-    }
-    if (NULL != p_temp) { g_avg_temp = (uint8_t)p_temp->valueint; }
-
-    if (++update_log_count % LOG_THROTTLE_N == 0)
-    {
-        ESP_LOGI(TAG, "UPDATED: motor=%d low=%d high=%d temp=%d",
-                 g_aws_motor, g_aws_low, g_aws_high, g_avg_temp);
+        duty = (uint32_t)p_pwm->valueint;
+        if (duty > PWM_DUTY_MAX) { duty = PWM_DUTY_MAX; }
+        g_pwm_duty = duty;
+        ESP_LOGI(TAG, "[PWM] duty=%u", duty);
+        trinity_log_event("EVENT: PWM_UPDATE\n");
     }
 
     cJSON_Delete(p_json);
@@ -135,101 +139,97 @@ void parse_tcp_json(const char *p_buf)
 
 void motor_task(void *p_arg)
 {
-    uint32_t pwm_duty      = 0;
-    int      adc_raw       = 0;
-    int      t             = 0;
-    uint32_t last_stats_ms = 0u;
-    uint32_t last_batt_ms  = 0u;
-    uint32_t now_ms        = 0u;
-    int      batt_mv       = -1;
-    uint8_t  batt_soc      = 0u;
-    char     batt_json[BATT_JSON_BUF_SIZE] = {0};
-    int      sock          = -1;
+    uint32_t last_stats_ms  = 0u;
+    uint32_t now_ms         = 0u;
+    uint32_t duty           = 0u;
+    int      batt_mv        = -1;
 
     (void)p_arg;
 
     trinity_wdt_add();
 
-    (void)xEventGroupWaitBits(g_wifi_eg, WIFI_CONNECTED_BIT,
-                               pdFALSE, pdTRUE, portMAX_DELAY);
+    ESP_LOGI(TAG, "[MOTOR_TASK] started, waiting for WiFi");
 
-    last_stats_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    last_batt_ms  = xTaskGetTickCount() * portTICK_PERIOD_MS;
-
-    while (1)
+    while (!(xEventGroupWaitBits(g_wifi_eg, WIFI_CONNECTED_BIT,
+                                  pdFALSE, pdTRUE,
+                                  pdMS_TO_TICKS(1000)) & WIFI_CONNECTED_BIT))
     {
         trinity_wdt_kick();
+    }
 
-        pwm_duty = 0;
+    ESP_LOGI(TAG, "[MOTOR_TASK] WiFi up, connecting to hub");
 
-        if (0 == g_aws_motor)
+    last_stats_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    /* ------------------------------------------------------------------ *
+     * Single wake-cycle: connect to hub, receive PWM, send batt, apply.  *
+     * ------------------------------------------------------------------ */
+    duty = tcp_client_exchange();
+
+    (void)ledc_set_duty(PWM_MODE, PWM_CHANNEL, duty);
+    (void)ledc_update_duty(PWM_MODE, PWM_CHANNEL);
+
+    /* Battery sag filter -- log only; reporting already done in exchange */
+    batt_mv = battery_read_mv();
+    if (batt_mv > 0)
+    {
+        if ((g_batt_last_good_mv > 0) &&
+            (batt_mv < (g_batt_last_good_mv - BATT_SAG_REJECT_MV)))
         {
-            (void)adc_oneshot_read(s_adc1_handle, KNOB_ADC_CHANNEL, &adc_raw);
-            g_knob_adc = (uint16_t)(ADC_MAX_RAW - adc_raw);
-            pwm_duty   = (g_knob_adc * PWM_DUTY_MAX) / ADC_MAX_RAW;
+            ESP_LOGW(TAG, "[BATT] Rejected sag reading %d mV (last good %d mV)",
+                     batt_mv, g_batt_last_good_mv);
         }
         else
         {
-            t = (int)g_avg_temp;
-            if (t < g_aws_low)  { t = g_aws_low;  }
-            if (t > g_aws_high) { t = g_aws_high; }
-            if (g_aws_high > g_aws_low)
-            {
-                pwm_duty = PWM_DUTY_MAX *
-                           (uint32_t)(t - g_aws_low) /
-                           (uint32_t)(g_aws_high - g_aws_low);
-            }
+            g_batt_last_good_mv = batt_mv;
         }
+    }
 
-        (void)ledc_set_duty(PWM_MODE, PWM_CHANNEL, pwm_duty);
-        (void)ledc_update_duty(PWM_MODE, PWM_CHANNEL);
+    now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    if ((now_ms - last_stats_ms) >= STATS_INTERVAL_MS)
+    {
+        trinity_log_heap_stats();
+        trinity_log_task_stats();
+    }
 
-        now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    if (0u == duty)
+    {
+        /* PWM=0: motor idle -- deep sleep until next scheduled wake.
+         *
+         * Deep sleep gates the CPU and radio power rail entirely.
+         * No WIFI_PS_NONE conflict (radio is fully off).
+         * RTC timer wakes the chip after MOTOR_DEEP_SLEEP_US microseconds. */
+        ESP_LOGI(TAG, "[MOTOR_TASK] idle -- entering deep sleep for %llu us",
+                 (unsigned long long)MOTOR_DEEP_SLEEP_US);
+        trinity_log_event("EVENT: MOTOR_DEEP_SLEEP\n");
+        esp_sleep_enable_timer_wakeup(MOTOR_DEEP_SLEEP_US);
+        esp_deep_sleep_start();
+        /* unreachable -- deep sleep restarts from app_main */
+    }
+    else
+    {
+        /* PWM>0: motor running -- short delay then check hub again.
+         * vTaskDelay() keeps WiFi driver alive while duty is applied. */
+        ESP_LOGI(TAG, "[MOTOR_TASK] active (duty=%lu) -- delay %ums",
+                 (unsigned long)duty, (unsigned)MOTOR_LOOP_MS);
 
-        if ((now_ms - last_batt_ms) >= BATT_INTERVAL_MS)
+        uint32_t elapsed = 0u;
+        while (elapsed < MOTOR_LOOP_MS)
         {
-            last_batt_ms = now_ms;
-
-            batt_mv = battery_read_mv();
-            if (0 < batt_mv)
-            {
-                if ((g_batt_last_good_mv > 0) &&
-                    (batt_mv < (g_batt_last_good_mv - BATT_SAG_REJECT_MV)))
-                {
-                    ESP_LOGW(TAG, "[BATT] Rejected sag reading %d mV (last good %d mV)",
-                             batt_mv, g_batt_last_good_mv);
-                }
-                else
-                {
-                    g_batt_last_good_mv = batt_mv;
-                    batt_soc = mv_to_soc(batt_mv);
-
-                    ESP_LOGI(TAG, "[BATT] %d mV | %d%%", batt_mv, batt_soc);
-
-                    if (g_client_sock_valid)
-                    {
-                        sock = g_client_sock;
-                        (void)snprintf(batt_json, sizeof(batt_json),
-                                       "{\"batt_motor\":%d}", batt_soc);
-                        (void)send(sock, batt_json, strlen(batt_json), 0);
-                        ESP_LOGI(TAG, "[BATT] Sent to hub: %s", batt_json);
-                    }
-                }
-            }
-            else
-            {
-                ESP_LOGW(TAG, "[BATT] Read failed");
-            }
+            trinity_wdt_kick();
+            vTaskDelay(pdMS_TO_TICKS(LOOP_SLICE_MS));
+            elapsed += LOOP_SLICE_MS;
         }
 
-        if ((now_ms - last_stats_ms) >= STATS_INTERVAL_MS)
-        {
-            last_stats_ms = now_ms;
-            trinity_log_heap_stats();
-            trinity_log_task_stats();
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(MOTOR_LOOP_MS));
+        /* Re-connect hub for updated duty on next iteration.
+         * Restart task loop by returning to app_main via deep sleep so
+         * stack and WiFi state are always fresh. */
+        ESP_LOGI(TAG, "[MOTOR_TASK] active cycle done -- deep sleep for %llu us",
+                 (unsigned long long)MOTOR_DEEP_SLEEP_US);
+        trinity_log_event("EVENT: MOTOR_CYCLE_DONE\n");
+        esp_sleep_enable_timer_wakeup(MOTOR_DEEP_SLEEP_US);
+        esp_deep_sleep_start();
+        /* unreachable */
     }
 }
 
@@ -255,17 +255,6 @@ void pwm_init(void)
     };
     (void)ledc_timer_config(&timer);
     (void)ledc_channel_config(&channel);
-}
-
-/*----------------------------------------------------------------------------*/
-
-void adc_init(adc_oneshot_unit_handle_t *p_handle)
-{
-    adc_oneshot_unit_init_cfg_t adc_cfg = { .unit_id  = ADC_UNIT_1 };
-    adc_oneshot_chan_cfg_t      chan_cfg = { .bitwidth = ADC_BITWIDTH_12,
-                                             .atten    = ADC_ATTEN_DB_6 };
-    (void)adc_oneshot_new_unit(&adc_cfg, &s_adc1_handle);
-    (void)adc_oneshot_config_channel(s_adc1_handle, KNOB_ADC_CHANNEL, &chan_cfg);
-
-    if (NULL != p_handle) { *p_handle = s_adc1_handle; }
+    ESP_LOGI(TAG, "[PWM] init OK (GPIO%d, %dHz, 13-bit)",
+             MOTOR_PWM_PIN, PWM_FREQUENCY);
 }

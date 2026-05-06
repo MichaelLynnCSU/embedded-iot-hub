@@ -25,15 +25,21 @@
  *          MIN_RUN_SEC=600 enforced by hub state machine -- motor must run
  *          for at least 10 minutes once started to protect against rapid
  *          stop/start cycling near the temperature threshold.
+ *
+ * \note    Deep sleep (2026-05-XX):
+ *          MOTOR_DEEP_SLEEP_US added. Motor enters deep sleep after each
+ *          tcp_client_exchange() cycle. RTC timer wakes after this interval
+ *          and app_main restarts fresh. Value should be <= hub's
+ *          TCP_SEND_INTERVAL_MS so the motor wakes often enough to receive
+ *          updated PWM commands while running.
  ******************************************************************************/
-
 #ifndef MAIN_H
 #define MAIN_H
-
 #include <stdint.h>
 
 /* ---- Timing ---- */
-#define MOTOR_LOOP_MS        5000u           /**< motor task loop period — raised from 100ms for power saving */
+#define MOTOR_LOOP_MS        5000u           /**< active-path delay before deep sleep */
+#define MOTOR_DEEP_SLEEP_US  30000000ULL     /**< deep sleep between wake cycles (30 s) */
 #define STATS_INTERVAL_MS    60000u          /**< heap/task stats log interval  */
 #define BATT_INTERVAL_MS     30000u          /**< battery read and report interval */
 #define RECV_TIMEOUT_MS      30000u          /**< TCP client idle timeout       */

@@ -2,7 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "motor_control.c"
-        "tcp_server.c"
+        "tcp_client.c"
         "wifi.c"
         "battery.c"
         "wifi_tx_sweep.c"
@@ -26,6 +26,7 @@ idf_component_register(
         esp_timer
         esp_system
         esp_driver_ledc
+        esp_pm
 )
 # Trinity split -- each file can be swapped for a stub independently.
 #
