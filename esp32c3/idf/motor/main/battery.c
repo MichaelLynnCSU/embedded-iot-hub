@@ -55,6 +55,35 @@
  *          dumping excess current into the 3.3V rail. Two ESP32-C3 boards
  *          had onboard regulators damaged and USB permanently disabled.
  *          Always-connected bottom resistor eliminates this failure mode.
+ *
+ * \note    PPK2 source meter back-feed warning (2026-05-06):
+ *          When measuring current with the PPK2 source meter on a board
+ *          that contains a buck converter (LM2596 or similar), the source
+ *          meter voltage back-feeds through the converter output pin into
+ *          its internal switching and feedback circuitry. This draws the
+ *          regulator's full quiescent current (~5-10mA) even though the
+ *          converter is not being used as a supply, producing a falsely
+ *          elevated reading.
+ *
+ *          Observed on this board: source meter at 5V with no battery
+ *          connected read ~15.5mA average. Ampere meter with battery as
+ *          supply through the full chain (battery → LM2596 → board) read
+ *          937uA -- a 16x discrepancy on the same circuit and firmware.
+ *
+ *          This does NOT happen with linear regulators (LDO or 78xx
+ *          series) which have internal reverse blocking diodes on their
+ *          output and cannot be back-fed this way.
+ *
+ *          Rule: always use ampere meter mode with the battery connected
+ *          as the supply for production current measurements on this board.
+ *          Source meter readings are invalid when the LM2596 is in circuit
+ *          without its input supply (battery) also connected.
+ *
+ *          Confirmed production measurement (2026-05-06):
+ *          Mode:    Ampere meter -- battery → LM2596 → board
+ *          Average: 937uA idle (deep sleep, 30s test cycle)
+ *          Target:  <2mA for 15-day battery life on 500mAh 9V alkaline
+ *          Result:  PASS -- ~22 days alkaline, ~35 days lithium projected
  ******************************************************************************/
 
 #include "battery.h"
