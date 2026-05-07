@@ -26,6 +26,16 @@
 #define BLE_DEV_LIGHT        3     /**< smart light device index */
 #define BLE_DEV_LOCK         4     /**< smart lock device index */
 
+/****************************** SCAN ACCESSORS ********************************/
+
+/** \brief Get current PIR motion count directly from scan module.
+ *  \return int - Motion event count. */
+int ble_scan_get_motion_count(void);
+
+/** \brief Get current PIR battery SOC directly from scan module.
+ *  \return int - Battery SOC percent, -1 if not yet seen. */
+int ble_scan_get_pir_batt(void);
+
 /*************************** FUNCTION PROTOTYPES *****************************/
 
 /** \brief Initialize the BLE manager.
@@ -64,6 +74,10 @@ int ble_get_pir_batt(void);
  *  \return int - Battery SOC percent. */
 int ble_get_lock_batt(void);
 
+/** \brief Get PIR occupancy state from sliding window.
+ *  \return int - 1 if occupied, 0 if empty. */
+int ble_get_pir_occupied(void);
+
 /** \brief Send relay state command to light node.
  *  \param state - Relay state (0=off, 1=on).
  *  \return void */
@@ -93,12 +107,12 @@ void ble_scan_start(void);
 int ble_get_reed_count(void);
 
 /** \brief Get info for a reed sensor slot.
- *  \param slot       - Slot index (0-based).
- *  \param p_name_out - Output buffer for device name (31 chars max), or NULL.
- *  \param p_batt_out - Output for battery SOC, or NULL.
- *  \param p_age_out  - Output for age in seconds, or NULL.
+ *  \param slot        - Slot index (0-based).
+ *  \param p_name_out  - Output buffer for device name (31 chars max), or NULL.
+ *  \param p_batt_out  - Output for battery SOC, or NULL.
+ *  \param p_age_out   - Output for age in seconds, or NULL.
  *  \param p_state_out - Output for door state, or NULL.
- *  \param p_gen_out  - Output for generation counter, or NULL.
+ *  \param p_gen_out   - Output for generation counter, or NULL.
  *  \return bool - true if slot is active, false if empty or out of range. */
 bool ble_get_reed_slot_info(int slot,
                              char     *p_name_out,
@@ -110,9 +124,5 @@ bool ble_get_reed_slot_info(int slot,
 /** \brief Expire stale reed sensor slots.
  *  \return void */
 void ble_expire_reed_slots(void);
-
-/** \brief Get PIR occupancy state from sliding window.
- *  \return int - 1 if occupied, 0 if empty. */
-int ble_get_pir_occupied(void);
 
 #endif /* INCLUDE_BLE_MANAGER_H_ */

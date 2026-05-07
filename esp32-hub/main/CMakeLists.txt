@@ -10,6 +10,7 @@ idf_component_register(
         "ble_lock.c"
         "tcp_manager.c"
         "motor_sm.c"
+        "pir_window.c"
         "pi_controller.c"
         "aws_manager.c"
         "build_info.c"

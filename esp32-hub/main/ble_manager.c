@@ -28,6 +28,18 @@
  *          The 10 s delay was 2× the WDT timeout, guaranteeing a trigger
  *          even on a healthy boot.
  *          trinity_log_event() renamed to trinity_log_event() throughout.
+ *
+ * \note    PIR online threshold change (2026-05-06):
+ *          PIR device age threshold changed from 30s to 60s.
+ *          Reason: PIR heartbeat interval extended from 10s to 30s
+ *          (main.h DEEP_SLEEP_INTERVAL_US) to reduce average current
+ *          from ~19.93mA to ~6.6mA projected (~3x battery life improvement
+ *          on 3000mAh LiPo: 6.3 days -> ~19 days).
+ *          At 30s heartbeat the device age naturally reaches ~30s between
+ *          packets during normal operation. The old 30s threshold caused
+ *          the PIR to flicker online/offline in the hub log on every
+ *          heartbeat cycle. 60s gives 2x the heartbeat interval as margin,
+ *          matching the pattern used for LIGHT, LOCK, and REED devices.
  ******************************************************************************/
 
 #include "config.h"
@@ -40,6 +52,7 @@
 #include "ble_manager.h"
 #include "ble_internal.h"
 #include "trinity_log.h"
+#include "pir_window.h"
 #include <string.h>
 
 #define SCHED_POLL_MS        100   /**< scheduler queue poll interval ms          */
@@ -187,8 +200,6 @@ void ble_manager_task(EventGroupHandle_t p_system_eg,
 
    ESP_LOGI(TAG, "BLE task running on core %d", xPortGetCoreID());
 
-   /* ---- Trinity: kick before the 4 s pre-init delay so the WDT does
-    *      not fire while waiting for other subsystems to settle.    ---- */
    trinity_wdt_kick();
    vTaskDelay(pdMS_TO_TICKS(BLE_INIT_DELAY_MS));
 
@@ -211,10 +222,11 @@ void ble_manager_task(EventGroupHandle_t p_system_eg,
 
    while (1)
    {
-      /* ---- Trinity: kick WDT every BLE_IDLE_DELAY_MS (2 s) ---- */
       trinity_wdt_kick();
+      /* PIR threshold 60s -- 2x the 30s heartbeat interval.
+       * All other devices retain 30s threshold (120-240s heartbeat). */
       ESP_LOGI(TAG, "[BLE] PIR=%s LIGHT=%s LOCK=%s REEDS=%d",
-         (ble_get_device_age_s(BLE_DEV_PIR)   < 30) ? "online" : "offline",
+         (ble_get_device_age_s(BLE_DEV_PIR)   < 60) ? "online" : "offline",
          (ble_get_device_age_s(BLE_DEV_LIGHT)  < 30) ? "online" : "offline",
          (ble_get_device_age_s(BLE_DEV_LOCK)   < 30) ? "online" : "offline",
           ble_get_reed_count());
@@ -224,8 +236,7 @@ void ble_manager_task(EventGroupHandle_t p_system_eg,
 
 int ble_get_motion_count(void)
 {
-   extern int motion_count;
-   return motion_count;
+   return ble_scan_get_motion_count();
 }
 
 uint8_t ble_get_light_state(void)
@@ -240,26 +251,12 @@ uint8_t ble_get_lock_state(void)
 
 int ble_get_pir_batt(void)
 {
-   extern int pir_batt;
-   return pir_batt;
+   return ble_scan_get_pir_batt();
 }
 
 int ble_get_pir_occupied(void)
 {
-   extern int g_pir_occupied;
-   return g_pir_occupied;
-}
-
-int ble_get_dr1_batt(void)
-{
-   extern int dr1_batt;
-   return dr1_batt;
-}
-
-int ble_get_dr2_batt(void)
-{
-   extern int dr2_batt;
-   return dr2_batt;
+   return pir_window_get_occupied();
 }
 
 int ble_get_lock_batt(void)

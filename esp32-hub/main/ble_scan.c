@@ -35,6 +35,7 @@
 #include "freertos/semphr.h"
 #include "ble_manager.h"
 #include "ble_internal.h"
+#include "pir_window.h"
 #include "vroom_bus.h"
 #include <string.h>
 
@@ -68,7 +69,6 @@
 #define ROOM_SENSOR_SLOT0_ID   1             /**< room sensor ID for slot 0 */
 #define ROOM_SENSOR_SLOT1_ID   7             /**< room sensor ID for slot 1 */
 #define AGE_MAX_VALUE          0xFFFE        /**< max reportable age value */
-#define PIR_EVENT_BUF_SIZE  16u  /**< circular buffer depth for occ=1 timestamps */ 
 
 static const char *TAG = "BLE_SCAN"; /**< ESP log tag */
 
@@ -80,17 +80,8 @@ uint8_t             light_mac[6]    = {0};              /**< light device MAC */
 bool                light_found     = false;            /**< light MAC discovered */
 esp_ble_addr_type_t light_addr_type = BLE_ADDR_TYPE_PUBLIC; /**< light addr type */
 
-int g_motion_count = DEFAULT_MOTION_COUNT; /**< PIR motion event count */
-int g_pir_batt     = -1;                  /**< PIR battery SOC percent */
-
-/* TODO: remove extern aliases below when tcp_manager is refactored
- * to use ble_get_motion_count() and ble_get_pir_batt() accessors */
-int motion_count = DEFAULT_MOTION_COUNT; /**< legacy alias for g_motion_count */
-int pir_batt     = -1;                  /**< legacy alias for g_pir_batt */
-int g_pir_occupied = 0;                  /* 0=empty, 1=occupied */
-static uint32_t g_pir_event_buf[PIR_EVENT_BUF_SIZE]; /**< occ=1 event timestamps ms */
-static int      g_pir_event_head    = 0;             /**< next write index */
-static uint32_t g_pir_last_hold_ms  = 0;             /**< timestamp when hold last started */
+static int g_motion_count = DEFAULT_MOTION_COUNT; /**< PIR motion event count */
+static int g_pir_batt     = -1;                   /**< PIR battery SOC percent */
 
 static bool g_pir_seen   = false; /**< PIR first-seen flag */
 static bool g_lock_seen  = false; /**< lock first-seen flag */
@@ -140,10 +131,24 @@ typedef struct
    adv_handler_t  handler;  /*!< handler function for this device */
 } DEVICE_ENTRY_T;
 
-static REED_SLOT_T     g_reed_table[MAX_REEDS];          /**< reed slot table */
+static REED_SLOT_T      g_reed_table[MAX_REEDS];          /**< reed slot table */
 static COOLDOWN_ENTRY_T g_cooldown_table[COOLDOWN_COUNT]; /**< cooldown table */
-static StaticSemaphore_t g_reed_mutex_buf;               /**< static mutex buffer */
-static SemaphoreHandle_t g_reed_mutex = NULL;            /**< reed table mutex */
+static StaticSemaphore_t g_reed_mutex_buf;                /**< static mutex buffer */
+static SemaphoreHandle_t g_reed_mutex = NULL;             /**< reed table mutex */
+
+/*----------------------------------------------------------------------------*/
+
+int ble_scan_get_motion_count(void)
+{
+   return g_motion_count;
+}
+
+int ble_scan_get_pir_batt(void)
+{
+   return g_pir_batt;
+}
+
+/*----------------------------------------------------------------------------*/
 
 /******************************************************************************
  * \brief Add a MAC to the cooldown table to prevent immediate re-allocation.
@@ -453,78 +458,6 @@ static void update_room_for_slot(int slot, uint8_t door_state)
 }
 
 /******************************************************************************
- * \brief Update PIR sliding window and recompute g_pir_occupied.
- *
- * \param now_ms   - Current tick count in ms.
- * \param occ      - Raw occupied flag from BLE advertisement (0 or 1).
- *
- * \return void
- *
- * \details Implements a time-based sliding window over occ=1 events.
- *          On each call with occ=1, the current timestamp is written
- *          into a circular buffer. The window then counts how many
- *          buffered timestamps fall within the last PIR_WINDOW_SEC.
- *          If the count meets PIR_WINDOW_THRESHOLD, the hold timer is
- *          (re)started. g_pir_occupied is 1 for the duration of the
- *          hold and 0 once PIR_HOLD_SEC elapses with no new trigger.
- *
- *          Window size:  PIR_WINDOW_SEC       (60s)
- *          Threshold:    PIR_WINDOW_THRESHOLD  (2 events)
- *          Hold:         PIR_HOLD_SEC          (600s / 10 min)
- *
- *          The 10s device heartbeat (occ=0) is the resolution floor --
- *          the window cannot meaningfully be smaller than ~20-30s.
- *          motion_count delta can be used to detect missed occ=1 bursts
- *          during lossy BLE periods.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
-static void pir_window_update(uint32_t now_ms, int occ)
-{
-    uint32_t window_ms  = 0u; /**< window width in ms */
-    uint32_t hold_ms    = 0u; /**< hold duration in ms */
-    int      count      = 0;  /**< events inside window */
-    int      i          = 0;  /**< loop index */
-
-    window_ms = PIR_WINDOW_SEC  * 1000u;
-    hold_ms   = PIR_HOLD_SEC    * 1000u;
-
-    /* Stamp event into circular buffer on occ=1 */
-    if (1 == occ)
-    {
-        g_pir_event_buf[g_pir_event_head] = now_ms;
-        g_pir_event_head = (g_pir_event_head + 1) % PIR_EVENT_BUF_SIZE;
-    }
-
-    /* Count events inside the sliding window */
-    for (i = 0; i < PIR_EVENT_BUF_SIZE; i++)
-    {
-        if ((g_pir_event_buf[i] > 0u) &&
-            ((now_ms - g_pir_event_buf[i]) <= window_ms))
-        {
-            count++;
-        }
-    }
-
-    /* Restart hold timer if threshold met */
-    if (count >= (int)PIR_WINDOW_THRESHOLD)
-    {
-        g_pir_last_hold_ms = now_ms;
-    }
-
-    /* Occupied for duration of hold after last threshold crossing */
-    if ((g_pir_last_hold_ms > 0u) &&
-        ((now_ms - g_pir_last_hold_ms) <= hold_ms))
-    {
-        g_pir_occupied = 1;
-    }
-    else
-    {
-        g_pir_occupied = 0;
-    }
-}
-
-/******************************************************************************
  * \brief Handle PIR motion sensor advertisement.
  *
  * \param p_adv    - Pointer to raw advertisement data.
@@ -536,6 +469,7 @@ static void pir_window_update(uint32_t now_ms, int occ)
  *
  * \details Extracts motion count and battery SOC from manufacturer data.
  *          Publishes to vroom bus on first seen or count change.
+ *          Delegates occupancy sliding-window logic to pir_window_update().
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -564,15 +498,13 @@ static void handle_pir(const uint8_t *p_adv,
            ((uint32_t)p_mfg[PIR_COUNT_BYTE2] <<  8) |
             (uint32_t)p_mfg[PIR_COUNT_BYTE3];
 
-   first_seen   = !g_pir_seen;
-   changed      = ((int)count != motion_count);
-   motion_count = (int)count;
-   g_motion_count = motion_count;
+   first_seen     = !g_pir_seen;
+   changed        = ((int)count != g_motion_count);
+   g_motion_count = (int)count;
 
    if (mfg_len >= MFG_PIR_BATT_IDX)
    {
-      pir_batt   = (int)p_mfg[MFG_PIR_BATT_IDX];
-      g_pir_batt = pir_batt;
+      g_pir_batt = (int)p_mfg[MFG_PIR_BATT_IDX];
    }
 
    if (mfg_len >= (MFG_PIR_OCCUPIED_IDX + 1))
@@ -586,10 +518,10 @@ static void handle_pir(const uint8_t *p_adv,
    if (first_seen || changed)
    {
       g_pir_seen = true;
-      bus_publish_pir(count, pir_batt);
-      ESP_LOGI(TAG, ">>> PIR count=%u batt=%d%%", count, pir_batt);
+      bus_publish_pir(count, g_pir_batt);
+      ESP_LOGI(TAG, ">>> PIR count=%u batt=%d%%", count, g_pir_batt);
    }
-   ESP_LOGI(TAG, ">>> even if no change PIR count=%u batt=%d%%", count, pir_batt);
+   ESP_LOGI(TAG, ">>> even if no change PIR count=%u batt=%d%%", count, g_pir_batt);
 }
 
 /******************************************************************************
