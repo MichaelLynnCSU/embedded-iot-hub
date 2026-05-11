@@ -10,36 +10,31 @@
  ******************************************************************************/
 void test_hb_never_seen_is_offline(void)
 {
-    CU_ASSERT_EQUAL(logic_hb_is_online(0, time(NULL)), 0);
+    CU_ASSERT_EQUAL(logic_hb_is_online(0, time(NULL), 30), 0);
 }
 
 void test_hb_recent_is_online(void)
 {
     time_t now = time(NULL);
-    CU_ASSERT_EQUAL(logic_hb_is_online(now - 5, now), 1);
+    CU_ASSERT_EQUAL(logic_hb_is_online(now - 5, now, 30), 1);
 }
 
 void test_hb_at_timeout_is_offline(void)
 {
     time_t now = time(NULL);
-    CU_ASSERT_EQUAL(logic_hb_is_online(now - HB_TIMEOUT_SEC, now), 0);
+    CU_ASSERT_EQUAL(logic_hb_is_online(now - 30, now, 30), 0);
 }
 
 void test_hb_just_before_timeout_is_online(void)
 {
     time_t now = time(NULL);
-    CU_ASSERT_EQUAL(logic_hb_is_online(now - (HB_TIMEOUT_SEC - 1), now), 1);
+    CU_ASSERT_EQUAL(logic_hb_is_online(now - 29, now, 30), 1);
 }
 
 void test_hb_long_ago_is_offline(void)
 {
     time_t now = time(NULL);
-    CU_ASSERT_EQUAL(logic_hb_is_online(now - 3600, now), 0);
-}
-
-void test_hb_timeout_value(void)
-{
-    CU_ASSERT_EQUAL(HB_TIMEOUT_SEC, 10);
+    CU_ASSERT_EQUAL(logic_hb_is_online(now - 3600, now, 30), 0);
 }
 
 /******************************************************************************
@@ -314,7 +309,6 @@ int main(void)
     CU_add_test(hb_suite, "at_timeout",          test_hb_at_timeout_is_offline);
     CU_add_test(hb_suite, "just_before_timeout", test_hb_just_before_timeout_is_online);
     CU_add_test(hb_suite, "long_ago",            test_hb_long_ago_is_offline);
-    CU_add_test(hb_suite, "timeout_value",       test_hb_timeout_value);
 
     state_suite = CU_add_suite("heartbeat_state_change", NULL, NULL);
     CU_add_test(state_suite, "offline_to_online", test_hb_state_changed_offline_to_online);
