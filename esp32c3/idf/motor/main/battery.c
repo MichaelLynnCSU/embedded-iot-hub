@@ -95,20 +95,8 @@
 
 #define BAT_ADC_CHANNEL      ADC_CHANNEL_1   /**< GPIO1 -- ADC1_CH1             */
 
-#define DIVIDER_RATIO_NUM    1               /**< R2 = 1kΩ                       */
-#define DIVIDER_RATIO_DEN    5               /**< R1+R2 = 4kΩ+1kΩ = 5kΩ         */
-
 #define ADC_VREF_MV          3379            /**< ADC_ATTEN_DB_12 ceiling (empirical) */
-#define ADC_MAX_RAW          4095            /**< 12-bit                          */
 #define ADC_SAMPLES          64             /**< fast burst -- no inter-sample delay */
-
-/**< Empirical ADC nonlinearity correction (tuned 2026-04-27).
- *   Fresh battery: multimeter reads 9500mV, ADC reports 9720mV before
- *   correction. Ratio 9500/9720 corrects downward uniformly.
- *   Retune: measure battery terminals with multimeter, update CAL_NUM
- *   to that reading, CAL_DEN to firmware log vbat_mv before correction. */
-#define ADC_CAL_NUM          9500            /**< real vbat_mv (multimeter)      */
-#define ADC_CAL_DEN          9720            /**< ADC-reported vbat_mv           */
 
 /* 9V battery status thresholds in mV */
 #define VBAT_GOOD_MV         9000            /**< well charged                   */

@@ -29,6 +29,18 @@
 #define VBAT_DEAD_MV         7500            /**< below this motor is unreliable   */
 #define VBAT_RANGE_MV        (VBAT_FULL_MV - VBAT_DEAD_MV)  /**< 2000mV          */
 
+/* ---- ADC decode chain constants ---- */
+#define ADC_MAX_RAW          4095            /**< 12-bit resolution              */
+#define DIVIDER_RATIO_NUM    1               /**< R2 = 1kΩ                       */
+#define DIVIDER_RATIO_DEN    5               /**< R1+R2 = 4kΩ+1kΩ = 5kΩ         */
+/**< Empirical ADC nonlinearity correction (tuned 2026-04-27).
+ *   Fresh battery: multimeter reads 9500mV, ADC reports 9720mV before
+ *   correction. Ratio 9500/9720 corrects downward uniformly.
+ *   Retune: measure battery terminals with multimeter, update CAL_NUM
+ *   to that reading, CAL_DEN to firmware log vbat_mv before correction. */
+#define ADC_CAL_NUM          9500            /**< real vbat_mv (multimeter)      */
+#define ADC_CAL_DEN          9720            /**< ADC-reported vbat_mv           */
+
 /**
  * \brief  Convert battery voltage in mV to state-of-charge percent (0-100).
  *
