@@ -52,6 +52,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     UserCore/Src/trinity_wdt_stm32_f1.c
     UserCore/Src/trinity_fault_stm32_f1.c
     UserCore/Src/trinity_heap_stm32_f1.c
+    UserCore/Src/ring_buffer.c
 )
 
 # Add include paths

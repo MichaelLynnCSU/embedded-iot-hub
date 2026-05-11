@@ -15,6 +15,10 @@
  *
  *          FRAM fail-closed: g_fram_ok = false if FRAM not detected.
  *          All FRAM write paths gated on g_fram_ok. UART continues.
+ *
+ * \note    Crash log enqueue is delegated to rb_crashlog_push() (ring_buffer.c).
+ *          This file calls rb_crashlog_init() once inside trinity_log_init()
+ *          after confirming FRAM is available.
  ******************************************************************************/
 
 #include "trinity_log.h"
@@ -22,6 +26,7 @@
 #include "crash_log.h"
 #include "log.h"
 #include "fram_driver.h"
+#include "ring_buffer.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -57,7 +62,7 @@ void trinity_uart_log(const char *p_msg)
 void trinity_rtc_store(TRINITY_ERROR_E err)
 {
    if (!g_fram_ok) { return; }
-   fram_log_crash((uint8_t)err, 0u);
+   rb_crashlog_push((uint8_t)err, 0u);
 }
 
 /************************** RESET CAUSE ***************************************/
@@ -102,7 +107,6 @@ void trinity_log_init(void)
    uint16_t          last_addr           = 0u;
    uint16_t          entry_sz            = 0u;
 
-   fram_init(&g_hi2c1);
    FRAM_META_X meta = {0};
    g_fram_ok = (HAL_OK == fram_read(FRAM_META_ADDR, (uint8_t *)&meta, sizeof(meta)));
    if (!g_fram_ok)
@@ -110,12 +114,17 @@ void trinity_log_init(void)
       trinity_uart_log("[TRINITY] WARN: FRAM not available -- degraded mode\r\n");
    }
 
+   if (g_fram_ok)
+   {
+      rb_crashlog_init();
+   }
+
    reset_cause = classify_reset_cause();
    __HAL_RCC_CLEAR_RESET_FLAGS();
 
    if (g_fram_ok)
    {
-      total    = fram_get_total_crashes();
+      total    = rb_crashlog_get_total();
       entry_sz = (uint16_t)sizeof(CRASH_LOG_ENTRY_X);
 
       if (total > 0ul)
@@ -179,5 +188,5 @@ void trinity_log_erase(void)
    if (!g_fram_ok) { return; }
    FRAM_META_X blank = {0};
    fram_write(FRAM_META_ADDR, (uint8_t *)&blank, sizeof(blank));
-   fram_load_meta();
+   rb_crashlog_init(); /* Reload zeroed state into ring_buffer.c statics */
 }

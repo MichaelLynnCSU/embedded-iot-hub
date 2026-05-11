@@ -17,8 +17,8 @@
  *            4. Refreshes the dashboard UI on every heartbeat tick.
  *
  *          UART telemetry is received one byte at a time via interrupt and
- *          assembled into lines stored in a ring buffer. The main loop
- *          dequeues and parses each line without blocking.
+ *          assembled into lines by ring_buffer.c. The main loop dequeues and
+ *          parses each line without blocking.
  ******************************************************************************/
 
 #include "crash_log.h"
@@ -30,6 +30,7 @@
 #include "ui.h"
 #include "parser.h"
 #include "log.h"
+#include "ring_buffer.h"        /* UART line ring buffer                      */
 #include "trinity_log.h"
 #include "fram_driver.h"
 #include <string.h>
@@ -37,26 +38,18 @@
 /******************************** CONSTANTS ***********************************/
 
 #define HB_CHECK_MS      1000ul  /**< Heartbeat check interval in ms          */
-#define UART_QUEUE_DEPTH    8u   /**< UART line ring-buffer depth              */
 #define MAIN_LOOP_DELAY_MS  5u   /**< Main loop sleep between iterations (ms) */
 #define PING_BUF_LEN       80u   /**< Heartbeat log string buffer length       */
 
 /************************** STATIC (PRIVATE) DATA *****************************/
 
-static SPI_HandleTypeDef  g_hspi1; /**< SPI1 — ILI9341 display               */
-static SPI_HandleTypeDef  g_hspi2; /**< SPI2 — XPT2046 touch controller       */
-UART_HandleTypeDef        g_huart1; /**< USART1 — ESP32 telemetry (extern in board_compat.h) */ /**< USART1 — ESP32 telemetry              */
-I2C_HandleTypeDef         g_hi2c1;  /**< I2C1 — FRAM chip PB6/PB7             */
+static SPI_HandleTypeDef  g_hspi1;  /**< SPI1 — ILI9341 display              */
+static SPI_HandleTypeDef  g_hspi2;  /**< SPI2 — XPT2046 touch controller      */
+UART_HandleTypeDef        g_huart1; /**< USART1 — ESP32 telemetry             */
+I2C_HandleTypeDef         g_hi2c1;  /**< I2C1 — FRAM chip PB6/PB7            */
 
-static uint8_t  g_uart_rx_byte              = 0u;  /**< Single-byte DMA target  */
-static char     g_uart_line[UART_LINE_LEN]  = {0}; /**< Line assembly buffer    */
-static uint8_t  g_uart_line_idx             = 0u;  /**< Current write position  */
-static char     g_uart_queue[UART_QUEUE_DEPTH][UART_LINE_LEN]; /**< Line queue  */
-static uint8_t  g_uart_q_head              = 0u;   /**< Queue write index       */
-static uint8_t  g_uart_q_tail             = 0u;   /**< Queue read index        */
-static volatile uint8_t g_uart_q_count    = 0u;   /**< Number of pending lines */
-
-static uint32_t g_last_hb = 0ul; /**< Tick of last heartbeat check            */
+static uint8_t  g_uart_rx_byte = 0u; /**< Single-byte DMA target              */
+static uint32_t g_last_hb      = 0ul; /**< Tick of last heartbeat check       */
 
 /************************** STATIC (PRIVATE) PROTOTYPES ***********************/
 
@@ -79,18 +72,11 @@ static void mx_usart1_uart_init(void);
  */
 static void drain_uart_queue(void)
 {
-   char    tmp[UART_LINE_LEN] = {0}; /**< Local copy of queued line           */
+   char    tmp[UART_LINE_LEN] = {0}; /**< Local copy of dequeued line         */
    uint8_t ui_dirty           = 0u;  /**< Non-zero when UI needs refreshing   */
 
-   while (g_uart_q_count > 0u)
+   while (rb_dequeue(tmp))
    {
-      (void)memcpy(tmp, g_uart_queue[g_uart_q_tail], UART_LINE_LEN);
-      g_uart_q_tail = (uint8_t)((g_uart_q_tail + 1u) % UART_QUEUE_DEPTH);
-
-      __disable_irq();
-      g_uart_q_count--;
-      __enable_irq();
-
       parser_process_line(tmp);
       ui_dirty = 1u;
    }
@@ -112,8 +98,8 @@ static void drain_uart_queue(void)
  */
 static void heartbeat_tick(void)
 {
-   static char g_ping[PING_BUF_LEN]; /**< Static: avoids stack allocation each call */
-   uint32_t    now = 0ul;            /**< Current HAL tick                          */
+   static char g_ping[PING_BUF_LEN]; /**< Static: avoids stack alloc each call */
+   uint32_t    now = 0ul;
 
    now = HAL_GetTick();
 
@@ -136,15 +122,6 @@ static void heartbeat_tick(void)
    log_enqueue(g_ping);
 }
 
-/**
- * \brief  Initialise SPI1 (ILI9341 display, max speed).
- *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 static void mx_spi1_init(void)
 {
    g_hspi1.Instance               = SPI1;
@@ -160,21 +137,9 @@ static void mx_spi1_init(void)
    g_hspi1.Init.CRCCalculation    = SPI_CRCCALCULATION_DISABLE;
    g_hspi1.Init.CRCPolynomial     = 10u;
 
-   if (HAL_OK != HAL_SPI_Init(&g_hspi1))
-   {
-      Error_Handler();
-   }
+   if (HAL_OK != HAL_SPI_Init(&g_hspi1)) { Error_Handler(); }
 }
 
-/**
- * \brief  Initialise SPI2 (XPT2046 touch, reduced speed).
- *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 static void mx_spi2_init(void)
 {
    g_hspi2.Instance               = SPI2;
@@ -190,21 +155,9 @@ static void mx_spi2_init(void)
    g_hspi2.Init.CRCCalculation    = SPI_CRCCALCULATION_DISABLE;
    g_hspi2.Init.CRCPolynomial     = 10u;
 
-   if (HAL_OK != HAL_SPI_Init(&g_hspi2))
-   {
-      Error_Handler();
-   }
+   if (HAL_OK != HAL_SPI_Init(&g_hspi2)) { Error_Handler(); }
 }
 
-/**
- * \brief  Initialise USART1 at 115200 8N1 for ESP32 telemetry.
- *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 static void mx_usart1_uart_init(void)
 {
    g_huart1.Instance          = USART1;
@@ -216,21 +169,9 @@ static void mx_usart1_uart_init(void)
    g_huart1.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
    g_huart1.Init.OverSampling = UART_OVERSAMPLING_16;
 
-   if (HAL_OK != HAL_UART_Init(&g_huart1))
-   {
-      Error_Handler();
-   }
+   if (HAL_OK != HAL_UART_Init(&g_huart1)) { Error_Handler(); }
 }
 
-/**
- * \brief  Initialise I2C1 for FRAM chip on PB6 (SCL) / PB7 (SDA).
- *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 static void mx_i2c1_init(void)
 {
    g_hi2c1.Instance              = I2C1;
@@ -243,24 +184,12 @@ static void mx_i2c1_init(void)
    g_hi2c1.Init.GeneralCallMode  = I2C_GENERALCALL_DISABLED;
    g_hi2c1.Init.NoStretchMode    = I2C_NOSTRETCH_DISABLED;
 
-   if (HAL_OK != HAL_I2C_Init(&g_hi2c1))
-   {
-      Error_Handler();
-   }
+   if (HAL_OK != HAL_I2C_Init(&g_hi2c1)) { Error_Handler(); }
 }
 
-/**
- * \brief  Initialise all GPIO pins for display, touch, and UART.
- *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 static void mx_gpio_init(void)
 {
-   GPIO_InitTypeDef g = {0}; /**< GPIO init structure */
+   GPIO_InitTypeDef g = {0};
 
    __HAL_RCC_GPIOH_CLK_ENABLE();
    __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -287,75 +216,30 @@ static void mx_gpio_init(void)
 /************************** PUBLIC FUNCTIONS ***********************************/
 
 /**
- * \brief  UART receive-complete ISR callback — assembles bytes into lines.
+ * \brief  UART receive-complete ISR callback — feeds bytes into ring buffer.
  *
  * \param  p_huart - HAL UART handle that triggered the callback.
  *
  * \return void
  *
- * \details Lines are delimited by CR or LF. Completed lines are copied into
- *          the ring buffer for main-loop processing. Overflow bytes are
- *          discarded and the assembly index is reset.
- *
  * \author MichaelLynnCSU
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *p_huart)
 {
-   char c = '\0'; /**< Received character */
-
-   if (NULL == p_huart)
+   if ((NULL == p_huart) || (USART1 != p_huart->Instance))
    {
       return;
    }
 
-   if (USART1 != p_huart->Instance)
-   {
-      return;
-   }
-
-   c = (char)g_uart_rx_byte;
-
-   if (('\n' == c) || ('\r' == c))
-   {
-      if ((g_uart_line_idx > 0u) && (g_uart_q_count < UART_QUEUE_DEPTH))
-      {
-         g_uart_line[g_uart_line_idx] = '\0';
-         (void)memcpy(g_uart_queue[g_uart_q_head],
-                      g_uart_line,
-                      g_uart_line_idx + 1u);
-         g_uart_q_head = (uint8_t)((g_uart_q_head + 1u) % UART_QUEUE_DEPTH);
-         g_uart_q_count++;
-      }
-
-      g_uart_line_idx = 0u;
-   }
-   else if (g_uart_line_idx < (uint8_t)(UART_LINE_LEN - 1u))
-   {
-      g_uart_line[g_uart_line_idx] = c;
-      g_uart_line_idx++;
-   }
-   else
-   {
-      /* Line overflow — discard and reset */
-      g_uart_line_idx = 0u;
-   }
+   rb_push_byte(g_uart_rx_byte);
 
    (void)HAL_UART_Receive_IT(&g_huart1, &g_uart_rx_byte, 1u);
 }
 
-/**
- * \brief  System Clock configuration — 96 MHz from 23 MHz HSE via PLL.
- *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 void SystemClock_Config(void)
 {
-   RCC_OscInitTypeDef osc_init = {0}; /**< Oscillator init parameters */
-   RCC_ClkInitTypeDef clk_init = {0}; /**< Clock tree init parameters */
+   RCC_OscInitTypeDef osc_init = {0};
+   RCC_ClkInitTypeDef clk_init = {0};
 
    __HAL_RCC_PWR_CLK_ENABLE();
    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
@@ -369,10 +253,7 @@ void SystemClock_Config(void)
    osc_init.PLL.PLLP       = RCC_PLLP_DIV4;
    osc_init.PLL.PLLQ       = 8u;
 
-   if (HAL_OK != HAL_RCC_OscConfig(&osc_init))
-   {
-      Error_Handler();
-   }
+   if (HAL_OK != HAL_RCC_OscConfig(&osc_init)) { Error_Handler(); }
 
    clk_init.ClockType      = RCC_CLOCKTYPE_HCLK   | RCC_CLOCKTYPE_SYSCLK |
                              RCC_CLOCKTYPE_PCLK1  | RCC_CLOCKTYPE_PCLK2;
@@ -381,21 +262,9 @@ void SystemClock_Config(void)
    clk_init.APB1CLKDivider = RCC_HCLK_DIV2;
    clk_init.APB2CLKDivider = RCC_HCLK_DIV1;
 
-   if (HAL_OK != HAL_RCC_ClockConfig(&clk_init, FLASH_LATENCY_3))
-   {
-      Error_Handler();
-   }
+   if (HAL_OK != HAL_RCC_ClockConfig(&clk_init, FLASH_LATENCY_3)) { Error_Handler(); }
 }
 
-/**
- * \brief  Application entry point.
- *
- * \param  void
- *
- * \return int - Never returns under normal operation.
- *
- * \author MichaelLynnCSU
- */
 int main(void)
 {
    HAL_Init();
@@ -414,13 +283,31 @@ int main(void)
    HAL_Delay(100u);
 
    MX_USB_DEVICE_Init();
-   crash_log_init();
-   trinity_log_init();
    mx_i2c1_init();
+
+   /* I2C bus scan -- remove after FRAM confirmed */
+   {
+      char scan_msg[48];
+      uint8_t found = 0u;
+      for (uint16_t a = 0x08u; a < 0x78u; a++)
+      {
+         if (HAL_OK == HAL_I2C_IsDeviceReady(&g_hi2c1, (uint16_t)(a << 1u), 2u, 10u))
+         {
+            snprintf(scan_msg, sizeof(scan_msg), "[I2C] device at 0x%02X\r\n", a);
+            log_enqueue(scan_msg);
+            found = 1u;
+         }
+      }
+      if (!found) { log_enqueue("[I2C] no devices found\r\n"); }
+   }
+
    fram_init(&g_hi2c1);
+   trinity_log_init();
    mx_spi1_init();
    mx_spi2_init();
    mx_usart1_uart_init();
+
+   rb_init();                   /* Initialise UART ring buffer                */
 
    ILI9341_Init(&g_hspi1);
    XPT2046_Init(&g_hspi2);
@@ -434,8 +321,6 @@ int main(void)
 
    while (1)
    {
-      /* lv_timer_handler() drives LVGL animations and flushes the display.
-       * Cap its execution time to prevent SPI blocking the main loop. */
       (void)lv_timer_handler();
       log_drain();
       drain_uart_queue();
@@ -446,38 +331,15 @@ int main(void)
    return 0;
 }
 
-/**
- * \brief  Fatal error handler — disables interrupts and halts.
- *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 void Error_Handler(void)
 {
    __disable_irq();
-   while (1)
-   {
-      /* Halt */
-   }
+   while (1) { /* Halt */ }
 }
 
 #ifdef USE_FULL_ASSERT
-/**
- * \brief  Assert failure handler invoked by HAL when USE_FULL_ASSERT is defined.
- *
- * \param  p_file - Source file name string.
- * \param  line   - Line number of the assertion.
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 void assert_failed(uint8_t *p_file, uint32_t line)
 {
-   /* Parameter checking not carried out for performance reasons */
    (void)p_file;
    (void)line;
 }

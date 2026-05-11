@@ -9,8 +9,16 @@
  * \brief   FM24CL16B FRAM driver — BluePill (STM32F103).
  *
  * \details Manages two partitions:
- *            Temp log  (0x0010 - 0x4010) — DHT11 sensor readings
- *            Crash log (0x4010 - 0x7FFF) — trinity crash entries
+ *            Temp log   (0x0010 - 0x4010) — DHT11 sensor readings
+ *            Crash log  (0x4010 - 0x7FFF) — trinity crash entries
+ *
+ *          Crash-log state (write pointer, total count) has moved to
+ *          ring_buffer.c.  FRAM_SaveMeta / FRAM_LoadMeta now accept those
+ *          values as parameters; the driver no longer owns them.
+ *
+ *          FRAM_Init() no longer calls FRAM_LoadMeta().  The ring-buffer
+ *          layer calls rb_crashlog_init() after FRAM is ready, which pulls
+ *          both crash fields and the temp fields in one read.
  ******************************************************************************/
 
 #include "fram_driver.h"
@@ -19,11 +27,9 @@
 
 /************************** STATIC (PRIVATE) DATA *****************************/
 
-static I2C_HandleTypeDef *g_p_fram_i2c        = NULL; /**< I2C handle           */
-static uint16_t            g_temp_write_ptr    = 0u;   /**< Temp log write offset*/
-static uint32_t            g_total_temp_entries  = 0ul; /**< Cumulative temp count*/
-static uint16_t            g_crash_write_ptr   = 0u;   /**< Crash log write offs */
-static uint32_t            g_total_crash_entries = 0ul; /**< Cumulative crash cnt */
+static I2C_HandleTypeDef *g_p_fram_i2c       = NULL; /**< I2C handle            */
+static uint16_t            g_temp_write_ptr   = 0u;   /**< Temp log write offset */
+static uint32_t            g_total_temp_entries = 0ul; /**< Cumulative temp count */
 
 /************************** STATIC (PRIVATE) FUNCTIONS ************************/
 
@@ -67,6 +73,10 @@ static uint8_t calc_crc8(uint8_t *p_data, uint16_t len)
 /**
  * \brief  Initialise FRAM driver with the given I2C handle.
  *
+ * \details Stores the handle only.  Meta-data loading is deferred — the
+ *          ring-buffer layer calls rb_crashlog_init() (which internally calls
+ *          FRAM_LoadMeta) once FRAM availability has been confirmed.
+ *
  * \param  hi2c - Pointer to initialised HAL I2C handle.
  *
  * \return void
@@ -77,7 +87,8 @@ void FRAM_Init(I2C_HandleTypeDef *hi2c)
 {
    if (NULL == hi2c) { return; }
    g_p_fram_i2c = hi2c;
-   FRAM_LoadMeta();
+   /* NOTE: FRAM_LoadMeta() deliberately NOT called here.
+    *       rb_crashlog_init() owns that responsibility.            */
 }
 
 /**
@@ -131,38 +142,58 @@ HAL_StatusTypeDef FRAM_Read(uint16_t addr, uint8_t *data, uint16_t len)
 /**
  * \brief  Save metadata to FRAM.
  *
- * \param  void
+ * \details Caller supplies crash-log fields; this layer owns only the temp
+ *          fields internally.  All four values are packed into one 8-byte
+ *          write so the meta block stays backward compatible.
+ *
+ * \param  temp_write_ptr  - Current temp-log write offset (internal copy
+ *                           updated from g_temp_write_ptr by FRAM_LogTemp).
+ * \param  total_temp      - Cumulative temp entry count.
+ * \param  crash_write_ptr - Crash-log write offset owned by ring_buffer.c.
+ * \param  total_crash     - Cumulative crash count owned by ring_buffer.c.
  *
  * \return void
  *
  * \author MichaelLynnCSU
  */
-void FRAM_SaveMeta(void)
+void FRAM_SaveMeta(uint16_t temp_write_ptr,
+                   uint32_t total_temp,
+                   uint16_t crash_write_ptr,
+                   uint32_t total_crash)
 {
    uint8_t meta[8] = {0}; /**< Packed metadata buffer */
 
-   meta[0] = (uint8_t)(g_temp_write_ptr & 0xFFu);
-   meta[1] = (uint8_t)(g_temp_write_ptr >> 8u);
-   meta[2] = (uint8_t)(g_total_temp_entries & 0xFFu);
-   meta[3] = (uint8_t)((g_total_temp_entries >> 8u) & 0xFFu);
-   meta[4] = (uint8_t)(g_crash_write_ptr & 0xFFu);
-   meta[5] = (uint8_t)(g_crash_write_ptr >> 8u);
-   meta[6] = (uint8_t)(g_total_crash_entries & 0xFFu);
-   meta[7] = (uint8_t)((g_total_crash_entries >> 8u) & 0xFFu);
+   meta[0] = (uint8_t)(temp_write_ptr & 0xFFu);
+   meta[1] = (uint8_t)(temp_write_ptr >> 8u);
+   meta[2] = (uint8_t)(total_temp & 0xFFu);
+   meta[3] = (uint8_t)((total_temp >> 8u) & 0xFFu);
+   meta[4] = (uint8_t)(crash_write_ptr & 0xFFu);
+   meta[5] = (uint8_t)(crash_write_ptr >> 8u);
+   meta[6] = (uint8_t)(total_crash & 0xFFu);
+   meta[7] = (uint8_t)((total_crash >> 8u) & 0xFFu);
 
    (void)FRAM_Write(FRAM_META_ADDR, meta, (uint16_t)sizeof(meta));
 }
 
 /**
- * \brief  Load metadata from FRAM into RAM cache.
+ * \brief  Load metadata from FRAM into caller-supplied out-parameters.
  *
- * \param  void
+ * \details Any out-pointer may be NULL — the corresponding field is simply
+ *          not written.  On read failure all non-NULL out-params are zeroed.
+ *
+ * \param  p_temp_write_ptr  - Out: temp-log write offset  (may be NULL).
+ * \param  p_total_temp      - Out: cumulative temp count  (may be NULL).
+ * \param  p_crash_write_ptr - Out: crash-log write offset (may be NULL).
+ * \param  p_total_crash     - Out: cumulative crash count (may be NULL).
  *
  * \return void
  *
  * \author MichaelLynnCSU
  */
-void FRAM_LoadMeta(void)
+void FRAM_LoadMeta(uint16_t *p_temp_write_ptr,
+                   uint32_t *p_total_temp,
+                   uint16_t *p_crash_write_ptr,
+                   uint32_t *p_total_crash)
 {
    uint8_t           meta[8] = {0}; /**< Packed metadata buffer */
    HAL_StatusTypeDef status  = HAL_ERROR;
@@ -171,17 +202,29 @@ void FRAM_LoadMeta(void)
 
    if (HAL_OK == status)
    {
-      g_temp_write_ptr      = (uint16_t)(meta[0] | ((uint16_t)meta[1] << 8u));
-      g_total_temp_entries  = (uint32_t)(meta[2] | ((uint32_t)meta[3] << 8u));
-      g_crash_write_ptr     = (uint16_t)(meta[4] | ((uint16_t)meta[5] << 8u));
-      g_total_crash_entries = (uint32_t)(meta[6] | ((uint32_t)meta[7] << 8u));
+      if (NULL != p_temp_write_ptr)
+      {
+         *p_temp_write_ptr  = (uint16_t)(meta[0] | ((uint16_t)meta[1] << 8u));
+      }
+      if (NULL != p_total_temp)
+      {
+         *p_total_temp      = (uint32_t)(meta[2] | ((uint32_t)meta[3] << 8u));
+      }
+      if (NULL != p_crash_write_ptr)
+      {
+         *p_crash_write_ptr = (uint16_t)(meta[4] | ((uint16_t)meta[5] << 8u));
+      }
+      if (NULL != p_total_crash)
+      {
+         *p_total_crash     = (uint32_t)(meta[6] | ((uint32_t)meta[7] << 8u));
+      }
    }
    else
    {
-      g_temp_write_ptr      = 0u;
-      g_total_temp_entries  = 0ul;
-      g_crash_write_ptr     = 0u;
-      g_total_crash_entries = 0ul;
+      if (NULL != p_temp_write_ptr)  { *p_temp_write_ptr  = 0u;  }
+      if (NULL != p_total_temp)      { *p_total_temp      = 0ul; }
+      if (NULL != p_crash_write_ptr) { *p_crash_write_ptr = 0u;  }
+      if (NULL != p_total_crash)     { *p_total_crash     = 0ul; }
    }
 }
 
@@ -220,44 +263,17 @@ void FRAM_LogTemp(uint16_t sensor_id, uint8_t temp, uint8_t hum)
       }
 
       g_total_temp_entries++;
-      FRAM_SaveMeta();
-   }
-}
 
-/**
- * \brief  Log a trinity crash event to the FRAM crash partition.
- *
- * \param  error_code  - TRINITY_ERROR_E value cast to uint8_t.
- * \param  boot_count  - Current boot counter value.
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
-void FRAM_LogCrash(uint8_t error_code, uint8_t boot_count)
-{
-   CRASH_LOG_ENTRY_X entry = {0}; /**< Crash entry to write */
-   uint16_t          addr  = 0u;  /**< Computed write addr  */
-
-   entry.timestamp  = HAL_GetTick();
-   entry.error_code = error_code;
-   entry.boot_count = boot_count;
-   entry.crc        = calc_crc8((uint8_t *)&entry,
-                                 (uint16_t)(sizeof(entry) - 1u));
-
-   addr = (uint16_t)(FRAM_CRASHLOG_ADDR + g_crash_write_ptr);
-
-   if (HAL_OK == FRAM_Write(addr, (uint8_t *)&entry, (uint16_t)sizeof(entry)))
-   {
-      g_crash_write_ptr += (uint16_t)sizeof(entry);
-
-      if ((g_crash_write_ptr + (uint16_t)sizeof(entry)) >= FRAM_CRASHLOG_SIZE)
-      {
-         g_crash_write_ptr = 0u;
-      }
-
-      g_total_crash_entries++;
-      FRAM_SaveMeta();
+      /* Pass crash fields as 0/0 — ring_buffer.c will call FRAM_SaveMeta
+       * with the correct crash values when it logs a crash entry.
+       * Here we only need to persist the updated temp fields; the crash
+       * fields in the meta block will be overwritten correctly next time
+       * rb_crashlog_push() runs.  To avoid stale crash data, ring_buffer
+       * calls FRAM_SaveMeta after every crash push anyway.               */
+      FRAM_SaveMeta(g_temp_write_ptr,
+                    g_total_temp_entries,
+                    0u,
+                    0ul);
    }
 }
 
@@ -287,18 +303,4 @@ uint16_t FRAM_GetWritePtr(void)
 uint32_t FRAM_GetTotalEntries(void)
 {
    return g_total_temp_entries;
-}
-
-/**
- * \brief  Return total number of crash entries logged.
- *
- * \param  void
- *
- * \return uint32_t - Cumulative crash entry count.
- *
- * \author MichaelLynnCSU
- */
-uint32_t FRAM_GetTotalCrashes(void)
-{
-   return g_total_crash_entries;
 }

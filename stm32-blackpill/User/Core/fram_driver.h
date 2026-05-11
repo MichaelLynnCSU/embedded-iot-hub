@@ -11,10 +11,15 @@
  * \details Partition layout (32KB FM24CL16B):
  *
  *   0x0000 -  0x000F  Meta         (16 bytes) — write ptr, entry count
- *   0x0010 -  0x400F  Temp log     (16KB)     — ring buffer of TempLog entries
- *   0x4010 -  0x7FFF  Trinity log  (16KB)     — ring buffer of crash entries
+ *   0x0010 -  0x7FFF  Trinity log  (~32KB)    — ring buffer of crash entries
  *
- * \warning FRAM_Init() must be called before any other FRAM function.
+ * \note    Crash log enqueue logic (rb_crashlog_push, rb_crashlog_init, etc.)
+ *          lives in ring_buffer.c. This header exposes only raw I2C transport
+ *          and meta block persistence. The CRASH_LOG_ENTRY_X and FRAM_META_X
+ *          structs are defined here because both layers share them.
+ *
+ * \warning fram_init() must be called before any other FRAM function.
+ *          Call rb_crashlog_init() afterwards to restore crash log state.
  *          I2C address is set by A0/A1/A2 pins — default 0x50 (all low).
  ******************************************************************************/
 
@@ -55,8 +60,8 @@ typedef struct __attribute__((packed))
  */
 typedef struct
 {
-   uint16_t crash_write_ptr;    /*!< Next write offset in crash log  */
-   uint32_t total_crash_entries;/*!< Cumulative crash entries logged */
+   uint16_t crash_write_ptr;     /*!< Next write offset in crash log  */
+   uint32_t total_crash_entries; /*!< Cumulative crash entries logged */
 } FRAM_META_X;
 
 /*************************** FUNCTION PROTOTYPES ******************************/
@@ -68,6 +73,9 @@ extern I2C_HandleTypeDef g_hi2c1;
  * \brief  Initialise FRAM driver with the given I2C handle.
  *
  * \param  p_hi2c - Pointer to initialised HAL I2C handle (I2C1, PB6/PB7).
+ *
+ * \note   Does NOT load metadata. Call rb_crashlog_init() after this to
+ *         restore crash log write pointer and entry count from FRAM.
  *
  * \return void
  *
@@ -102,48 +110,29 @@ HAL_StatusTypeDef fram_write(uint16_t addr, uint8_t *p_data, uint16_t len);
 HAL_StatusTypeDef fram_read(uint16_t addr, uint8_t *p_data, uint16_t len);
 
 /**
- * \brief  Save metadata (write pointers, entry counts) to FRAM.
+ * \brief  Persist crash log state (write pointer, entry count) to FRAM meta block.
  *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
-void fram_save_meta(void);
-
-/**
- * \brief  Load metadata from FRAM into RAM cache.
- *
- * \param  void
+ * \param  write_ptr     - Current crash log write offset (owned by ring_buffer.c).
+ * \param  total_entries - Cumulative crash entry count (owned by ring_buffer.c).
  *
  * \return void
  *
  * \author MichaelLynnCSU
  */
-void fram_load_meta(void);
+void fram_save_meta(uint16_t write_ptr, uint32_t total_entries);
 
 /**
- * \brief  Log a trinity crash event to the FRAM crash partition.
+ * \brief  Load metadata from FRAM into RAM cache and return crash log state.
  *
- * \param  error_code  - TRINITY_ERROR_E value cast to uint8_t.
- * \param  boot_count  - Current boot counter value.
+ * \param  p_write_ptr     - Out: crash log write offset. Set to 0 on read failure.
+ * \param  p_total_entries - Out: cumulative crash entry count. Set to 0 on failure.
+ *
+ * \note   Either out-pointer may be NULL if the caller does not need that field.
  *
  * \return void
  *
  * \author MichaelLynnCSU
  */
-void fram_log_crash(uint8_t error_code, uint8_t boot_count);
-
-/**
- * \brief  Return total number of crash entries ever logged.
- *
- * \param  void
- *
- * \return uint32_t - Cumulative crash entry count.
- *
- * \author MichaelLynnCSU
- */
-uint32_t fram_get_total_crashes(void);
+void fram_load_meta(uint16_t *p_write_ptr, uint32_t *p_total_entries);
 
 #endif /* INCLUDE_FRAM_DRIVER_H_ */

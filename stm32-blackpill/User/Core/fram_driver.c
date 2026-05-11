@@ -12,9 +12,11 @@
  *          Key differences from BluePill version:
  *            - HAL header: stm32f4xx_hal.h (was stm32f1xx_hal.h)
  *            - Naming: snake_case per EchoStar §6.2.2
- *            - Added crash log partition (fram_log_crash)
- *            - Meta block extended with crash write ptr + crash entry count
  *            - All globals prefixed with g_ per EchoStar §6.5.4
+ *
+ * \note    Crash log state (write ptr, entry count, enqueue logic) lives in
+ *          ring_buffer.c (RING BUFFER 2 — FRAM section). This file owns only
+ *          raw I2C transport and the meta block persistence layer.
  ******************************************************************************/
 
 #include "fram_driver.h"
@@ -22,47 +24,8 @@
 
 /************************** STATIC (PRIVATE) DATA *****************************/
 
-static I2C_HandleTypeDef *g_p_fram_i2c        = NULL; /**< I2C handle           */
-static FRAM_META_X         g_fram_meta         = {0};  /**< RAM cache of metadata*/
-static uint16_t            g_crash_write_ptr     = 0u;  /**< Crash log write offset  */
-static uint32_t            g_total_crash_entries = 0ul; /**< Cumulative crash count  */
-
-/************************** STATIC (PRIVATE) FUNCTIONS ************************/
-
-/**
- * \brief  Calculate CRC-8 over a data buffer.
- *
- * \param  p_data - Pointer to data bytes.
- * \param  len    - Number of bytes to process.
- *
- * \return uint8_t - Computed CRC-8 value.
- *
- * \author MichaelLynnCSU
- */
-static uint8_t calc_crc8(uint8_t *p_data, uint16_t len)
-{
-   uint8_t  crc = 0xFFu; /**< CRC accumulator, initialised to 0xFF */
-   uint16_t i   = 0u;    /**< Byte index                           */
-   uint8_t  j   = 0u;    /**< Bit index                            */
-
-   for (i = 0u; i < len; i++)
-   {
-      crc ^= p_data[i];
-      for (j = 0u; j < 8u; j++)
-      {
-         if (0u != (crc & 0x80u))
-         {
-            crc = (uint8_t)((crc << 1u) ^ 0x07u);
-         }
-         else
-         {
-            crc <<= 1u;
-         }
-      }
-   }
-
-   return crc;
-}
+static I2C_HandleTypeDef *g_p_fram_i2c = NULL; /**< I2C handle           */
+static FRAM_META_X         g_fram_meta  = {0};  /**< RAM cache of metadata*/
 
 /************************** PUBLIC FUNCTIONS ***********************************/
 
@@ -72,6 +35,9 @@ static uint8_t calc_crc8(uint8_t *p_data, uint16_t len)
  * \param  p_hi2c - Pointer to initialised HAL I2C handle.
  *
  * \return void
+ *
+ * \note   Does NOT load metadata — call rb_crashlog_init() after fram_init()
+ *         to restore crash log write pointer and entry count from FRAM.
  *
  * \author MichaelLynnCSU
  */
@@ -83,7 +49,6 @@ void fram_init(I2C_HandleTypeDef *p_hi2c)
    }
 
    g_p_fram_i2c = p_hi2c;
-   fram_load_meta();
 }
 
 /**
@@ -141,18 +106,19 @@ HAL_StatusTypeDef fram_read(uint16_t addr, uint8_t *p_data, uint16_t len)
 }
 
 /**
- * \brief  Save metadata (write pointers, entry counts) to FRAM.
+ * \brief  Persist crash log state (write pointer, entry count) to FRAM meta block.
  *
- * \param  void
+ * \param  write_ptr     - Current crash log write offset (owned by ring_buffer.c).
+ * \param  total_entries - Cumulative crash entry count (owned by ring_buffer.c).
  *
  * \return void
  *
  * \author MichaelLynnCSU
  */
-void fram_save_meta(void)
+void fram_save_meta(uint16_t write_ptr, uint32_t total_entries)
 {
-   g_fram_meta.crash_write_ptr     = g_crash_write_ptr;
-   g_fram_meta.total_crash_entries = g_total_crash_entries;
+   g_fram_meta.crash_write_ptr     = write_ptr;
+   g_fram_meta.total_crash_entries = total_entries;
 
    (void)fram_write(FRAM_META_ADDR,
                     (uint8_t *)&g_fram_meta,
@@ -160,15 +126,18 @@ void fram_save_meta(void)
 }
 
 /**
- * \brief  Load metadata from FRAM into RAM cache.
+ * \brief  Load metadata from FRAM into RAM cache and return crash log state.
  *
- * \param  void
+ * \param  p_write_ptr     - Out: crash log write offset. Set to 0 on read failure.
+ * \param  p_total_entries - Out: cumulative crash entry count. Set to 0 on failure.
  *
  * \return void
  *
+ * \note   Either out-pointer may be NULL if the caller does not need that field.
+ *
  * \author MichaelLynnCSU
  */
-void fram_load_meta(void)
+void fram_load_meta(uint16_t *p_write_ptr, uint32_t *p_total_entries)
 {
    HAL_StatusTypeDef status = HAL_ERROR; /**< I2C read result */
 
@@ -178,71 +147,13 @@ void fram_load_meta(void)
 
    if (HAL_OK == status)
    {
-      g_crash_write_ptr     = g_fram_meta.crash_write_ptr;
-      g_total_crash_entries = g_fram_meta.total_crash_entries;
+      if (NULL != p_write_ptr)     { *p_write_ptr     = g_fram_meta.crash_write_ptr;     }
+      if (NULL != p_total_entries) { *p_total_entries  = g_fram_meta.total_crash_entries; }
    }
    else
    {
-      g_crash_write_ptr     = 0u;
-      g_total_crash_entries = 0ul;
+      if (NULL != p_write_ptr)     { *p_write_ptr     = 0u;  }
+      if (NULL != p_total_entries) { *p_total_entries  = 0ul; }
    }
 }
 
-/**
- * \brief  Log a trinity crash event to the FRAM crash partition.
- *
- * \param  error_code  - TRINITY_ERROR_E value cast to uint8_t.
- * \param  boot_count  - Current boot counter value.
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
-void fram_log_crash(uint8_t error_code, uint8_t boot_count)
-{
-   CRASH_LOG_ENTRY_X entry = {0}; /**< Crash entry to write */
-   uint16_t          addr  = 0u;  /**< Computed write addr  */
-
-   entry.timestamp  = HAL_GetTick();
-   entry.error_code = error_code;
-   entry.boot_count = boot_count;
-   entry.crc        = calc_crc8((uint8_t *)&entry,
-                                 (uint16_t)(sizeof(entry) - 1u));
-
-   addr = (uint16_t)(FRAM_CRASHLOG_ADDR + g_crash_write_ptr);
-
-   if (HAL_OK == fram_write(addr, (uint8_t *)&entry, (uint16_t)sizeof(entry)))
-   {
-      g_crash_write_ptr += (uint16_t)sizeof(entry);
-
-      if ((g_crash_write_ptr + (uint16_t)sizeof(entry)) >= FRAM_CRASHLOG_SIZE)
-      {
-         g_crash_write_ptr = 0u;
-      }
-      else
-      {
-         /* Still space in crash partition */
-      }
-
-      g_total_crash_entries++;
-      fram_save_meta();
-   }
-   else
-   {
-      /* Write failed */
-   }
-}
-
-/**
- * \brief  Return total number of crash entries ever logged.
- *
- * \param  void
- *
- * \return uint32_t - Cumulative crash entry count.
- *
- * \author MichaelLynnCSU
- */
-uint32_t fram_get_total_crashes(void)
-{
-   return g_total_crash_entries;
-}

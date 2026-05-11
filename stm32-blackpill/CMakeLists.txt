@@ -43,6 +43,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "User/Core/log.c"
     "User/Core/parser.c"
     "User/Core/ui.c"
+    "User/Core/ring_buffer.c"
 
     # Trinity split
     "User/Core/trinity_fram_stm32_f4.c"
