@@ -21,6 +21,26 @@
  *          - JSON parsing (json_parser.c)
  *          - pipe IPC (pipe_writer.c)
  *          - global run flag or signal handling (sensor_server.c)
+ *
+ *          Pattern stack (four levels, each at a different abstraction):
+ *
+ *          Double buffer   g_active[] accumulates (producer side);
+ *                          sensor_server.c owns the ready buffer
+ *                          (consumer side). Producer and consumer
+ *                          never touch the same buffer simultaneously.
+ *
+ *          Sliding window  g_active[] grows as bytes arrive; memmove()
+ *                          compacts it forward after each frame is
+ *                          extracted, preserving bytes that belong to
+ *                          the next frame.
+ *
+ *          Two pointers    find_json_frame() uses p_start and p_end
+ *                          to locate frame boundaries without
+ *                          modifying the buffer.
+ *
+ *          Depth counter   find_json_frame() tracks brace nesting
+ *                          depth to handle nested JSON objects
+ *                          correctly ({} inside {}).
  ******************************************************************************/
 
 #include <stdio.h>
