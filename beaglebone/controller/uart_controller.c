@@ -565,7 +565,18 @@ void *uart_push_thread(void *p_arg)
          continue;
       }
 
-      sem_wait(shm_sem);
+      /* Block scoped to limit ts lifetime -- remove braces if C99 or later */
+      {
+         struct timespec ts;
+         clock_gettime(CLOCK_REALTIME, &ts);
+         ts.tv_sec += 2;
+
+         if (0 != sem_timedwait(shm_sem, &ts))
+         {
+            LOG("[PUSH] shm_sem timeout -- web process may be dead, skipping");
+            continue;
+         }
+      }
       valid  = shm_data->data_valid;
       temp   = shm_data->current_temp;
       motion = shm_data->current_motion;
