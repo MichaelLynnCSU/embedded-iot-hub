@@ -19,6 +19,53 @@
  *          UART telemetry is received one byte at a time via interrupt and
  *          assembled into lines by ring_buffer.c. The main loop dequeues and
  *          parses each line without blocking.
+ *
+ * \note    Pipeline architecture:
+ *          Firmware is split into two independent producer/consumer
+ *          pipelines. This separation is intentional and must be
+ *          preserved -- mixing them reintroduces the instability
+ *          this design was built to fix.
+ *
+ *          TELEMETRY  UART ISR -> ring buffer -> drain_uart_queue()
+ *                     -> parser_process_line() -> ui_update()
+ *
+ *          DEBUG LOG  log_enqueue() -> RAM queue -> log_drain()
+ *                     -> USB CDC (non-blocking)
+ *
+ *          ISR does byte collection only -- no parsing, no output,
+ *          no state mutation. All processing happens in main loop.
+ *          Debug traffic has zero influence on telemetry timing.
+ *
+ * \note    Freeze / stall fix:
+ *          System previously froze under UART load and stalled during
+ *          debug prints. Root cause: blocking work in timing-critical
+ *          paths and no decoupling between data production and
+ *          consumption.
+ *
+ *          Fix: UART RX reduced to byte-only ISR buffering. Debug
+ *          output deferred to a RAM queue drained here in the main
+ *          loop. All transmission is non-blocking. ISR execution time
+ *          is now bounded and deterministic; freezes are eliminated.
+ *
+ *          Main loop is the cooperative scheduler for all non-ISR work.
+ *          Every function called here must be non-blocking and complete
+ *          in < 1ms. Violating this degrades UI frame timing and risks
+ *          dropping UART bytes.
+ *
+ *
+ * \note    Render trigger:
+ *          ui_update() is called conditionally, not on every loop tick.
+ *          drain_uart_queue() triggers it only when new telemetry arrived.
+ *          heartbeat_tick() triggers it once per second as a fallback.
+ *          This is intentional -- unconditional rendering adds SPI
+ *          traffic and LVGL work with no visual benefit on a
+ *          sporadically-updated dashboard. The pipeline is still
+ *          deterministic; the render stage is just gated on dirty state.
+ *
+ *          Event-driven render on new telemetry, 1Hz periodic render as a
+ *          liveness guarantee when the ESP32 is silent heartbeat and ui_update()
+ *          never fires unconditionally.
+ *
  ******************************************************************************/
 
 #include "crash_log.h"
@@ -30,7 +77,7 @@
 #include "ui.h"
 #include "parser.h"
 #include "log.h"
-#include "ring_buffer.h"        /* UART line ring buffer                      */
+#include "ring_buffer.h"
 #include "trinity_log.h"
 #include "fram_driver.h"
 #include <string.h>
