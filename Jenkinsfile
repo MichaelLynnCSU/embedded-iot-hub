@@ -303,12 +303,13 @@ pipeline {
 
     post {
         success {
-            echo '✅ All tests passed.'
+            echo '✅ All tests passed coverage reports processed.'
         }
         failure {
             echo '❌ One or more tests failed — check the stage logs above.'
         }
         always {
+            echo 'Cleaning up workspace...'
             cleanWs()
         }
     }
