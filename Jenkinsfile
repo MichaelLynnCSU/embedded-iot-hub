@@ -228,9 +228,18 @@ pipeline {
                 }
             }
             steps {
+                // Install both the 32-bit compiler toolchain AND the 32-bit
+                // kernel headers that native_sim needs for <asm/errno.h>.
+                // Without linux-libc-dev:i386 the -m32 build fails even when
+                // gcc-multilib is present.
                 sh '''
-                    if ! dpkg -l gcc-multilib > /dev/null 2>&1; then
-                        sudo apt-get install -y gcc-multilib g++-multilib
+                    PKGS_NEEDED=""
+                    dpkg -l gcc-multilib   > /dev/null 2>&1 || PKGS_NEEDED="$PKGS_NEEDED gcc-multilib g++-multilib"
+                    dpkg -l linux-libc-dev:i386 > /dev/null 2>&1 || PKGS_NEEDED="$PKGS_NEEDED linux-libc-dev:i386"
+                    if [ -n "$PKGS_NEEDED" ]; then
+                        sudo dpkg --add-architecture i386
+                        sudo apt-get update -q
+                        sudo apt-get install -y $PKGS_NEEDED
                     fi
                 '''
 
