@@ -5,7 +5,11 @@ pipeline {
         timestamps()
         timeout(time: 30, unit: 'MINUTES')
     }
-
+    environment {
+        // Point Jenkins to your Zephyr virtual environment
+        PATH = "/home/hailviral-server/zephyrproject/.venv/bin:${env.PATH}"
+        ZEPHYR_BASE = "/home/hailviral-server/zephyrproject/zephyr"
+    }
     stages {
 
         // ─────────────────────────────────────────────
