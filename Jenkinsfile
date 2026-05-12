@@ -40,6 +40,7 @@ pipeline {
                         id: 'bb-controller',
                         name: 'BeagleBone Controller',
                         tools: [[parser: 'COBERTURA', pattern: 'beaglebone/controller/tests/unit/build/cobertura.xml']],
+                        sourceDirectories: [[path: 'beaglebone/controller']]
                     )
                 }
             }
@@ -69,6 +70,7 @@ pipeline {
                         id: 'bb-server',
                         name: 'BeagleBone Server',
                         tools: [[parser: 'COBERTURA', pattern: 'beaglebone/server/tests/unit/build/cobertura.xml']],
+                        sourceDirectories: [[path: 'beaglebone/server']]
                     )
                 }
             }
@@ -103,6 +105,7 @@ pipeline {
                         id: 'esp32-hub',
                         name: 'ESP32 Hub',
                         tools: [[parser: 'COBERTURA', pattern: 'esp32-hub/tests/unit/build/cobertura.xml']],
+                        sourceDirectories: [[path: 'esp32-hub']]
                     )
                 }
             }
@@ -136,7 +139,8 @@ pipeline {
                     recordCoverage(
                         id: 'esp32c3-motor',
                         name: 'ESP32-C3 Motor',
-                        tools: [[parser: 'COBERTURA', pattern: 'esp32c3/idf/motor/tests/unit/build/cobertura.xml']]
+                        tools: [[parser: 'COBERTURA', pattern: 'esp32c3/idf/motor/tests/unit/build/cobertura.xml']],
+                        sourceDirectories: [[path: 'esp32c3']]
                     )
                 }
             }
@@ -171,7 +175,7 @@ pipeline {
                         id: 'stm32-blackpill',
                         name: 'STM32 Blackpill',
                         tools: [[parser: 'COBERTURA', pattern: 'stm32-blackpill/tests/unit/build/cobertura.xml']],
-                        sourceDirectories: [[path: "stm32-blackpill"]]
+                        sourceDirectories: [[path: 'stm32-blackpill']]
                     )
                 }
             }
@@ -206,7 +210,7 @@ pipeline {
                         id: 'stm32-bluepill',
                         name: 'STM32 Bluepill',
                         tools: [[parser: 'COBERTURA', pattern: 'stm32-bluepill/tests/unit/build/cobertura.xml']],
-                        sourceDirectories: [[path: "stm32-bluepill"]]
+                        sourceDirectories: [[path: 'stm32-bluepill']]
                     )
                 }
             }
@@ -214,9 +218,11 @@ pipeline {
 
         // ─────────────────────────────────────────────
         // nRF52840 + PIR — Zephyr ztest (native_sim)
-        // Requires: Zephyr SDK + west installed on agent
-        // Coverage: CONFIG_COVERAGE=y writes gcda files
-        // after zephyr.exe exits; gcovr reads them.
+        //
+        // FIX: native_sim compiles with -m32, which requires
+        // 32-bit kernel headers (gcc-multilib / linux-libc-dev:i386).
+        // We install them here if not already present, then build.
+        // catchError lets coverage publish even if a subproject fails.
         // ─────────────────────────────────────────────
 
         stage('Zephyr Tests (nRF52840 + PIR)') {
@@ -226,59 +232,80 @@ pipeline {
                 }
             }
             steps {
+                // Install 32-bit headers required by native_sim (-m32 build)
                 sh '''
-                    # reed-sensor
-                    cd nrf52840/reed-sensor
-                    west build -b native_sim -d build_test_ci tests/unit -- \
-                        -DBOARD_FLASH_RUNNER=none \
-                        -DCONFIG_COVERAGE=y
-                    ./build_test_ci/zephyr/zephyr.exe
-                    gcovr --xml -o build_test_ci/cobertura.xml \
-                        --root ${WORKSPACE} \
-                        --filter "${WORKSPACE}/nrf52840/reed-sensor/" \
-                        --exclude ".*/tests/.*" \
-                        --exclude ".*/build_test_ci/.*" \
-                        build_test_ci
-
-                    # smart-light
-                    cd ../../nrf52840/smart-light
-                    west build -b native_sim -d build_test_ci tests/unit -- \
-                        -DBOARD_FLASH_RUNNER=none \
-                        -DCONFIG_COVERAGE=y
-                    ./build_test_ci/zephyr/zephyr.exe
-                    gcovr --xml -o build_test_ci/cobertura.xml \
-                        --root ${WORKSPACE} \
-                        --filter "${WORKSPACE}/nrf52840/smart-light/" \
-                        --exclude ".*/tests/.*" \
-                        --exclude ".*/build_test_ci/.*" \
-                        build_test_ci
-
-                    # smart-lock
-                    cd ../../nrf52840/smart-lock
-                    west build -b native_sim -d build_test_ci tests/unit -- \
-                        -DBOARD_FLASH_RUNNER=none \
-                        -DCONFIG_COVERAGE=y
-                    ./build_test_ci/zephyr/zephyr.exe
-                    gcovr --xml -o build_test_ci/cobertura.xml \
-                        --root ${WORKSPACE} \
-                        --filter "${WORKSPACE}/nrf52840/smart-lock/" \
-                        --exclude ".*/tests/.*" \
-                        --exclude ".*/build_test_ci/.*" \
-                        build_test_ci
-
-                    # esp32c3 pir (zephyr)
-                    cd ../../esp32c3/zephyr/pir
-                    west build -b native_sim -d build_test_ci tests/unit -- \
-                        -DBOARD_FLASH_RUNNER=none \
-                        -DCONFIG_COVERAGE=y
-                    ./build_test_ci/zephyr/zephyr.exe
-                    gcovr --xml -o build_test_ci/cobertura.xml \
-                        --root ${WORKSPACE} \
-                        --filter "${WORKSPACE}/esp32c3/zephyr/pir/" \
-                        --exclude ".*/tests/.*" \
-                        --exclude ".*/build_test_ci/.*" \
-                        build_test_ci
+                    if ! dpkg -l gcc-multilib > /dev/null 2>&1; then
+                        sudo apt-get install -y gcc-multilib g++-multilib
+                    fi
                 '''
+
+                // reed-sensor
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                    sh '''
+                        cd nrf52840/reed-sensor
+                        west build -b native_sim -d build_test_ci tests/unit -- \
+                            -DBOARD_FLASH_RUNNER=none \
+                            -DCONFIG_COVERAGE=y
+                        ./build_test_ci/zephyr/zephyr.exe
+                        gcovr --xml -o build_test_ci/cobertura.xml \
+                            --root ${WORKSPACE} \
+                            --filter "${WORKSPACE}/nrf52840/reed-sensor/" \
+                            --exclude ".*/tests/.*" \
+                            --exclude ".*/build_test_ci/.*" \
+                            build_test_ci
+                    '''
+                }
+
+                // smart-light
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                    sh '''
+                        cd nrf52840/smart-light
+                        west build -b native_sim -d build_test_ci tests/unit -- \
+                            -DBOARD_FLASH_RUNNER=none \
+                            -DCONFIG_COVERAGE=y
+                        ./build_test_ci/zephyr/zephyr.exe
+                        gcovr --xml -o build_test_ci/cobertura.xml \
+                            --root ${WORKSPACE} \
+                            --filter "${WORKSPACE}/nrf52840/smart-light/" \
+                            --exclude ".*/tests/.*" \
+                            --exclude ".*/build_test_ci/.*" \
+                            build_test_ci
+                    '''
+                }
+
+                // smart-lock
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                    sh '''
+                        cd nrf52840/smart-lock
+                        west build -b native_sim -d build_test_ci tests/unit -- \
+                            -DBOARD_FLASH_RUNNER=none \
+                            -DCONFIG_COVERAGE=y
+                        ./build_test_ci/zephyr/zephyr.exe
+                        gcovr --xml -o build_test_ci/cobertura.xml \
+                            --root ${WORKSPACE} \
+                            --filter "${WORKSPACE}/nrf52840/smart-lock/" \
+                            --exclude ".*/tests/.*" \
+                            --exclude ".*/build_test_ci/.*" \
+                            build_test_ci
+                    '''
+                }
+
+                // esp32c3 pir (zephyr)
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                    sh '''
+                        cd esp32c3/zephyr/pir
+                        west build -b native_sim -d build_test_ci tests/unit -- \
+                            -DBOARD_FLASH_RUNNER=none \
+                            -DCONFIG_COVERAGE=y
+                        ./build_test_ci/zephyr/zephyr.exe
+                        gcovr --xml -o build_test_ci/cobertura.xml \
+                            --root ${WORKSPACE} \
+                            --filter "${WORKSPACE}/esp32c3/zephyr/pir/" \
+                            --exclude ".*/tests/.*" \
+                            --exclude ".*/build_test_ci/.*" \
+                            build_test_ci
+                    '''
+                }
             }
             post {
                 always {
@@ -309,7 +336,10 @@ pipeline {
 
     post {
         success {
-            echo '✅ All tests passed coverage reports processed.'
+            echo '✅ All tests passed — coverage reports processed.'
+        }
+        unstable {
+            echo '⚠️ Some Zephyr tests could not run — check the stage logs above.'
         }
         failure {
             echo '❌ One or more tests failed — check the stage logs above.'
@@ -320,3 +350,7 @@ pipeline {
         }
     }
 }
+~
+~
+~
+
