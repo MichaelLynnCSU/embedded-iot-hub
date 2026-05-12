@@ -1,7 +1,7 @@
 #include <zephyr/ztest.h>
 #include <zephyr/fff.h>
 #include "trinity_log.h"
-#include "main.h"
+#include "config.h"
 #include "battery.h"
 
 DEFINE_FFF_GLOBALS;
@@ -22,7 +22,7 @@ ZTEST(lock_timing, test_stats_interval)
 
 ZTEST(lock_timing, test_idle_heartbeat)
 {
-    zassert_equal(IDLE_HEARTBEAT_SEC, 120, "IDLE_HEARTBEAT_SEC must be 120s");
+    zassert_equal(IDLE_HEARTBEAT_SEC, 240, "IDLE_HEARTBEAT_SEC must be 240s");
 }
 
 ZTEST(lock_timing, test_batt_update_sec)
