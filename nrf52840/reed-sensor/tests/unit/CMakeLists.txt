@@ -5,7 +5,8 @@ project(reed_unit_tests)
 target_sources(app PRIVATE
     src/test_reed_main.c
     ../../src/trinity_boot.c
-    ../../src/trinity_canary.c)
+    ../../src/trinity_canary.c
+    ../../src/battery.c)
 
 target_include_directories(app PRIVATE
     ../../src)
