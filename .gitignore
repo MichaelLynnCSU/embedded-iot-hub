@@ -1,3 +1,16 @@
+# === CI/CD, Testing & Coverage ===
+*.gcda
+*.gcno
+*.gcov
+**/coverage/
+**/htmlcov/
+**/unit_test_results.xml
+cobertura.xml
+lcov.info
+.jenkins/
+pipeline-stage-view/
+*.secret
+
 # === Build & General Artifacts ===
 build/
 .cache/

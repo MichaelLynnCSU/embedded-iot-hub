@@ -432,8 +432,6 @@ static int accept_motor_connection(int listen_sock)
    return client;
 }
 
-/*----------------------------------------------------------------------------*/
-
 /**
  * \brief  Send PWM command to a connected motor client and read batt reply.
  *
@@ -443,6 +441,20 @@ static int accept_motor_connection(int listen_sock)
  * \details Sends {"pwm": X}, waits up to MOTOR_BATT_RECV_TIMEOUT_MS for
  *          {"batt_motor": Y}, updates g_state, closes client_sock.
  *          motor_online set to 1 on success.
+ *
+ * \note    Single recv() assumption (2026-05-XX):
+ *          Current implementation assumes one recv() call returns a complete
+ *          JSON payload. This holds in practice because the battery reply is
+ *          small (~18 bytes) relative to MTU and the motor closes after
+ *          sending, forcing a kernel flush before select() fires.
+ *
+ *          PENDING: If packet loss rates observed in trinity_log indicate
+ *          EVENT: MOTOR_BATT_PARSE_FAIL is occurring with frequency, the
+ *          single recv() must be replaced with a sliding window read loop
+ *          that accumulates fragments until FIN (rlen == 0) before parsing.
+ *          Threshold for logic change: treat any consistent parse failure
+ *          pattern in the logs as evidence the single-shot assumption is
+ *          breaking down and the recv loop in tcp_manager.c must be adopted.
  */
 static void send_pwm_to_c3(int client_sock, float pwm_pct)
 {
@@ -489,30 +501,47 @@ static void send_pwm_to_c3(int client_sock, float pwm_pct)
    tv.tv_sec  = MOTOR_BATT_RECV_TIMEOUT_MS / 1000;
    tv.tv_usec = (MOTOR_BATT_RECV_TIMEOUT_MS % 1000) * 1000;
 
-   if (0 < select(client_sock + 1, &fds, NULL, NULL, &tv))
+if (0 < select(client_sock + 1, &fds, NULL, NULL, &tv))
+{
+   rlen = recv(client_sock, rx, sizeof(rx) - 1, 0);
+   if (rlen > 0)
    {
-      rlen = recv(client_sock, rx, sizeof(rx) - 1, 0);
-      if (rlen > 0)
+      rx[rlen]  = '\0';
+      p_rx_json = cJSON_Parse(rx);
+      if (NULL != p_rx_json)
       {
-         rx[rlen]  = '\0';
-         p_rx_json = cJSON_Parse(rx);
-         if (NULL != p_rx_json)
+         p_batt = cJSON_GetObjectItem(p_rx_json, "batt_motor");
+         if ((NULL != p_batt) && (p_batt->valueint >= 0))
          {
-            p_batt = cJSON_GetObjectItem(p_rx_json, "batt_motor");
-            if ((NULL != p_batt) && (p_batt->valueint >= 0))
-            {
-               g_state.motor_batt = p_batt->valueint;
-               ESP_LOGI(TAG, "[MOTOR_SRV] batt_motor=%d%%", g_state.motor_batt);
-            }
-            cJSON_Delete(p_rx_json);
+            g_state.motor_batt = p_batt->valueint;
+            ESP_LOGI(TAG, "[MOTOR_SRV] batt_motor=%d%%", g_state.motor_batt);
          }
+         cJSON_Delete(p_rx_json);
       }
+      else
+      {
+         ESP_LOGW(TAG, "[MOTOR_SRV] JSON parse failed (rlen=%d) rx='%.*s'",
+                  rlen, rlen, rx);
+         trinity_log_event("EVENT: MOTOR_BATT_PARSE_FAIL\n");
+      }
+   }
+   else if (0 == rlen)
+   {
+      ESP_LOGW(TAG, "[MOTOR_SRV] Motor closed before sending batt reply");
+      trinity_log_event("EVENT: MOTOR_BATT_EMPTY_RECV\n");
    }
    else
    {
-      ESP_LOGW(TAG, "[MOTOR_SRV] batt reply timed out after %d ms",
-               MOTOR_BATT_RECV_TIMEOUT_MS);
+      ESP_LOGW(TAG, "[MOTOR_SRV] recv() error (errno=%d)", errno);
+      trinity_log_event("EVENT: MOTOR_BATT_RECV_ERR\n");
    }
+}
+else
+{
+   ESP_LOGW(TAG, "[MOTOR_SRV] batt reply timed out after %d ms",
+            MOTOR_BATT_RECV_TIMEOUT_MS);
+   trinity_log_event("EVENT: MOTOR_BATT_TIMEOUT\n");
+}
 
    g_state.motor_online = 1;
    bus_publish_motor(1, g_state.motor_batt);
