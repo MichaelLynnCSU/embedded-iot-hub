@@ -39,7 +39,7 @@ pipeline {
                     recordCoverage(
                         id: 'bb-controller',
                         name: 'BeagleBone Controller',
-                        tools: [[parser: 'COBERTURA', pattern: 'beaglebone/controller/tests/unit/build/cobertura.xml']]
+                        tools: [[parser: 'COBERTURA', pattern: 'beaglebone/controller/tests/unit/build/cobertura.xml']],
                     )
                 }
             }
@@ -68,7 +68,7 @@ pipeline {
                     recordCoverage(
                         id: 'bb-server',
                         name: 'BeagleBone Server',
-                        tools: [[parser: 'COBERTURA', pattern: 'beaglebone/server/tests/unit/build/cobertura.xml']]
+                        tools: [[parser: 'COBERTURA', pattern: 'beaglebone/server/tests/unit/build/cobertura.xml']],
                     )
                 }
             }
@@ -102,7 +102,7 @@ pipeline {
                     recordCoverage(
                         id: 'esp32-hub',
                         name: 'ESP32 Hub',
-                        tools: [[parser: 'COBERTURA', pattern: 'esp32-hub/tests/unit/build/cobertura.xml']]
+                        tools: [[parser: 'COBERTURA', pattern: 'esp32-hub/tests/unit/build/cobertura.xml']],
                     )
                 }
             }
@@ -170,7 +170,8 @@ pipeline {
                     recordCoverage(
                         id: 'stm32-blackpill',
                         name: 'STM32 Blackpill',
-                        tools: [[parser: 'COBERTURA', pattern: 'stm32-blackpill/tests/unit/build/cobertura.xml']]
+                        tools: [[parser: 'COBERTURA', pattern: 'stm32-blackpill/tests/unit/build/cobertura.xml']],
+                        sourceDirectories: [[path: "stm32-blackpill"]]
                     )
                 }
             }
@@ -204,7 +205,8 @@ pipeline {
                     recordCoverage(
                         id: 'stm32-bluepill',
                         name: 'STM32 Bluepill',
-                        tools: [[parser: 'COBERTURA', pattern: 'stm32-bluepill/tests/unit/build/cobertura.xml']]
+                        tools: [[parser: 'COBERTURA', pattern: 'stm32-bluepill/tests/unit/build/cobertura.xml']],
+                        sourceDirectories: [[path: "stm32-bluepill"]]
                     )
                 }
             }
