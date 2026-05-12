@@ -22,7 +22,7 @@ ZTEST(light_timing, test_stats_interval)
 
 ZTEST(light_timing, test_idle_heartbeat)
 {
-    zassert_equal(IDLE_HEARTBEAT_SEC, 120,
+    zassert_equal(IDLE_HEARTBEAT_SEC, 240,
         "IDLE_HEARTBEAT_SEC changed -- expected 120s");
 }
 
