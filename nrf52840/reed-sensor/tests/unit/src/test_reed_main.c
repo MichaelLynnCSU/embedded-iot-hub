@@ -10,6 +10,7 @@
 #include <zephyr/fff.h>
 #include "trinity_log.h"
 #include "main.h"
+#include "battery.h"
 
 DEFINE_FFF_GLOBALS;
 
