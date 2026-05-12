@@ -5,16 +5,17 @@ pipeline {
         timestamps()
         timeout(time: 30, unit: 'MINUTES')
     }
+
     environment {
         // Point Jenkins to your Zephyr virtual environment
         PATH = "/home/hailviral-server/zephyrproject/.venv/bin:${env.PATH}"
         ZEPHYR_BASE = "/home/hailviral-server/zephyrproject/zephyr"
     }
-    stages {
 
-        // ─────────────────────────────────────────────
-        // BeagleBone — CUnit + sqlite3 (system deps)
-        // ─────────────────────────────────────────────
+    stages {
+        // ---------------------------------------------
+        // BeagleBone - CUnit + sqlite3 (system deps)
+        // ---------------------------------------------
 
         stage('BeagleBone Controller Tests') {
             steps {
@@ -76,9 +77,9 @@ pipeline {
             }
         }
 
-        // ─────────────────────────────────────────────
-        // ESP32 Hub — Unity via FetchContent
-        // ─────────────────────────────────────────────
+        // ---------------------------------------------
+        // ESP32 Hub - Unity via FetchContent
+        // ---------------------------------------------
 
         stage('ESP32 Hub Tests') {
             steps {
@@ -111,9 +112,9 @@ pipeline {
             }
         }
 
-        // ─────────────────────────────────────────────
-        // ESP32-C3 Motor — Unity via FetchContent
-        // ─────────────────────────────────────────────
+        // ---------------------------------------------
+        // ESP32-C3 Motor - Unity via FetchContent
+        // ---------------------------------------------
 
         stage('ESP32-C3 Motor Tests') {
             steps {
@@ -146,9 +147,9 @@ pipeline {
             }
         }
 
-        // ─────────────────────────────────────────────
-        // STM32 Blackpill — Unity via FetchContent
-        // ─────────────────────────────────────────────
+        // ---------------------------------------------
+        // STM32 Blackpill - Unity via FetchContent
+        // ---------------------------------------------
 
         stage('STM32 Blackpill Tests') {
             steps {
@@ -181,9 +182,9 @@ pipeline {
             }
         }
 
-        // ─────────────────────────────────────────────
-        // STM32 Bluepill — Unity via FetchContent
-        // ─────────────────────────────────────────────
+        // ---------------------------------------------
+        // STM32 Bluepill - Unity via FetchContent
+        // ---------------------------------------------
 
         stage('STM32 Bluepill Tests') {
             steps {
@@ -216,14 +217,9 @@ pipeline {
             }
         }
 
-        // ─────────────────────────────────────────────
-        // nRF52840 + PIR — Zephyr ztest (native_sim)
-        //
-        // FIX: native_sim compiles with -m32, which requires
-        // 32-bit kernel headers (gcc-multilib / linux-libc-dev:i386).
-        // We install them here if not already present, then build.
-        // catchError lets coverage publish even if a subproject fails.
-        // ─────────────────────────────────────────────
+        // ---------------------------------------------
+        // nRF52840 + PIR - Zephyr ztest (native_sim)
+        // ---------------------------------------------
 
         stage('Zephyr Tests (nRF52840 + PIR)') {
             when {
@@ -232,14 +228,12 @@ pipeline {
                 }
             }
             steps {
-                // Install 32-bit headers required by native_sim (-m32 build)
                 sh '''
                     if ! dpkg -l gcc-multilib > /dev/null 2>&1; then
                         sudo apt-get install -y gcc-multilib g++-multilib
                     fi
                 '''
 
-                // reed-sensor
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
                         cd nrf52840/reed-sensor
@@ -256,7 +250,6 @@ pipeline {
                     '''
                 }
 
-                // smart-light
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
                         cd nrf52840/smart-light
@@ -273,7 +266,6 @@ pipeline {
                     '''
                 }
 
-                // smart-lock
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
                         cd nrf52840/smart-lock
@@ -290,7 +282,6 @@ pipeline {
                     '''
                 }
 
-                // esp32c3 pir (zephyr)
                 catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                     sh '''
                         cd esp32c3/zephyr/pir
@@ -336,13 +327,13 @@ pipeline {
 
     post {
         success {
-            echo '✅ All tests passed — coverage reports processed.'
+            echo 'All tests passed - coverage reports processed.'
         }
         unstable {
-            echo '⚠️ Some Zephyr tests could not run — check the stage logs above.'
+            echo 'Some Zephyr tests could not run - check the stage logs above.'
         }
         failure {
-            echo '❌ One or more tests failed — check the stage logs above.'
+            echo 'One or more tests failed - check the stage logs above.'
         }
         always {
             echo 'Cleaning up workspace...'
@@ -350,7 +341,3 @@ pipeline {
         }
     }
 }
-~
-~
-~
-
