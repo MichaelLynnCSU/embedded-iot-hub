@@ -70,6 +70,7 @@ pipeline {
             }
             post {
                 always {
+                    junit 'beaglebone/server/tests/unit/build/junit_server.xml'
                     recordCoverage(
                         id: 'bb-server',
                         name: 'BeagleBone Server',

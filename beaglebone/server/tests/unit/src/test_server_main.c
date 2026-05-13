@@ -2,6 +2,7 @@
 #include <CUnit/Basic.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>
 #include "server_logic.h"
 
 /******************************************************************************
@@ -176,22 +177,22 @@ void test_pipe_retry_sec(void)
  ******************************************************************************/
 int main(void)
 {
-    CU_pSuite age_suite  = NULL;
-    CU_pSuite reed_suite = NULL;
-    CU_pSuite json_suite = NULL;
-    CU_pSuite buf_suite  = NULL;
+    CU_pSuite age_suite   = NULL;
+    CU_pSuite reed_suite  = NULL;
+    CU_pSuite json_suite  = NULL;
+    CU_pSuite buf_suite   = NULL;
     CU_pSuite const_suite = NULL;
 
     if (CUE_SUCCESS != CU_initialize_registry()) { return CU_get_error(); }
 
     age_suite = CU_add_suite("age_clamping", NULL, NULL);
-    CU_add_test(age_suite, "normal",       test_age_clamp_normal);
-    CU_add_test(age_suite, "zero",         test_age_clamp_zero);
-    CU_add_test(age_suite, "negative",     test_age_clamp_negative);
-    CU_add_test(age_suite, "at_max",       test_age_clamp_at_max);
-    CU_add_test(age_suite, "over_max",     test_age_clamp_over_max);
+    CU_add_test(age_suite, "normal",          test_age_clamp_normal);
+    CU_add_test(age_suite, "zero",            test_age_clamp_zero);
+    CU_add_test(age_suite, "negative",        test_age_clamp_negative);
+    CU_add_test(age_suite, "at_max",          test_age_clamp_at_max);
+    CU_add_test(age_suite, "over_max",        test_age_clamp_over_max);
     CU_add_test(age_suite, "unknown_sentinel", test_age_unknown_sentinel);
-    CU_add_test(age_suite, "max_sentinel", test_age_max_sentinel);
+    CU_add_test(age_suite, "max_sentinel",    test_age_max_sentinel);
 
     reed_suite = CU_add_suite("reed_slots", NULL, NULL);
     CU_add_test(reed_suite, "id_to_slot_1",     test_reed_id_to_slot_1);
@@ -203,17 +204,17 @@ int main(void)
     CU_add_test(reed_suite, "slot_invalid_6",   test_reed_slot_invalid_6);
 
     json_suite = CU_add_suite("extract_json", NULL, NULL);
-    CU_add_test(json_suite, "simple",           test_extract_json_simple);
-    CU_add_test(json_suite, "nested",           test_extract_json_nested);
-    CU_add_test(json_suite, "no_brace",         test_extract_json_no_brace);
-    CU_add_test(json_suite, "incomplete",       test_extract_json_incomplete);
-    CU_add_test(json_suite, "leading_garbage",  test_extract_json_leading_garbage);
-    CU_add_test(json_suite, "empty",            test_extract_json_empty);
+    CU_add_test(json_suite, "simple",          test_extract_json_simple);
+    CU_add_test(json_suite, "nested",          test_extract_json_nested);
+    CU_add_test(json_suite, "no_brace",        test_extract_json_no_brace);
+    CU_add_test(json_suite, "incomplete",      test_extract_json_incomplete);
+    CU_add_test(json_suite, "leading_garbage", test_extract_json_leading_garbage);
+    CU_add_test(json_suite, "empty",           test_extract_json_empty);
 
     buf_suite = CU_add_suite("buffer_overflow", NULL, NULL);
-    CU_add_test(buf_suite, "has_room",  test_buf_has_room_ok);
-    CU_add_test(buf_suite, "full",      test_buf_has_room_full);
-    CU_add_test(buf_suite, "exact",     test_buf_has_room_exact);
+    CU_add_test(buf_suite, "has_room", test_buf_has_room_ok);
+    CU_add_test(buf_suite, "full",     test_buf_has_room_full);
+    CU_add_test(buf_suite, "exact",    test_buf_has_room_exact);
 
     const_suite = CU_add_suite("constants", NULL, NULL);
     CU_add_test(const_suite, "max_reeds",      test_max_reeds);
@@ -224,7 +225,27 @@ int main(void)
 
     CU_basic_set_mode(CU_BRM_VERBOSE);
     CU_basic_run_tests();
-    CU_cleanup_registry();
 
-    return CU_get_error();
+    FILE *f = fopen(JUNIT_OUTPUT_PATH, "w");
+    if (f) {
+        int failures = CU_get_number_of_failures();
+        int tests    = CU_get_number_of_tests_run();
+        fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        fprintf(f, "<testsuite name=\"server_tests\" tests=\"%d\" failures=\"%d\">\n",
+                tests, failures);
+        CU_pSuite s = CU_get_registry()->pSuite;
+        while (s) {
+            CU_pTest t = s->pTest;
+            while (t) {
+                fprintf(f, "  <testcase name=\"%s.%s\"/>\n", s->pName, t->pName);
+                t = t->pNext;
+            }
+            s = s->pNext;
+        }
+        fprintf(f, "</testsuite>\n");
+        fclose(f);
+    }
+
+    CU_cleanup_registry();
+    return CU_get_number_of_failures() > 0 ? 1 : 0;
 }

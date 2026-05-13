@@ -13,6 +13,9 @@ target_include_directories(test_server PRIVATE
     ../../
     ${CUNIT_INC})
 
+target_compile_definitions(test_server PRIVATE
+    "JUNIT_OUTPUT_PATH=\"${CMAKE_CURRENT_BINARY_DIR}/junit_server.xml\"")
+
 target_link_libraries(test_server ${CUNIT_LIB})
 
 enable_testing()
