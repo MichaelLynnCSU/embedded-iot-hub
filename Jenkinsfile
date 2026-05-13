@@ -27,9 +27,6 @@ pipeline {
                              -DCMAKE_EXE_LINKER_FLAGS="--coverage"
                     make -j$(nproc)
                     ctest --output-on-failure
-                    cp junit_controller-Results.xml ${WORKSPACE}/beaglebone/controller/tests/unit/build/
-                    cp junit_db_tx.xml              ${WORKSPACE}/beaglebone/controller/tests/unit/build/
-                    cp junit_db_writes.xml          ${WORKSPACE}/beaglebone/controller/tests/unit/build/
                     gcovr --xml -o cobertura.xml \
                         --root ${WORKSPACE} \
                         --filter "${WORKSPACE}/beaglebone/controller/" \
