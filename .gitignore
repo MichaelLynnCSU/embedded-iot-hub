@@ -122,3 +122,16 @@ STM32*.cfg
 nrf52840/reed-sensor/build_test/
 nrf52840/smart-lock/build_test/
 esp32c3/zephyr/pir/build_test/
+
+# === Zephyr CI build directories ===
+**/build_test_ci/
+**/build_test/
+
+# === Cloudflare installer binary ===
+cloudflared-linux-amd64.deb
+
+# === ESP-IDF build artifacts (belt-and-suspenders) ===
+**/build/compile_commands.json
+**/build/config/
+**/build/bootloader/
+**/build/project_description.json
