@@ -1,5 +1,5 @@
 #include <CUnit/CUnit.h>
-#include <CUnit/Automated.h>
+#include <CUnit/Basic.h>
 #include "controller_internal.h"
 #include <stdint.h>
 #include <time.h>
@@ -367,11 +367,30 @@ int main(void)
     CU_add_test(phantom_suite, "preserves_previous",      test_reed_slot_no_update_preserves_previous);
     CU_add_test(phantom_suite, "overwrites_when_active",  test_reed_slot_update_overwrites_when_active);
 
-    /* CU_automated_run_tests() writes CUnitAutomated-Results.xml in the   */
-    /* working directory (the build dir under ctest). Jenkins picks this up */
-    /* via the junit step in the Jenkinsfile post block.                    */
-    CU_set_output_filename("junit_controller");
-    CU_automated_run_tests();
+    /* Run with basic runner then emit JUnit XML to the absolute path baked  */
+    /* in by CMake so the file always lands in build/ regardless of ctest cwd */
+    CU_basic_set_mode(CU_BRM_VERBOSE);
+    CU_basic_run_tests();
+
+    FILE *f = fopen(JUNIT_OUTPUT_PATH, "w");
+    if (f) {
+        int failures = CU_get_number_of_failures();
+        int tests    = CU_get_number_of_tests_run();
+        fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        fprintf(f, "<testsuite name=\"controller_tests\" tests=\"%d\" failures=\"%d\">\n",
+                tests, failures);
+        CU_pSuite s = CU_get_registry()->pSuite;
+        while (s) {
+            CU_pTest t = s->pTest;
+            while (t) {
+                fprintf(f, "  <testcase name=\"%s.%s\"/>\n", s->pName, t->pName);
+                t = t->pNext;
+            }
+            s = s->pNext;
+        }
+        fprintf(f, "</testsuite>\n");
+        fclose(f);
+    }
 
     CU_cleanup_registry();
     return CU_get_number_of_failures() > 0 ? 1 : 0;
