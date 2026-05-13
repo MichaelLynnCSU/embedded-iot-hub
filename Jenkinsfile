@@ -26,7 +26,7 @@ pipeline {
                              -DCMAKE_C_FLAGS="--coverage" \
                              -DCMAKE_EXE_LINKER_FLAGS="--coverage"
                     make -j$(nproc)
-                    ctest --output-on-failure
+                    ctest -V
                     gcovr --xml -o cobertura.xml \
                         --root ${WORKSPACE} \
                         --filter "${WORKSPACE}/beaglebone/controller/" \
@@ -59,7 +59,7 @@ pipeline {
                              -DCMAKE_C_FLAGS="--coverage" \
                              -DCMAKE_EXE_LINKER_FLAGS="--coverage"
                     make -j$(nproc)
-                    ctest --output-on-failure
+                    ctest -V
                     gcovr --xml -o cobertura.xml \
                         --root ${WORKSPACE} \
                         --filter "${WORKSPACE}/beaglebone/server/" \
@@ -93,7 +93,7 @@ pipeline {
                              -DCMAKE_C_FLAGS="--coverage" \
                              -DCMAKE_EXE_LINKER_FLAGS="--coverage"
                     make -j$(nproc)
-                    ctest --output-on-failure
+                    ctest -V
                     gcovr --xml -o cobertura.xml \
                         --root ${WORKSPACE} \
                         --filter "${WORKSPACE}/esp32-hub/" \
@@ -128,7 +128,7 @@ pipeline {
                              -DCMAKE_C_FLAGS="--coverage" \
                              -DCMAKE_EXE_LINKER_FLAGS="--coverage"
                     make -j$(nproc)
-                    ctest --output-on-failure
+                    ctest -V
                     gcovr --xml -o cobertura.xml \
                         --root ${WORKSPACE} \
                         --filter "${WORKSPACE}/esp32c3/" \
@@ -163,7 +163,7 @@ pipeline {
                              -DCMAKE_C_FLAGS="--coverage" \
                              -DCMAKE_EXE_LINKER_FLAGS="--coverage"
                     make -j$(nproc)
-                    ctest --output-on-failure
+                    ctest -V
                     gcovr --xml -o cobertura.xml \
                         --root ${WORKSPACE} \
                         --filter "${WORKSPACE}/stm32-blackpill/" \
@@ -198,7 +198,7 @@ pipeline {
                              -DCMAKE_C_FLAGS="--coverage" \
                              -DCMAKE_EXE_LINKER_FLAGS="--coverage"
                     make -j$(nproc)
-                    ctest --output-on-failure
+                    ctest -V
                     gcovr --xml -o cobertura.xml \
                         --root ${WORKSPACE} \
                         --filter "${WORKSPACE}/stm32-bluepill/" \
