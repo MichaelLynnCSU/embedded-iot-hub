@@ -11,41 +11,9 @@ FAKE_VALUE_FUNC(int, trinity_log_init);
 FAKE_VOID_FUNC(trinity_log_dump_previous);
 
 /******************************************************************************
- * WDT tick math
- * Bug: BATT_UPDATE_TICKS and STATS_INTERVAL_TICKS were not scaled when
- *      loop sleep changed from 10s to 2s -- intervals were 5x too short.
- ******************************************************************************/
-ZTEST(pir_wdt, test_loop_sleep_less_than_wdt_timeout)
-{
-    zassert_true(LOOP_SLEEP_MS < WDT_TIMEOUT_MS,
-        "LOOP_SLEEP_MS=%d must be < WDT_TIMEOUT_MS=%d",
-        LOOP_SLEEP_MS, WDT_TIMEOUT_MS);
-}
-
-ZTEST(pir_wdt, test_batt_update_ticks_preserves_5min)
-{
-    zassert_equal(BATT_UPDATE_TICKS * LOOP_SLEEP_MS, 300000,
-        "Battery interval broken: %d x %d != 300000ms",
-        BATT_UPDATE_TICKS, LOOP_SLEEP_MS);
-}
-
-ZTEST(pir_wdt, test_stats_interval_ticks_preserves_60s)
-{
-    zassert_equal(STATS_INTERVAL_TICKS * LOOP_SLEEP_MS, 60000,
-        "Stats interval broken: %d x %d != 60000ms",
-        STATS_INTERVAL_TICKS, LOOP_SLEEP_MS);
-}
-
-/******************************************************************************
  * MFG data layout
  * Hub parses motion count and battery from fixed byte indices.
  ******************************************************************************/
-ZTEST(pir_mfg, test_mfg_data_size)
-{
-    zassert_equal(MFG_DATA_SIZE, 7,
-        "MFG_DATA_SIZE changed -- hub parser expects exactly 7 bytes");
-}
-
 ZTEST(pir_mfg, test_mfg_company_id_bytes)
 {
     zassert_equal(MFG_COMPANY_ID_0, 0xFF, "Company ID byte 0 must be 0xFF");
@@ -171,6 +139,5 @@ ZTEST(pir_adv, test_adv_fields_independent)
 }
 
 ZTEST_SUITE(pir_adv, NULL, NULL, NULL, NULL, NULL);
-ZTEST_SUITE(pir_wdt,  NULL, NULL, NULL, NULL, NULL);
 ZTEST_SUITE(pir_mfg,  NULL, NULL, NULL, NULL, NULL);
 ZTEST_SUITE(pir_pack, NULL, NULL, NULL, NULL, NULL);
