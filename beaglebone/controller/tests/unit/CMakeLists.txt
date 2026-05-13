@@ -35,3 +35,16 @@ target_link_libraries(test_db_tx ${CUNIT_LIB} ${SQLITE_LIB} pthread)
 enable_testing()
 add_test(NAME controller_tests     COMMAND test_controller)
 add_test(NAME db_transaction_tests COMMAND test_db_tx)
+
+# --- test_db_writes ---
+add_executable(test_db_writes
+    src/test_db_writes.c
+    src/db_manager_shim.c
+    ../../db_manager.c)
+target_include_directories(test_db_writes PRIVATE
+    ../../
+    ${CUNIT_INC})
+target_compile_definitions(test_db_writes PRIVATE
+    "DB_PATH=\":memory:\"")
+target_link_libraries(test_db_writes ${CUNIT_LIB} ${SQLITE_LIB} pthread)
+add_test(NAME db_write_tests COMMAND test_db_writes)

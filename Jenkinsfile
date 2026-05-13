@@ -37,6 +37,9 @@ pipeline {
             }
             post {
                 always {
+                    junit "beaglebone/controller/tests/unit/build/junit_controller-Results.xml"
+                    junit "beaglebone/controller/tests/unit/build/junit_db_tx.xml"
+                    junit "beaglebone/controller/tests/unit/build/junit_db_writes.xml"
                     recordCoverage(
                         id: 'bb-controller',
                         name: 'BeagleBone Controller',

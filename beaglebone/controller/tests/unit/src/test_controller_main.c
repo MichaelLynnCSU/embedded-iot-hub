@@ -1,6 +1,6 @@
 #include <CUnit/CUnit.h>
+#include <CUnit/Automated.h>
 #include "controller_internal.h"
-#include <CUnit/Basic.h>
 #include <stdint.h>
 #include <time.h>
 #include "controller_logic.h"
@@ -367,8 +367,12 @@ int main(void)
     CU_add_test(phantom_suite, "preserves_previous",      test_reed_slot_no_update_preserves_previous);
     CU_add_test(phantom_suite, "overwrites_when_active",  test_reed_slot_update_overwrites_when_active);
 
-    CU_basic_set_mode(CU_BRM_VERBOSE);
-    CU_basic_run_tests();
+    /* CU_automated_run_tests() writes CUnitAutomated-Results.xml in the   */
+    /* working directory (the build dir under ctest). Jenkins picks this up */
+    /* via the junit step in the Jenkinsfile post block.                    */
+    CU_set_output_filename("junit_controller");
+    CU_automated_run_tests();
+
     CU_cleanup_registry();
-    return CU_get_error();
+    return CU_get_number_of_failures() > 0 ? 1 : 0;
 }

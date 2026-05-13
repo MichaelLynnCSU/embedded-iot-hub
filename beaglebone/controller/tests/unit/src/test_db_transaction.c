@@ -56,6 +56,51 @@
 #include "controller_internal.h"
 
 /*---------------------------------------------------------------------------*/
+/* JUnit XML emitter                                                          */
+/*---------------------------------------------------------------------------*/
+
+typedef struct { const char *name; int passed; } JCase;
+static JCase g_cases[256];
+static int   g_case_count = 0;
+
+static void junit_record(const char *name, int passed)
+{
+   if (g_case_count < 256)
+   {
+      g_cases[g_case_count].name   = name;
+      g_cases[g_case_count].passed = passed;
+      g_case_count++;
+   }
+}
+
+static void junit_write(const char *suite, const char *path)
+{
+   int failures = 0;
+   int i;
+
+   for (i = 0; i < g_case_count; i++)
+      if (!g_cases[i].passed) failures++;
+
+   FILE *f = fopen(path, "w");
+   if (!f) return;
+
+   fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+   fprintf(f, "<testsuite name=\"%s\" tests=\"%d\" failures=\"%d\">\n",
+           suite, g_case_count, failures);
+
+   for (i = 0; i < g_case_count; i++)
+   {
+      fprintf(f, "  <testcase name=\"%s\">\n", g_cases[i].name);
+      if (!g_cases[i].passed)
+         fprintf(f, "    <failure>%s</failure>\n", g_cases[i].name);
+      fprintf(f, "  </testcase>\n");
+   }
+
+   fprintf(f, "</testsuite>\n");
+   fclose(f);
+}
+
+/*---------------------------------------------------------------------------*/
 /* Test infrastructure                                                        */
 /*---------------------------------------------------------------------------*/
 
@@ -64,13 +109,10 @@ static int g_fail = 0;
 
 #define CHECK(desc, expr) \
    do { \
-      if (expr) { \
-         printf("  PASS  %s\n", (desc)); \
-         g_pass++; \
-      } else { \
-         printf("  FAIL  %s\n", (desc)); \
-         g_fail++; \
-      } \
+      int _ok = !!(expr); \
+      if (_ok) { printf("  PASS  %s\n", (desc)); g_pass++; } \
+      else     { printf("  FAIL  %s\n", (desc)); g_fail++; } \
+      junit_record((desc), _ok); \
    } while (0)
 
 /*---------------------------------------------------------------------------*/
@@ -190,9 +232,9 @@ static void test_commit(void)
    write_full_frame(&d);
    db_commit();
 
-   CHECK("reading row committed",     count_rows("readings")      == 1);
-   CHECK("motor row committed",       count_rows("motor_readings") == 1);
-   CHECK("reed slots committed (x2)", count_rows("reed_readings")  == 2);
+   CHECK("reading row committed",     count_rows("readings")       == 1);
+   CHECK("motor row committed",       count_rows("motor_readings")  == 1);
+   CHECK("reed slots committed (x2)", count_rows("reed_readings")   == 2);
 }
 
 /*---------------------------------------------------------------------------*/
@@ -212,9 +254,9 @@ static void test_rollback(void)
    write_full_frame(&d);
    db_rollback();
 
-   CHECK("reading rolled back",    count_rows("readings")      == 0);
-   CHECK("motor rolled back",      count_rows("motor_readings") == 0);
-   CHECK("reed slots rolled back", count_rows("reed_readings")  == 0);
+   CHECK("reading rolled back",    count_rows("readings")       == 0);
+   CHECK("motor rolled back",      count_rows("motor_readings")  == 0);
+   CHECK("reed slots rolled back", count_rows("reed_readings")   == 0);
 }
 
 /*---------------------------------------------------------------------------*/
@@ -245,9 +287,9 @@ static void test_partial_frame_rollback(void)
                 d.reed_slots[0].age);
    db_rollback();
 
-   CHECK("partial reading rolled back", count_rows("readings")      == 0);
-   CHECK("partial motor rolled back",   count_rows("motor_readings") == 0);
-   CHECK("partial reed rolled back",    count_rows("reed_readings")  == 0);
+   CHECK("partial reading rolled back", count_rows("readings")       == 0);
+   CHECK("partial motor rolled back",   count_rows("motor_readings")  == 0);
+   CHECK("partial reed rolled back",    count_rows("reed_readings")   == 0);
 }
 
 /*---------------------------------------------------------------------------*/
@@ -276,6 +318,8 @@ int main(void)
    printf("\n==============================================\n");
    printf(" Results: %d passed  %d failed\n", g_pass, g_fail);
    printf("==============================================\n\n");
+
+   junit_write("db_transaction_tests", "junit_db_tx.xml");
 
    sqlite3_close(db);
    return g_fail;
