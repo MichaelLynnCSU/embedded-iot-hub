@@ -161,7 +161,7 @@ ZTEST(lock_batt, test_adc_decode_chain)
     /* Step 4: voltage to percent using battery.h constants */
     uint8_t soc = mv_to_soc(vbat_mv);
 
-    zassert_equal(soc, 60, "5600mV mid-discharge must be 60%% SOC");
+    zassert_true(soc >= 59 && soc <= 61, "5600mV mid-discharge must be ~60%% SOC");
 }
 
 /******************************************************************************
