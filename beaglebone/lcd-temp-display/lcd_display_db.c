@@ -6,6 +6,8 @@
 #include <time.h>
 #include "lcd_driver.h"
 #include "shared_data.h"
+#define SHM_NAME "/sensor_shm"
+#define SEM_NAME "/sensor_sem"
 
 #define UPDATE_INTERVAL 2  // seconds
 #define LCD_LOG "/var/log/lcd_display.log"
