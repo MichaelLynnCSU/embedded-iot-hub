@@ -1,0 +1,16 @@
+[Unit]
+Description=LCD Display Database Monitor
+After=network.target sensor-server.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/debian/lcd
+ExecStart=/home/debian/lcd/lcd_display_db
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
