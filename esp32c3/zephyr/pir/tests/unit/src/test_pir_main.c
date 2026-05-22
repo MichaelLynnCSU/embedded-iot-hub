@@ -141,3 +141,35 @@ ZTEST(pir_adv, test_adv_fields_independent)
 ZTEST_SUITE(pir_adv, NULL, NULL, NULL, NULL, NULL);
 ZTEST_SUITE(pir_mfg,  NULL, NULL, NULL, NULL, NULL);
 ZTEST_SUITE(pir_pack, NULL, NULL, NULL, NULL, NULL);
+
+/******************************************************************************
+ * BLE address type -- static vs RPA
+ * CONFIG_BT_PRIVACY=n must be set to prevent Zephyr from using a
+ * Resolvable Private Address (RPA) that rotates on each advertising start.
+ * A rotating MAC causes the ESP32 hub to treat each wake as a new device,
+ * fill the PIR slot table, and drop all subsequent advertisements until
+ * the old slot ages out (~170s). Static address eliminates the churn.
+ * See prj.conf BLE ADDRESS section for full rationale.
+ ******************************************************************************/
+ZTEST(pir_ble_addr, test_bt_privacy_disabled)
+{
+#ifdef CONFIG_BT_PRIVACY
+    zassert_false(CONFIG_BT_PRIVACY,
+        "CONFIG_BT_PRIVACY must be n -- RPA causes hub slot churn");
+#else
+    /* CONFIG_BT_PRIVACY not defined means privacy is off -- correct */
+    zassert_true(1, "privacy correctly absent");
+#endif
+}
+
+ZTEST(pir_ble_addr, test_bt_smp_disabled)
+{
+#ifdef CONFIG_BT_SMP
+    zassert_false(CONFIG_BT_SMP,
+        "CONFIG_BT_SMP must be n -- broadcaster-only, no pairing needed");
+#else
+    zassert_true(1, "SMP correctly absent");
+#endif
+}
+
+ZTEST_SUITE(pir_ble_addr, NULL, NULL, NULL, NULL, NULL);

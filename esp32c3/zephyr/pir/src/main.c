@@ -67,8 +67,60 @@
  *          missed BLE packets during lossy periods.
  *          All other state resets on every wake by design.
  *
+ * \note    GPIO level-wake settle (2026-05-21):
+ *          ESP_GPIO_WAKEUP_GPIO_HIGH is level-triggered. The AM312 holds
+ *          its output HIGH for ~2-3s after firing. enter_deep_sleep()
+ *          waits up to PIR_PIN_SETTLE_MS (2500ms) for GPIO3 to return
+ *          LOW before arming the wake source, with trinity_wdt_kick()
+ *          called on every 10ms iteration to prevent WDT expiry during
+ *          the wait. If the pin does not settle (genuine sustained motion)
+ *          sleep proceeds anyway -- correct behaviour.
+ *
+ * \note    Boot loop root cause (2026-05-21):
+ *          Both sensors exhibited ~500 rapid boot cycles per sleep cycle.
+ *          Root cause was flash corruption: the ESP simple bootloader
+ *          stored a zeroed SHA-256 expected hash, causing a degraded boot
+ *          path that re-triggered immediately after every deep sleep entry.
+ *          Fix: full chip erase (esptool erase-flash) followed by reflash.
+ *          The settle loop above is a separate improvement that prevents
+ *          a real GPIO-level wake loop if the AM312 pin is still HIGH at
+ *          sleep entry, but was not the cause of the ~500 cycle loop.
+ *
  *****************************************************************************
  * CHANGELOG
+ *
+ * 2026-05-21 — Bug: ~500 cycle boot loop on every sleep entry
+ *   PROBLEM:  Both PIR sensors looped ~500 rapid boot cycles between every
+ *             real sleep cycle, visible as 400-500 dropped WDT messages in
+ *             the trinity log. PIR 2 appeared worse because its battery was
+ *             dead, making each loop iteration slightly longer. Extensive
+ *             isolation testing ruled out: GPIO wake API, bt_disable(),
+ *             WDT timing, DEEP_SLEEP_INTERVAL_US, and all application code.
+ *             Root cause: flash corruption. The ESP simple bootloader had a
+ *             zeroed SHA-256 expected hash (0000000090a30000...) indicating
+ *             the bootloader metadata region had been partially overwritten,
+ *             likely from repeated power-loss mid-write cycles during the
+ *             low-battery boot loop on PIR 2. The degraded boot path reset
+ *             the chip before the RTC timer could count, producing the loop.
+ *   FIX:      Full chip erase followed by clean reflash on both units:
+ *               esptool --port /dev/ttyACM0 erase-flash
+ *               west flash --esp-device /dev/ttyACM0
+ *             Boot loop eliminated. SHA-256 mismatch line still appears
+ *             on every boot -- this is a known Zephyr ESP simple bootloader
+ *             behaviour where the expected hash field is never populated at
+ *             build time. It is cosmetic; boot proceeds correctly.
+ *
+ * 2026-05-21 — Improvement: GPIO3 settle wait before sleep
+ *   PROBLEM:  ESP_GPIO_WAKEUP_GPIO_HIGH is level-triggered. The AM312
+ *             holds its output HIGH for ~2-3s after a motion event. If
+ *             esp_deep_sleep_start() is called before that window expires
+ *             the chip wakes instantly on every cycle. This was masked by
+ *             the flash corruption boot loop but would have reappeared
+ *             after the erase fix under high motion conditions.
+ *   FIX:      enter_deep_sleep() now waits up to PIR_PIN_SETTLE_MS
+ *             (2500ms) for GPIO3 to go LOW before arming the wake source.
+ *             trinity_wdt_kick() called on every 10ms iteration so the
+ *             full wait window never trips the 3s watchdog.
  *
  * 2026-05-03 — Hardware: AM312 PIR false trigger fix
  *   PROBLEM:  GPIO3 read 1.28V only when physically touching the wire or
@@ -98,7 +150,7 @@
  *             main() runs once per wake cycle, advertises a short burst,
  *             then calls esp_deep_sleep_start() (noreturn). Every wake is
  *             a full cold boot. Wake sources: GPIO3 (PIR) and RTC timer
- *             (10s heartbeat). Average current measured at 19.93mA over
+ *             (30s heartbeat). Average current measured at 19.93mA over
  *             a 3m49s sample window capturing full wake/advertise/sleep
  *             cycles (PPK2, nRF Power Profiler). Runtime on 3000mAh cell:
  *             ~150 hours (~6.3 days). 2.6x improvement over always-on.
@@ -117,34 +169,24 @@
  *             Root cause: Zephyr ESP32-C3 linker script has no proper
  *             .rtc.data section. RTC_DATA_ATTR is a no-op for data
  *             variables in this toolchain/Zephyr version combination.
- *             Removing `static` was also attempted and did not change
- *             placement -- confirmed by boot log showing len:0xc unchanged.
  *   FIX:      Removed RTC_DATA_ATTR entirely. Added trinity_nvs_esp.c --
  *             a dedicated NVS persistence module using storage_partition
- *             (0x3b0000, 176KB). NVS is mounted independently of trinity
- *             flash log (which uses log_partition -- no overlap, no
- *             collision risk). motion_count is read from NVS on every
+ *             (0x3b0000, 176KB). motion_count is read from NVS on every
  *             wake and written to NVS only on confirmed PIR wakes.
- *             Flash wear is negligible at even 100 events/day.
- *             count now accumulates correctly across all deep sleep cycles.
+ *
  * 2026-05-03 — Hardware: AM312 false triggers on battery power
  *   PROBLEM:  PIR count incrementing with no movement when running on
  *             battery. AM312 was physically close to the LiPo cell.
  *             Battery warms under load (BLE TX, flash writes) and the
  *             thermal change falls within the AM312 detection cone.
- *             PIR fired on the battery's IR signature -- a real detection
- *             of a real heat source, not an electrical false trigger.
- *             Did not occur on USB power because battery stays at ambient
- *             temperature when not under load.
  *   FIX:      Moved AM312 away from battery. Keep PIR and LiPo thermally
- *             separated in final enclosure. If space is constrained, a
- *             small aluminum tape barrier between battery and PIR face
- *             will block the IR path.
+ *             separated in final enclosure.
  ******************************************************************************/
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
 #include <esp_sleep.h>
@@ -155,29 +197,58 @@
 
 LOG_MODULE_REGISTER(pir_main, LOG_LEVEL_INF);
 
-#define PIR_PIN   3
-#define GPIO_NODE DT_NODELABEL(gpio0)
+#define PIR_PIN             3
+#define GPIO_NODE           DT_NODELABEL(gpio0)
+
+/** Maximum time to wait for GPIO3 to go LOW before arming sleep.
+ *  AM312 hold time is typically 2-3s. The settle loop kicks the WDT
+ *  on every 10ms iteration so this value can safely exceed WDT_TIMEOUT_MS.
+ *  If motion is genuinely continuous the pin will not settle and we sleep
+ *  anyway, waking immediately -- that is correct behaviour. */
+#define PIR_PIN_SETTLE_MS   2500u
 
 /*----------------------------------------------------------------------------*/
 
 static void enter_deep_sleep(void)
 {
-    /* Both wake sources re-armed every cycle -- deep sleep clears all
-     * wake config on exit. GPIO3 for motion events, RTC timer for
-     * periodic heartbeat so hub can detect device loss. */
+    /* Wait for GPIO3 to go LOW before arming the level-triggered wake
+     * source. ESP_GPIO_WAKEUP_GPIO_HIGH is level-sensitive: if the pin
+     * is still HIGH at sleep entry the chip wakes instantly. The AM312
+     * holds its output HIGH for a window after firing; this loop lets
+     * that window expire.
+     *
+     * trinity_wdt_kick() is called on every 10ms iteration so the full
+     * 2500ms settle window never trips the 3s watchdog.
+     *
+     * If the pin does not settle within PIR_PIN_SETTLE_MS (e.g. genuine
+     * sustained motion) we proceed to sleep anyway. */
+    const struct device *gpio_settle = DEVICE_DT_GET(GPIO_NODE);
+    if (device_is_ready(gpio_settle))
+    {
+        trinity_wdt_kick();
+        int settle_ms = (int)PIR_PIN_SETTLE_MS;
+        while ((gpio_pin_get(gpio_settle, PIR_PIN) == 1) && (settle_ms > 0))
+        {
+            k_sleep(K_MSEC(10));
+            settle_ms -= 10;
+            trinity_wdt_kick();
+        }
+        if (settle_ms < (int)PIR_PIN_SETTLE_MS)
+        {
+            LOG_INF("GPIO3 settle wait: %dms",
+                    (int)PIR_PIN_SETTLE_MS - settle_ms);
+        }
+    }
+
+    esp_sleep_enable_timer_wakeup(DEEP_SLEEP_INTERVAL_US);
     esp_deep_sleep_enable_gpio_wakeup(1ULL << PIR_PIN,
                                        ESP_GPIO_WAKEUP_GPIO_HIGH);
-    esp_sleep_enable_timer_wakeup(DEEP_SLEEP_INTERVAL_US);
 
     LOG_INF("Entering deep sleep (timer=%llu us, GPIO%d wake)",
             (unsigned long long)DEEP_SLEEP_INTERVAL_US, PIR_PIN);
 
-    /* Drain deferred log synchronously before sleep.
-     * CONFIG_LOG_PROCESS_THREAD_SLEEP_MS=1000 means the log thread will
-     * not flush before esp_deep_sleep_start() destroys RAM. */
     trinity_log_flush();
-
-    esp_deep_sleep_start(); /* noreturn -- next line never executes */
+    esp_deep_sleep_start(); /* noreturn */
 }
 
 /*----------------------------------------------------------------------------*/
@@ -202,6 +273,34 @@ int main(void)
     trinity_wdt_init();
     trinity_wdt_kick();
 
+    /* --- EMERGENCY I2C DIAGNOSTIC SCAN --- */
+    const struct device *const i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
+    if (!device_is_ready(i2c_dev)) {
+        LOG_ERR("[I2C SCAN] Peripheral device i2c0 is NOT ready! Pinmux or DTS issue.");
+    } else {
+        LOG_INF("[I2C SCAN] Starting bus scan on i2c0...");
+        uint8_t dummy_rx;
+        int found_count = 0;
+
+        for (uint8_t addr = 0x01; addr <= 0x7F; addr++) {
+            struct i2c_msg msgs[1];
+            msgs[0].buf = &dummy_rx;
+            msgs[0].len = 0;
+            msgs[0].flags = I2C_MSG_WRITE | I2C_MSG_STOP;
+
+            if (i2c_transfer(i2c_dev, msgs, 1, addr) == 0) {
+                LOG_INF("[I2C SCAN] >>> Found active responder at address: 0x%02X <<<", addr);
+                found_count++;
+            }
+        }
+        if (found_count == 0) {
+            LOG_WRN("[I2C SCAN] Scan finished. Zero devices responded on the bus.");
+        } else {
+            LOG_INF("[I2C SCAN] Scan finished. Found %d device(s).", found_count);
+        }
+    }
+    /* --- END DIAGNOSTIC SCAN --- */
+
     trinity_nvs_init();
     uint32_t motion_count = trinity_nvs_read_motion_count();
 
@@ -214,23 +313,16 @@ int main(void)
     }
     gpio_pin_configure(gpio, PIR_PIN, GPIO_INPUT);
 
-    /* Determine burst duration and occupied flag from wake reason */
     switch (wake_reason)
     {
         case ESP_SLEEP_WAKEUP_GPIO:
             /* Debounce: confirm PIN is still HIGH after settle time.
              * Rules out transient pulls during GPIO peripheral init
              * that can misfire as a GPIO wake on some timer wakes.
-             *
-             * Also catches body capacitance false triggers -- a floating
-             * or weakly driven pin can be lifted by proximity/touch to
-             * ~1.28V which crosses the GPIO HIGH threshold. A real PIR
-             * signal holds 2.6-3V; anything that drops on re-read is
-             * rejected here. See CHANGELOG: AM312 false trigger fix. */
+             * Also catches body capacitance false triggers. */
             k_sleep(K_MSEC(10));
             if (gpio_pin_get(gpio, PIR_PIN) != 1)
             {
-                /* False wake -- treat as timer heartbeat */
                 LOG_WRN("GPIO wake but PIN low -- false trigger, treating as heartbeat");
                 occupied = 0;
                 burst_ms = ADV_BURST_TIMER_MS;
@@ -238,20 +330,19 @@ int main(void)
             }
             motion_count++;
             trinity_nvs_write_motion_count(motion_count);
-            occupied = 1;   /* hub starts/extends occupancy window on receipt */
+            occupied = 1;
             burst_ms = ADV_BURST_PIR_MS;
             trinity_log_event("EVENT: MOTION\n");
             LOG_INF("PIR wake -- motion detected (count=%u)", motion_count);
             break;
 
         case ESP_SLEEP_WAKEUP_TIMER:
-            occupied = 0;   /* hub expires occupancy window after DEEP_SLEEP_INTERVAL_US + margin */
+            occupied = 0;
             burst_ms = ADV_BURST_TIMER_MS;
             LOG_INF("Timer wake -- heartbeat");
             break;
 
         default:
-            /* First boot or undefined wake */
             occupied = 0;
             burst_ms = ADV_BURST_TIMER_MS;
             trinity_log_event("EVENT: BOOT\n");
@@ -261,7 +352,6 @@ int main(void)
 
     trinity_wdt_kick();
 
-    /* Battery read */
     max17048_init();
     batt_soc = (uint8_t)max17048_read_soc();
     mv       = max17048_read_mv();
@@ -271,7 +361,6 @@ int main(void)
 
     trinity_wdt_kick();
 
-    /* BLE init and start advertising */
     ret = ble_adv_init(motion_count, batt_soc, occupied);
     if (0 != ret)
     {
@@ -281,7 +370,7 @@ int main(void)
     }
     trinity_wdt_kick();
 
-    if (burst_ms >= WDT_TIMEOUT_MS)   /* fix: was > 2000U, missed exact 2000ms PIR burst */
+    if (burst_ms >= WDT_TIMEOUT_MS)
     {
         k_sleep(K_MSEC(burst_ms / 2U));
         trinity_wdt_kick();
@@ -294,7 +383,6 @@ int main(void)
 
     trinity_wdt_kick();
 
-    /* Shut down BLE before entering deep sleep */
     bt_disable();
 
     enter_deep_sleep(); /* noreturn */

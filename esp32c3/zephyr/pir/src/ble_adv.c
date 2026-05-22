@@ -59,9 +59,18 @@ static struct bt_data adv_data[] = {
     BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, sizeof(mfg_data))
 };
 
+/* BT_LE_ADV_OPT_USE_IDENTITY fix (2026-05-20):
+ * BT_LE_ADV_OPT_NONE allowed Zephyr to advertise with a randomly generated
+ * address on each wake cycle regardless of CONFIG_BT_PRIVACY=n. The ESP32
+ * hub matches PIR slots by MAC -- a rotating MAC caused the hub to treat
+ * each wake as a new device, fill the PIR slot table (MAX_PIRS=2), and drop
+ * all subsequent advertisements until the old slot aged out (~170s).
+ * BT_LE_ADV_OPT_USE_IDENTITY forces the chip to use its static identity
+ * address (set once at provisioning) for every advertisement. Matches the
+ * pattern used by reed-sensor/src/ble_adv.c. */
 static const struct bt_le_adv_param adv_param = {
     .id           = BT_ID_DEFAULT,
-    .options      = BT_LE_ADV_OPT_NONE,
+    .options      = BT_LE_ADV_OPT_USE_IDENTITY,
     .interval_min = BT_GAP_ADV_SLOW_INT_MIN,
     .interval_max = BT_GAP_ADV_SLOW_INT_MAX,
 };
