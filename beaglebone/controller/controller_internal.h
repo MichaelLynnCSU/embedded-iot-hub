@@ -11,7 +11,8 @@
  *
  * \warning SensorData struct layout must match sensor_server.c exactly —
  *          both sides of the named pipe use this as the wire format.
- *          ReedSlotData is packed for stable pipe wire format.
+ *          ReedSlotData and PirSlotData are packed for stable pipe wire
+ *          format.
  *
  * \note    Logging fixes (2026-04-29):
  *          - localtime() replaced with localtime_r() — not thread-safe.
@@ -26,6 +27,12 @@
  *          uart_sync_lock_state() added — called by process_sensor_frame()
  *          on every TCP frame so g_lock_state tracks the authoritative lock
  *          state regardless of whether the last command came via BLE or STM32.
+ *
+ * \note    PIR slot array (2026-05-XX):
+ *          PirSlotData struct and pir_slots[MAX_PIRS] added to SensorData
+ *          and LatestData to support dynamic multi-PIR slot tracking,
+ *          mirroring the ReedSlotData pattern. Must match sensor_types.h
+ *          in the server exactly.
  ******************************************************************************/
 
 #ifndef INCLUDE_CONTROLLER_INTERNAL_H_
@@ -61,6 +68,7 @@
 /** \brief Sizing constants */
 #define MAX_ROOMS       10   /**< maximum room sensors in SensorData */
 #define MAX_REEDS       6    /**< must match ESP32 tcp_manager.c and ble_scan.c */
+#define MAX_PIRS        2    /**< must match ESP32 tcp_manager.c and sensor_types.h */
 #define UART_LINE_LEN   64   /**< UART line buffer size bytes */
 
 /** \brief Room name field sizes */
@@ -165,6 +173,10 @@ typedef enum
 
 /************************ STRUCTURE/UNION DATA TYPES **************************/
 
+/**
+ * \brief Reed sensor slot — packed wire format.
+ * \warning Must match sensor_types.h ReedSlotData exactly.
+ */
 struct __attribute__((packed)) ReedSlotData
 {
    uint16_t age;
@@ -176,6 +188,24 @@ struct __attribute__((packed)) ReedSlotData
    char     name[REED_NAME_SIZE];
 };
 
+/**
+ * \brief PIR sensor slot — packed wire format.
+ * \warning Must match sensor_types.h PirSlotData exactly.
+ */
+struct __attribute__((packed)) PirSlotData
+{
+   uint32_t count;    /*!< cumulative motion event count   */
+   uint16_t age;      /*!< seconds since last adv          */
+   int8_t   batt;     /*!< battery SOC percent, -1=unknown */
+   uint8_t  active;   /*!< 1=slot occupied                 */
+   int8_t   occupied; /*!< sliding-window occupancy flag   */
+   uint8_t  offline;  /*!< age > PIR_OFFLINE_S             */
+};
+
+/**
+ * \brief Sensor data pipe wire format.
+ * \warning Must match sensor_types.h SensorData exactly.
+ */
 struct SensorData
 {
    double   avg_temp;
@@ -202,9 +232,15 @@ struct SensorData
    int      batt_motor;
 
    struct ReedSlotData reed_slots[MAX_REEDS];
-   uint8_t  motor_online;
+   uint8_t             motor_online;
+
+   struct PirSlotData  pir_slots[MAX_PIRS]; /*!< dynamic PIR slot array */
+   uint8_t             pir_count;           /*!< number of active PIR slots */
 };
 
+/**
+ * \brief Latest sensor snapshot — updated by process_sensor_frame().
+ */
 struct LatestData
 {
    double   avg_temp;
@@ -221,7 +257,10 @@ struct LatestData
    int8_t   batt_lck;
    int      batt_motor;
    struct ReedSlotData reed_slots[MAX_REEDS];
-   uint8_t  motor_online;
+   uint8_t             motor_online;
+
+   struct PirSlotData  pir_slots[MAX_PIRS]; /*!< dynamic PIR slot array */
+   uint8_t             pir_count;           /*!< number of active PIR slots */
 };
 
 /*************************** SHARED GLOBALS ***********************************/

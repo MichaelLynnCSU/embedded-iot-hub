@@ -21,11 +21,14 @@
  *          Push protocol (outbound to STM32):
  *          STATE:tmp,pir,lgt,lck,age_pir,age_lgt,age_lck,reed_count\n
  *          PIR:count[,batt]\n
+ *          PIR_COUNT:n\n
+ *          PIR<n>:count,batt,age\n  (one per active PIR slot)
+ *          OCC<n>:occupied\n        (one per active PIR slot)
  *          REED_COUNT:n\n
- *          DR<n>:state,batt,age\n  (one per active reed slot)
+ *          DR<n>:state,batt,age\n   (one per active reed slot)
  *          LGT:state\n
  *          LCK:state[,batt]\n
- *          MTR:online\n
+ *          MTR:online[,batt]\n
  *
  *          Lock state machine (LOCK_STATE_E from controller_logic.h):
  *          Inbound LCK frames drive logic_lock_transition(). Commands
@@ -35,6 +38,18 @@
  *          Adding ReedSensor3..N requires zero code changes here —
  *          ESP32 auto-discovers, reed_count increments in JSON,
  *          STM32 receives REED_COUNT:n and calls UI_Reflow(n).
+ *
+ * \note    PIR slot push (2026-05-XX):
+ *          snapshot_pir_slots() added — mirrors snapshot_reed_slots().
+ *          build_and_push() extended with PIR_COUNT:n and PIR<n>:count,batt,age
+ *          lines so STM32 UI can render per-sensor PIR tiles.
+ *
+ * \note    Per-slot OCC frames (2026-05-20):
+ *          Single OCC:n global frame replaced by OCC<n>:n per-slot frames.
+ *          snapshot_pir_slots() gains p_occ[] array from
+ *          latest_data.pir_slots[i].occupied. build_and_push() emits
+ *          OCC1:n..OCC<pir_count>:n after the PIR<n> lines.
+ *          STM32 parser.c handles OCC<1-4> mirroring PIR<1-4> pattern.
  ******************************************************************************/
 
 #include <termios.h>
@@ -57,17 +72,11 @@ static LOCK_STATE_E g_lock_state = LOCK_STATE_LOCKED;
 
 /******************************************************************************
  * \brief Open UART device at 115200 8N1.
- *
- * \param p_dev - Null-terminated device path string.
- *
- * \return int - File descriptor on success, -1 on failure.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static int uart_open(const char *p_dev)
 {
-   int            fd  = -1;  /**< file descriptor */
-   struct termios tty;       /**< terminal settings */
+   int            fd  = -1;
+   struct termios tty;
 
    fd = open(p_dev, O_RDWR | O_NOCTTY | O_SYNC);
    if (0 > fd)
@@ -113,25 +122,12 @@ static int uart_open(const char *p_dev)
 
 /******************************************************************************
  * \brief Process an inbound LCK frame through the lock state machine.
- *
- * \param val  - Lock value from STM32 (0=locked, 1=unlocked).
- * \param batt - Battery SOC percent, -1 if absent.
- *
- * \return void
- *
- * \details Runs logic_lock_transition() to validate the command.
- *          If state changes, logs transition to device_events and
- *          updates latest_data.lock_state. Rejects commands while
- *          motor is moving (UNLOCKING or LOCKING states).
- *          Must NOT be called with data_mutex held.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void uart_process_lock(int val, int batt)
 {
-   LOCK_STATE_E    old_state = LOCK_STATE_LOCKED; /**< previous state */
-   LOCK_STATE_E    new_state = LOCK_STATE_LOCKED; /**< new state */
-   const char     *p_ev      = NULL;              /**< event string */
+   LOCK_STATE_E    old_state = LOCK_STATE_LOCKED;
+   LOCK_STATE_E    new_state = LOCK_STATE_LOCKED;
+   const char     *p_ev      = NULL;
 
    pthread_mutex_lock(&data_mutex);
 
@@ -170,30 +166,18 @@ static void uart_process_lock(int val, int batt)
 
 /******************************************************************************
  * \brief Parse and process one inbound UART frame from STM32.
- *
- * \param p_line - Null-terminated frame string without newline.
- *
- * \return void
- *
- * \details Frame format: <ID>:<value>[,<batt>]
- *          Valid IDs: PIR, LGT, LCK
- *          Stamps heartbeat, saves to DB, updates latest_data.
- *          LCK frames are routed through uart_process_lock() for
- *          state machine validation before updating latest_data.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void uart_parse_line(const char *p_line)
 {
-   char        buf[UART_LINE_LEN] = {0}; /**< local copy of line */
-   char       *p_colon  = NULL;          /**< pointer to colon separator */
-   char       *p_rest   = NULL;          /**< pointer to value portion */
-   char       *p_comma  = NULL;          /**< pointer to comma separator */
-   const char *p_id     = NULL;          /**< device ID string */
-   int         val      = 0;             /**< parsed sensor value */
-   int         batt     = -1;            /**< parsed battery SOC, -1=absent */
-   DEV_ID_E    idx      = (DEV_ID_E)-1; /**< device index */
-   struct CommandMsg auto_cmd = {.cmd = CMD_GET_LATEST}; /**< auto command */
+   char        buf[UART_LINE_LEN] = {0};
+   char       *p_colon  = NULL;
+   char       *p_rest   = NULL;
+   char       *p_comma  = NULL;
+   const char *p_id     = NULL;
+   int         val      = 0;
+   int         batt     = -1;
+   DEV_ID_E    idx      = (DEV_ID_E)-1;
+   struct CommandMsg auto_cmd = {.cmd = CMD_GET_LATEST};
 
    (void)strncpy(buf, p_line, sizeof(buf) - 1);
 
@@ -241,7 +225,6 @@ static void uart_parse_line(const char *p_line)
 
    if (DEV_LOCK == idx)
    {
-      /* LCK — route through state machine, updates latest_data internally */
       uart_process_lock(val, batt);
    }
    else
@@ -266,23 +249,13 @@ static void uart_parse_line(const char *p_line)
 
 /******************************************************************************
  * \brief Thread — reads line-framed UART data from STM32.
- *
- * \param p_arg - Unused thread argument.
- *
- * \return void* - Always returns NULL.
- *
- * \details Opens UART device, reads bytes into a line buffer, and calls
- *          uart_parse_line() on each complete line. Reopens UART on
- *          read error. Runs until running flag is cleared.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void *uart_reader_thread(void *p_arg)
 {
-   char    line[UART_LINE_LEN] = {0}; /**< line accumulation buffer */
-   int     pos                 = 0;   /**< current line buffer position */
-   char    c                   = 0;   /**< received byte */
-   ssize_t n                   = 0;   /**< bytes read */
+   char    line[UART_LINE_LEN] = {0};
+   int     pos                 = 0;
+   char    c                   = 0;
+   ssize_t n                   = 0;
 
    (void)p_arg;
 
@@ -310,10 +283,7 @@ void *uart_reader_thread(void *p_arg)
             break;
          }
 
-         if (0 == n)
-         {
-            continue;
-         }
+         if (0 == n) { continue; }
 
          if (('\n' == c) || ('\r' == c))
          {
@@ -349,20 +319,10 @@ void *uart_reader_thread(void *p_arg)
 
 /******************************************************************************
  * \brief Write a message to UART with mutex protection.
- *
- * \param p_msg - Pointer to message buffer.
- * \param len   - Number of bytes to write.
- *
- * \return void
- *
- * \details Acquires g_uart_write_mutex, writes, releases mutex, then
- *          sleeps UART_PUSH_DELAY_US to allow STM32 to process.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void uart_push_msg(const char *p_msg, int len)
 {
-   ssize_t w = 0; /**< bytes written */
+   ssize_t w = 0;
 
    pthread_mutex_lock(&g_uart_write_mutex);
    w = write(g_uart_fd, p_msg, len);
@@ -382,22 +342,13 @@ static void uart_push_msg(const char *p_msg, int len)
 
 /******************************************************************************
  * \brief Snapshot reed slot state from latest_data under data_mutex.
- *
- * \param p_r_state    - Output array of reed states, size MAX_REEDS.
- * \param p_r_batt     - Output array of reed batteries, size MAX_REEDS.
- * \param p_r_age      - Output array of reed ages, size MAX_REEDS.
- * \param p_reed_count - Output for highest active reed slot index + 1.
- *
- * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void snapshot_reed_slots(uint8_t  *p_r_state,
                                  int8_t   *p_r_batt,
                                  uint16_t *p_r_age,
                                  int      *p_reed_count)
 {
-   int i = 0; /**< loop index */
+   int i = 0;
 
    pthread_mutex_lock(&data_mutex);
 
@@ -421,48 +372,81 @@ static void snapshot_reed_slots(uint8_t  *p_r_state,
 }
 
 /******************************************************************************
+ * \brief Snapshot PIR slot state from latest_data under data_mutex.
+ *
+ * \param p_count     - Output array of motion counts, size MAX_PIRS.
+ * \param p_batt      - Output array of battery SOC, size MAX_PIRS.
+ * \param p_age       - Output array of ages in seconds, size MAX_PIRS.
+ * \param p_active    - Output array of active flags, size MAX_PIRS.
+ * \param p_occ       - Output array of per-slot occupied flags, size MAX_PIRS.
+ * \param p_pir_count - Output for number of active PIR slots.
+ *
+ * \note  Per-slot OCC (2026-05-20): p_occ[] added, populated from
+ *        latest_data.pir_slots[i].occupied set by data_controller.c
+ *        when it processes the ESP32 JSON pirs[].occupied field.
+ ******************************************************************************/
+static void snapshot_pir_slots(uint32_t *p_count,
+                                int8_t   *p_batt,
+                                uint16_t *p_age,
+                                uint8_t  *p_active,
+                                int      *p_occ,
+                                int      *p_pir_count)
+{
+   int i = 0;
+
+   pthread_mutex_lock(&data_mutex);
+
+   *p_pir_count = 0;
+
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      p_count[i]  = latest_data.pir_slots[i].count;
+      p_batt[i]   = latest_data.pir_slots[i].batt;
+      p_age[i]    = latest_data.pir_slots[i].age;
+      p_active[i] = latest_data.pir_slots[i].active;
+      p_occ[i]    = latest_data.pir_slots[i].occupied;
+
+      if (latest_data.pir_slots[i].active)
+      {
+         *p_pir_count = i + 1;
+      }
+   }
+
+   pthread_mutex_unlock(&data_mutex);
+}
+
+/******************************************************************************
  * \brief Build UART push payload and send to STM32.
  *
- * \param temp         - Current average temperature.
- * \param motion       - Current motion count.
- * \param lgt          - Current light state.
- * \param lck          - Current lock state.
- * \param age_pir      - PIR device age in seconds.
- * \param age_lgt      - Light device age in seconds.
- * \param age_lck      - Lock device age in seconds.
- * \param batt_pir     - PIR battery SOC percent.
- * \param batt_lck     - Lock battery SOC percent.
- * \param batt_motor   - Motor battery SOC percent.
- * \param reed_count   - Number of active reed slots.
- * \param motor_online - Motor controller online flag (0=offline, 1=online).
- * \param occupied     - PIR Sliding window
- * \param p_r_state    - Reed state array, size MAX_REEDS.
- * \param p_r_batt     - Reed battery array, size MAX_REEDS.
- * \param p_r_age      - Reed age array, size MAX_REEDS.
- *
- * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ * \note  Per-slot OCC (2026-05-20): p_pocc[] added. Single OCC:n global
+ *        frame replaced by OCC<n>:n per-slot frames emitted after PIR<n>
+ *        lines. STM32 parser handles OCC<1-4> identically to PIR<1-4>.
  ******************************************************************************/
 static void build_and_push(double temp, int motion, int lgt, int lck,
                             uint16_t age_pir, uint16_t age_lgt,
                             uint16_t age_lck, int8_t batt_pir,
-                            int8_t batt_lck, int8_t batt_motor,
+                            int8_t batt_lck, int batt_motor,
                             int reed_count, int motor_online,
-                            int occupied,
                             const uint8_t  *p_r_state,
                             const int8_t   *p_r_batt,
-                            const uint16_t *p_r_age)
+                            const uint16_t *p_r_age,
+                            int             pir_count,
+                            const uint32_t *p_pc,
+                            const int8_t   *p_pb,
+                            const uint16_t *p_pa,
+                            const uint8_t  *p_pactive,
+                            const int      *p_pocc)
 {
-   char msg[UART_MSG_BUF_SIZE] = {0}; /**< outbound message buffer */
-   int  pos                    = 0;   /**< current buffer position */
-   int  i                      = 0;   /**< loop index */
+   char msg[UART_MSG_BUF_SIZE] = {0};
+   int  pos                    = 0;
+   int  i                      = 0;
 
    pos += snprintf(msg + pos, sizeof(msg) - pos,
                    "STATE:%d,%d,%d,%d,%d,%d,%d,%d\n",
                    (int)temp, motion, lgt, lck,
                    age_pir, age_lgt, age_lck, reed_count);
 
+   /* Legacy flat PIR line — preserved for STM32 backward compatibility */
    if (0 <= batt_pir)
    {
       pos += snprintf(msg + pos, sizeof(msg) - pos,
@@ -474,18 +458,34 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                       "PIR:%d\n", motion);
    }
 
+   /* Per-slot PIR lines — mirrors reed DR<n> pattern */
    pos += snprintf(msg + pos, sizeof(msg) - pos,
-                   "OCC:%d\n", occupied);
+                   "PIR_COUNT:%d\n", pir_count);
+
+   for (i = 0; i < pir_count; i++)
+   {
+      if (!p_pactive[i]) { continue; }
+
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "PIR%d:%u,%d,%d\n",
+                      i + 1, (unsigned)p_pc[i], p_pb[i], p_pa[i]);
+   }
+
+   /* Per-slot OCC frames (2026-05-20) — replaces single OCC:n */
+   for (i = 0; i < pir_count; i++)
+   {
+      if (!p_pactive[i]) { continue; }
+
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "OCC%d:%d\n", i + 1, p_pocc[i]);
+   }
 
    pos += snprintf(msg + pos, sizeof(msg) - pos,
                    "REED_COUNT:%d\n", reed_count);
 
    for (i = 0; i < reed_count; i++)
    {
-      if (UART_STATE_UNKNOWN == p_r_state[i])
-      {
-         continue;
-      }
+      if (UART_STATE_UNKNOWN == p_r_state[i]) { continue; }
 
       pos += snprintf(msg + pos, sizeof(msg) - pos,
                       "DR%d:%d,%d,%d\n",
@@ -501,8 +501,7 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
    }
    else
    {
-      pos += snprintf(msg + pos, sizeof(msg) - pos,
-                      "LCK:%d\n", lck);
+      pos += snprintf(msg + pos, sizeof(msg) - pos, "LCK:%d\n", lck);
    }
 
    if (batt_motor > 0)
@@ -521,36 +520,33 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
 
 /******************************************************************************
  * \brief Thread — sends sensor state to STM32 every UART_PUSH_INTERVAL_SEC.
- *
- * \param p_arg - Unused thread argument.
- *
- * \return void* - Always returns NULL.
- *
- * \details Snapshots shared memory and latest_data, builds push payload,
- *          and sends via uart_push_msg(). Skips if no valid data or
- *          UART not open. Runs until running flag is cleared.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void *uart_push_thread(void *p_arg)
 {
-   int      valid        = 0;    /**< shm data valid flag */
-   double   temp         = 0.0;  /**< current temperature */
-   int      motion       = 0;    /**< current motion count */
-   int      lgt          = 0;    /**< current light state */
-   int      lck          = 0;    /**< current lock state */
-   uint16_t age_pir      = 0;    /**< PIR age seconds */
-   uint16_t age_lgt      = 0;    /**< light age seconds */
-   uint16_t age_lck      = 0;    /**< lock age seconds */
-   int8_t   batt_pir     = -1;   /**< PIR battery SOC */
-   int8_t   batt_lck     = -1;   /**< lock battery SOC */
-   int      batt_motor   = -1;   /**< motor battery SOC */
-   int      motor_online = 0;    /**< motor controller online flag */
-   int      reed_count   = 0;    /**< active reed slot count */
-   int      occupied     = 0;
-   uint8_t  r_state[MAX_REEDS];  /**< reed state snapshot */
-   int8_t   r_batt[MAX_REEDS];   /**< reed battery snapshot */
-   uint16_t r_age[MAX_REEDS];    /**< reed age snapshot */
+   int      valid        = 0;
+   double   temp         = 0.0;
+   int      motion       = 0;
+   int      lgt          = 0;
+   int      lck          = 0;
+   uint16_t age_pir      = 0;
+   uint16_t age_lgt      = 0;
+   uint16_t age_lck      = 0;
+   int8_t   batt_pir     = -1;
+   int8_t   batt_lck     = -1;
+   int      batt_motor   = -1;
+   int      motor_online = 0;
+   int      reed_count   = 0;
+   int      pir_count    = 0;
+
+   uint8_t  r_state[MAX_REEDS];
+   int8_t   r_batt[MAX_REEDS];
+   uint16_t r_age[MAX_REEDS];
+
+   uint32_t p_count[MAX_PIRS];  /**< PIR motion count snapshot  */
+   int8_t   p_batt[MAX_PIRS];   /**< PIR battery snapshot       */
+   uint16_t p_age[MAX_PIRS];    /**< PIR age snapshot           */
+   uint8_t  p_active[MAX_PIRS]; /**< PIR active flags snapshot  */
+   int      p_occ[MAX_PIRS];    /**< PIR per-slot occupied flags — 2026-05-20 */
 
    (void)p_arg;
 
@@ -560,12 +556,8 @@ void *uart_push_thread(void *p_arg)
    {
       sleep(UART_PUSH_INTERVAL_SEC);
 
-      if (0 > g_uart_fd)
-      {
-         continue;
-      }
+      if (0 > g_uart_fd) { continue; }
 
-      /* Block scoped to limit ts lifetime -- remove braces if C99 or later */
       {
          struct timespec ts;
          clock_gettime(CLOCK_REALTIME, &ts);
@@ -577,6 +569,7 @@ void *uart_push_thread(void *p_arg)
             continue;
          }
       }
+
       valid  = shm_data->data_valid;
       temp   = shm_data->current_temp;
       motion = shm_data->current_motion;
@@ -598,23 +591,37 @@ void *uart_push_thread(void *p_arg)
       batt_lck     = latest_data.batt_lck;
       motor_online = latest_data.motor_online;
       batt_motor   = latest_data.batt_motor;
-      occupied     = latest_data.pir_occupied;
       pthread_mutex_unlock(&data_mutex);
 
       reed_count = 0;
       snapshot_reed_slots(r_state, r_batt, r_age, &reed_count);
 
-      LOG("[PUSH] ages pir=%u lgt=%u lck=%u | batt pir=%d%% lck=%d%% mtr=%d%% | reeds=%d motor=%d occ=%d",
+      pir_count = 0;
+      snapshot_pir_slots(p_count, p_batt, p_age, p_active, p_occ, &pir_count);
+
+      LOG("[PUSH] ages pir=%u lgt=%u lck=%u | batt pir=%d%% lck=%d%% mtr=%d%% "
+          "| reeds=%d pirs=%d motor=%d",
           age_pir, age_lgt, age_lck, batt_pir, batt_lck, batt_motor,
-          reed_count, motor_online, occupied);
+          reed_count, pir_count, motor_online);
 
       build_and_push(temp, motion, lgt, lck,
                      age_pir, age_lgt, age_lck,
                      batt_pir, batt_lck, batt_motor,
-                     reed_count, motor_online, occupied,
-                     r_state, r_batt, r_age);
+                     reed_count, motor_online,
+                     r_state, r_batt, r_age,
+                     pir_count, p_count, p_batt, p_age, p_active, p_occ);
    }
 
    LOG("[PUSH] Push thread exiting");
    return NULL;
+}
+
+/******************************************************************************
+ * \brief Sync TCP lock state into the UART lock state machine.
+ ******************************************************************************/
+void uart_sync_lock_state(int state)
+{
+   pthread_mutex_lock(&data_mutex);
+   g_lock_state = (LOCK_STATE_E)state;
+   pthread_mutex_unlock(&data_mutex);
 }

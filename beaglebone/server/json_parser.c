@@ -11,6 +11,21 @@
  *
  *          Split from sensor_server.c (2026-05-10).
  *
+ *          PIR slot array added (2026-05-XX):
+ *          parse_pir_slots() mirrors parse_reed_slots(). Populates
+ *          pir_slots[MAX_PIRS] from the "pirs" JSON array sent by
+ *          tcp_manager.c. Legacy flat fields (motion_count, age_pir,
+ *          batt_pir) are preserved unchanged for backward compatibility.
+ *
+ *          Logging improvements (2026-05-21):
+ *          - Raw JSON frame logged at entry to process_json() for
+ *            full frame visibility and key-name verification.
+ *          - Per-slot PIR and Reed summary logged after pipe write,
+ *            matching ESP32 drain_queues format: slot, count/state,
+ *            batt, age, offline, occ.
+ *          - process_json() summary line extended with motor_online
+ *            and pir_occ.
+ *
  *          Dependency direction:
  *            json_parser.c -> pipe_writer.c -> named pipe -> controller
  ******************************************************************************/
@@ -34,13 +49,11 @@
  *
  * \return uint16_t - Age in seconds, AGE_UNKNOWN if missing or negative,
  *                    clamped to AGE_MAX if too large.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static uint16_t json_get_age(struct json_object *p_root, const char *p_key)
 {
-   struct json_object *p_obj = NULL; /**< extracted JSON object */
-   int                 v     = 0;    /**< integer value */
+   struct json_object *p_obj = NULL;
+   int                 v     = 0;
 
    if (!json_object_object_get_ex(p_root, p_key, &p_obj))
    {
@@ -49,15 +62,8 @@ static uint16_t json_get_age(struct json_object *p_root, const char *p_key)
 
    v = json_object_get_int(p_obj);
 
-   if (0 > v)
-   {
-      return AGE_UNKNOWN;
-   }
-
-   if (v > (int)AGE_MAX)
-   {
-      return (uint16_t)AGE_MAX;
-   }
+   if (0 > v)            { return AGE_UNKNOWN; }
+   if (v > (int)AGE_MAX) { return (uint16_t)AGE_MAX; }
 
    return (uint16_t)v;
 }
@@ -67,22 +73,18 @@ static uint16_t json_get_age(struct json_object *p_root, const char *p_key)
  *
  * \param p_reeds_arr - JSON array object for "reeds" key.
  * \param p_data      - Pointer to SensorData to populate.
- *
- * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void parse_reed_slots(struct json_object *p_reeds_arr,
                               struct SensorData  *p_data)
 {
-   int                 n      = 0;    /**< array length */
-   int                 i      = 0;    /**< loop index */
-   int                 id     = 0;    /**< reed slot id */
-   int                 slot   = 0;    /**< slot index */
-   int                 age    = 0;    /**< raw age value */
-   struct json_object *p_r    = NULL; /**< single reed entry */
-   struct json_object *p_jid  = NULL; /**< id field */
-   struct json_object *p_jval = NULL; /**< generic value field */
+   int                 n      = 0;
+   int                 i      = 0;
+   int                 id     = 0;
+   int                 slot   = 0;
+   int                 age    = 0;
+   struct json_object *p_r    = NULL;
+   struct json_object *p_jid  = NULL;
+   struct json_object *p_jval = NULL;
 
    n = json_object_array_length(p_reeds_arr);
 
@@ -142,17 +144,82 @@ static void parse_reed_slots(struct json_object *p_reeds_arr,
                        json_object_get_string(p_jval),
                        REED_NAME_LEN - 1);
       }
+   }
+}
 
-      log_msg("  Reed slot %d (%s): state=%s batt=%d%% age=%d "
-              "offline=%d gen=%u",
-              slot + 1,
-              p_data->reed_slots[slot].name,
-              (1 == p_data->reed_slots[slot].state) ? "open"  :
-              (0 == p_data->reed_slots[slot].state) ? "closed": "unknown",
-              p_data->reed_slots[slot].batt,
-              p_data->reed_slots[slot].age,
-              p_data->reed_slots[slot].offline,
-              p_data->reed_slots[slot].gen);
+/******************************************************************************
+ * \brief Parse PIR slots from JSON pirs array into SensorData.
+ *
+ * \param p_pirs_arr - JSON array object for "pirs" key.
+ * \param p_data     - Pointer to SensorData to populate.
+ *
+ * \details Mirrors parse_reed_slots(). Each entry has id (1-based),
+ *          count, batt, age, occupied, offline. Populates
+ *          pir_slots[slot] where slot = id-1.
+ ******************************************************************************/
+static void parse_pir_slots(struct json_object *p_pirs_arr,
+                             struct SensorData  *p_data)
+{
+   int                 n      = 0;
+   int                 i      = 0;
+   int                 id     = 0;
+   int                 slot   = 0;
+   int                 age    = 0;
+   struct json_object *p_r    = NULL;
+   struct json_object *p_jid  = NULL;
+   struct json_object *p_jval = NULL;
+
+   n = json_object_array_length(p_pirs_arr);
+
+   for (i = 0; i < n; i++)
+   {
+      p_r = json_object_array_get_idx(p_pirs_arr, i);
+
+      if (!json_object_object_get_ex(p_r, "id", &p_jid))
+      {
+         continue;
+      }
+
+      id   = json_object_get_int(p_jid);
+      slot = id - 1;
+
+      if ((0 > slot) || (slot >= MAX_PIRS))
+      {
+         continue;
+      }
+
+      p_data->pir_slots[slot].active = 1;
+
+      if (json_object_object_get_ex(p_r, "count", &p_jval))
+      {
+         p_data->pir_slots[slot].count =
+            (uint32_t)json_object_get_int(p_jval);
+      }
+
+      if (json_object_object_get_ex(p_r, "batt", &p_jval))
+      {
+         p_data->pir_slots[slot].batt =
+            (int8_t)json_object_get_int(p_jval);
+      }
+
+      if (json_object_object_get_ex(p_r, "age", &p_jval))
+      {
+         age = json_object_get_int(p_jval);
+         p_data->pir_slots[slot].age =
+            (0 > age) ? AGE_UNKNOWN : (uint16_t)age;
+      }
+
+      if (json_object_object_get_ex(p_r, "occupied", &p_jval))
+      {
+         p_data->pir_slots[slot].occupied =
+            (int8_t)json_object_get_int(p_jval);
+      }
+
+      if (json_object_object_get_ex(p_r, "offline", &p_jval))
+      {
+         p_data->pir_slots[slot].offline =
+            (uint8_t)json_object_get_int(p_jval);
+      }
    }
 }
 
@@ -161,18 +228,14 @@ static void parse_reed_slots(struct json_object *p_reeds_arr,
  *
  * \param p_rooms_arr - JSON array object for "rooms" key.
  * \param p_data      - Pointer to SensorData to populate.
- *
- * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void parse_rooms(struct json_object *p_rooms_arr,
                          struct SensorData  *p_data)
 {
-   int                 n      = 0;    /**< array length */
-   int                 i      = 0;    /**< loop index */
-   struct json_object *p_r    = NULL; /**< single room entry */
-   struct json_object *p_jval = NULL; /**< generic value field */
+   int                 n      = 0;
+   int                 i      = 0;
+   struct json_object *p_r    = NULL;
+   struct json_object *p_jval = NULL;
 
    n = json_object_array_length(p_rooms_arr);
 
@@ -209,12 +272,6 @@ static void parse_rooms(struct json_object *p_rooms_arr,
                        ROOM_LOC_LEN - 1);
       }
 
-      log_msg("  Room id=%d %s/%s = %s",
-              p_data->rooms[p_data->room_count].sensor_id,
-              p_data->rooms[p_data->room_count].room_name,
-              p_data->rooms[p_data->room_count].location,
-              p_data->rooms[p_data->room_count].state);
-
       p_data->room_count++;
    }
 }
@@ -225,17 +282,13 @@ static void parse_rooms(struct json_object *p_rooms_arr,
  * \param p_json_body - Null-terminated JSON string to parse.
  *                      Must point into a stable buffer (g_process[]) --
  *                      never pass a pointer into the active UART buffer.
- *
- * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void process_json(const char *p_json_body)
 {
-   struct json_object *p_root = NULL; /**< parsed JSON root */
-   struct json_object *p_obj  = NULL; /**< generic field object */
-   struct SensorData   data;          /**< output sensor data struct */
-   int                 i      = 0;    /**< loop index */
+   struct json_object *p_root = NULL;
+   struct json_object *p_obj  = NULL;
+   struct SensorData   data;
+   int                 i      = 0;
 
    p_root = json_tokener_parse(p_json_body);
    if (NULL == p_root)
@@ -243,6 +296,9 @@ void process_json(const char *p_json_body)
       log_msg("Invalid JSON");
       return;
    }
+
+   /* Log raw frame — confirms keys and values exactly as received */
+   log_msg("RAW: %s", p_json_body);
 
    (void)memset(&data, 0, sizeof(data));
    data.timestamp  = time(NULL);
@@ -261,6 +317,16 @@ void process_json(const char *p_json_body)
       data.reed_slots[i].state   = 0xFF;
       data.reed_slots[i].offline = 0;
       data.reed_slots[i].gen     = 0;
+   }
+
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      data.pir_slots[i].age     = AGE_UNKNOWN;
+      data.pir_slots[i].batt    = -1;
+      data.pir_slots[i].active  = 0;
+      data.pir_slots[i].count   = 0;
+      data.pir_slots[i].offline = 0;
+      data.pir_slots[i].occupied = 0;
    }
 
    if (json_object_object_get_ex(p_root, "avg_temp", &p_obj))
@@ -305,13 +371,16 @@ void process_json(const char *p_json_body)
    if (json_object_object_get_ex(p_root, "motor_online", &p_obj))
    {
       data.motor_online = (uint8_t)json_object_get_int(p_obj);
-      log_msg("motor_online=%d", data.motor_online);
    }
 
    if (json_object_object_get_ex(p_root, "batt_motor", &p_obj))
    {
       data.batt_motor = json_object_get_int(p_obj);
-      log_msg("batt_motor=%d%%", data.batt_motor);
+   }
+
+   if (json_object_object_get_ex(p_root, "pir_count", &p_obj))
+   {
+      data.pir_count = (uint8_t)json_object_get_int(p_obj);
    }
 
    if (json_object_object_get_ex(p_root, "reeds", &p_obj))
@@ -319,12 +388,10 @@ void process_json(const char *p_json_body)
       parse_reed_slots(p_obj, &data);
    }
 
-   log_msg("Parsed avg_temp=%.2f motion=%d light=%d lock=%d",
-           data.avg_temp, data.motion_count,
-           data.light_state, data.lock_state);
-   log_msg("Ages pir=%d lgt=%d lck=%d | Batt pir=%d%% lck=%d%% | Occupied=%d",
-           data.age_pir, data.age_lgt, data.age_lck,
-           data.batt_pir, data.batt_lck, data.pir_occupied);
+   if (json_object_object_get_ex(p_root, "pirs", &p_obj))
+   {
+      parse_pir_slots(p_obj, &data);
+   }
 
    if (json_object_object_get_ex(p_root, "rooms", &p_obj))
    {
@@ -335,4 +402,58 @@ void process_json(const char *p_json_body)
 
    pipe_ensure_connected();
    pipe_write(&data);
+
+   /* ---- Summary log ---- */
+   log_msg("Parsed avg_temp=%.2f motion=%u light=%d lock=%d "
+           "pirs=%d pir_occ=%d motor_online=%d",
+           data.avg_temp, data.motion_count,
+           data.light_state, data.lock_state,
+           data.pir_count, data.pir_occupied,
+           data.motor_online);
+
+   log_msg("Ages pir=%d lgt=%d lck=%d | Batt pir=%d%% lck=%d%% mtr=%d%%",
+           data.age_pir, data.age_lgt, data.age_lck,
+           data.batt_pir, data.batt_lck, data.batt_motor);
+
+   /* Per-slot PIR — matches ESP32 drain_queues format */
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      if (data.pir_slots[i].active)
+      {
+         log_msg("  PIR slot=%d count=%u batt=%d age=%d offline=%d occ=%d",
+                 i + 1,
+                 data.pir_slots[i].count,
+                 data.pir_slots[i].batt,
+                 data.pir_slots[i].age,
+                 data.pir_slots[i].offline,
+                 data.pir_slots[i].occupied);
+      }
+   }
+
+   /* Per-slot Reed — matches ESP32 drain_queues format */
+   for (i = 0; i < MAX_REEDS; i++)
+   {
+      if (data.reed_slots[i].active)
+      {
+         log_msg("  Reed slot=%d (%s) state=%s batt=%d age=%d offline=%d gen=%u",
+                 i + 1,
+                 data.reed_slots[i].name,
+                 (1 == data.reed_slots[i].state) ? "open"    :
+                 (0 == data.reed_slots[i].state) ? "closed"  : "unknown",
+                 data.reed_slots[i].batt,
+                 data.reed_slots[i].age,
+                 data.reed_slots[i].offline,
+                 data.reed_slots[i].gen);
+      }
+   }
+
+   /* Per-room log */
+   for (i = 0; i < data.room_count; i++)
+   {
+      log_msg("  Room id=%d %s/%s = %s",
+              data.rooms[i].sensor_id,
+              data.rooms[i].room_name,
+              data.rooms[i].location,
+              data.rooms[i].state);
+   }
 }

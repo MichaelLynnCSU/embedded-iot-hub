@@ -368,12 +368,18 @@ static void process_sensor_frame(const struct SensorData *p_data)
    latest_data.motor_online = p_data->motor_online;
 
    process_reed_slots(p_data);
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      latest_data.pir_slots[i] = p_data->pir_slots[i];
+   }
+   latest_data.pir_count = p_data->pir_count;
+
 
    pthread_mutex_unlock(&data_mutex);
 
    LOG("Sensor: temp=%.1f motion=%d occ=%d lgt=%d lck=%d mtr=%d "
        "ages pir=%d lgt=%d lck=%d "
-       "batt pir=%d%% lck=%d%% motor=%d%%",
+       "batt pir=%d%% lck=%d%% motor=%d%% pirs=%d",
        p_data->avg_temp,
        p_data->motion_count,
        p_data->pir_occupied,
@@ -385,7 +391,8 @@ static void process_sensor_frame(const struct SensorData *p_data)
        p_data->age_lck,
        p_data->batt_pir,
        p_data->batt_lck,
-       p_data->batt_motor);
+       p_data->batt_motor,
+       p_data->pir_count);
 
    if (p_data->motor_online)
    {

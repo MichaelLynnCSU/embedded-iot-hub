@@ -21,6 +21,7 @@
 
 #define MAX_ROOMS      10  /**< max room sensors per frame */
 #define MAX_REEDS      6   /**< must match ESP32 and controller */
+#define MAX_PIRS       2   /**< must match ESP32 and controller */
 #define REED_NAME_LEN  16  /**< reed BLE name buffer size */
 #define ROOM_NAME_LEN  32  /**< room name buffer size */
 #define ROOM_STATE_LEN 16  /**< room state buffer size */
@@ -46,6 +47,21 @@ struct __attribute__((packed)) ReedSlotData
 };
 
 /**
+ * \brief PIR sensor slot -- packed wire format.
+ *
+ * \warning Must match controller_internal.h PirSlotData exactly.
+ */
+struct __attribute__((packed)) PirSlotData
+{
+   uint32_t count;    /*!< cumulative motion event count   */
+   uint16_t age;      /*!< seconds since last adv          */
+   int8_t   batt;     /*!< battery SOC percent, -1=unknown */
+   uint8_t  active;   /*!< 1=slot occupied                 */
+   int8_t   occupied; /*!< sliding-window occupancy flag   */
+   uint8_t  offline;  /*!< age > PIR_OFFLINE_S             */
+};
+
+/**
  * \brief Sensor data pipe wire format.
  *
  * \warning Must match controller_internal.h SensorData exactly.
@@ -67,16 +83,19 @@ struct SensorData
       char location[ROOM_LOC_LEN];   /*!< physical location string */
    } rooms[MAX_ROOMS];
 
-   uint16_t age_pir;      /*!< PIR device age seconds */
+   uint16_t age_pir;      /*!< PIR device age seconds (legacy flat) */
    uint16_t age_lgt;      /*!< light device age seconds */
    uint16_t age_lck;      /*!< lock device age seconds */
-   int8_t   batt_pir;     /*!< PIR battery SOC percent */
+   int8_t   batt_pir;     /*!< PIR battery SOC percent (legacy flat) */
    int8_t   pir_occupied; /*!< 1=occupied, 0=empty */
    int8_t   batt_lck;     /*!< lock battery SOC percent */
    int      batt_motor;   /*!< motor battery SOC percent */
 
    struct ReedSlotData reed_slots[MAX_REEDS]; /*!< dynamic reed slot array */
    uint8_t  motor_online; /*!< 1 if C3 motor controller is online */
+
+   struct PirSlotData pir_slots[MAX_PIRS]; /*!< dynamic PIR slot array */
+   uint8_t            pir_count;           /*!< number of active PIR slots */
 };
 
 #endif /* SENSOR_TYPES_H */
