@@ -23,6 +23,7 @@
 /******************************** CONSTANTS ***********************************/
 
 #define MAX_REEDS          6u    /**< Maximum number of reed sensors supported */
+#define MAX_PIRS           4u    /**< Maximum number of per-slot PIR sensors   */
 #define HB_TIMEOUT_MS  30000ul  /**< ms before a device is considered offline  */
 #define TILE_GAP           4u   /**< Pixel gap between adjacent tiles          */
 #define TILE_LEFT_MARGIN   5u   /**< Left edge x-coordinate for left column    */
@@ -38,7 +39,7 @@
 typedef enum
 {
    eDEV_TEMP  = 0, /*!< Temperature / humidity sensor */
-   eDEV_PIR,       /*!< PIR motion sensor             */
+   eDEV_PIR,       /*!< PIR motion sensor (aggregate) */
    eDEV_LIGHT,     /*!< Smart light                   */
    eDEV_LOCK,      /*!< Smart lock                    */
    eDEV_MOTOR,     /*!< Cooling/heating motor          */
@@ -47,138 +48,50 @@ typedef enum
 
 /*************************** FUNCTION PROTOTYPES ******************************/
 
-/**
- * \brief  Initialise LVGL display driver and create all dashboard tiles.
- *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 void ui_create(void);
-
-/**
- * \brief  Refresh all tile labels and status dots from current sensor state.
- *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 void ui_update(void);
-
-/**
- * \brief  Reposition all tiles for a given active reed count.
- *
- * \param  n - Number of active reed sensors (1..MAX_REEDS).
- *
- * \return void
- *
- * \details Hides tiles for unused reed slots; shows and repositions the rest.
- *          Safe to call at any time from the main loop.
- *
- * \author MichaelLynnCSU
- */
 void ui_reflow(int n);
+void ui_reflow_pir(int n);
 
-/**
- * \brief  Return the current active reed count.
- *
- * \param  void
- *
- * \return uint8_t - Number of active reed sensors.
- *
- * \author MichaelLynnCSU
- */
 uint8_t ui_get_reed_count(void);
+void    ui_set_reed_count(uint8_t count);
 
-/**
- * \brief  Set the active reed sensor count.
- *
- * \param  count - New reed count (will be clamped to MAX_REEDS).
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
-void ui_set_reed_count(uint8_t count);
+uint8_t ui_get_pir_count_slots(void);
+void    ui_set_pir_count_slots(uint8_t count);
 
-/**
- * \brief  Record the current tick as the last-seen time for a device.
- *
- * \param  dev_id - Device to stamp (must be < eDEV_COUNT).
- * \param  tick   - HAL_GetTick() value to record.
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 void ui_stamp_dev_online(DEVICE_ID_E dev_id, uint32_t tick);
-
-/**
- * \brief  Record the current tick as the last-seen time for a reed sensor.
- *
- * \param  slot - Zero-based reed index (must be < MAX_REEDS).
- * \param  tick - HAL_GetTick() value to record.
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 void ui_stamp_reed_online(uint8_t slot, uint32_t tick);
+void ui_stamp_pir_online(uint8_t slot, uint32_t tick);
 
 /* ---- Sensor state setters ---- */
 
-/** \brief Set temperature value (degrees C). \param val - New value. */
 void ui_set_temp(uint8_t val);
-
-/** \brief Set humidity value (percent). \param val - New value. */
 void ui_set_hum(uint8_t val);
-
-/** \brief Set cumulative PIR event count. \param val - New count. */
 void ui_set_pir_count(uint32_t val);
-
-/** \brief Set PIR battery percent. \param val - 0-100. */
 void ui_set_pir_batt(uint8_t val);
-
-/** \brief Set PIR occupied state from sliding window. \param val - 0=empty, 1=occupied. */
 void ui_set_pir_occupied(uint8_t val);
 
-/** \brief Set reed door state. \param slot - 0-based index. \param state - 0=closed,1=open. */
+/** \brief Set per-slot PIR motion count. \param slot 0-based. \param val count. */
+void ui_set_pir_slot_count(uint8_t slot, uint32_t val);
+
+/** \brief Set per-slot PIR battery percent. \param slot 0-based. \param batt 0-100 or -1. */
+void ui_set_pir_slot_batt(uint8_t slot, int8_t batt);
+
+/** \brief Set per-slot PIR BLE age in seconds. \param slot 0-based. \param age seconds. */
+void ui_set_pir_slot_age(uint8_t slot, uint16_t age);
+
+/** \brief Set per-slot PIR occupancy flag. \param slot 0-based. \param val 0 or 1. */
+void ui_set_pir_slot_occupied(uint8_t slot, uint8_t val);
+
 void ui_set_reed_state(uint8_t slot, uint8_t state);
-
-/** \brief Set reed battery percent. \param slot - 0-based index. \param batt - percent or -1. */
 void ui_set_reed_batt(uint8_t slot, int8_t batt);
-
-/** \brief Set reed BLE age in seconds. \param slot - 0-based index. \param age - seconds. */
 void ui_set_reed_age(uint8_t slot, uint16_t age);
-
-/** \brief Set smart light state. \param val - 0=off, 1=on. */
 void ui_set_light(uint8_t val);
-
-/** \brief Set smart lock state. \param val - 0=unlocked, 1=locked. */
 void ui_set_lock(uint8_t val);
-
-/** \brief Set lock battery percent. \param val - 0-100 or -1. */
 void ui_set_lock_batt(int8_t val);
-
-/** \brief Set motor state. \param val - 0=off,1=cooling,2=heating. */
 void ui_set_motor(uint8_t val);
-
-/** \brief Set motor battery voltage mV. \param val - mV or -1 if unknown. */
 void ui_set_motor_batt(int val);
 
-/**
- * \brief  Return the current online flag for a named device.
- *
- * \param  dev_id - Device to query (must be < eDEV_COUNT).
- *
- * \return uint8_t - 1 if online, 0 if offline or unknown.
- *
- * \author MichaelLynnCSU
- */
 uint8_t ui_get_dev_online(DEVICE_ID_E dev_id);
 
 #endif /* INCLUDE_UI_H_ */

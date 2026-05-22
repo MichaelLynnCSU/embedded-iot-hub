@@ -158,14 +158,13 @@ static void heartbeat_tick(void)
    g_last_hb = now;
    trinity_check_stack();
    ui_update();
-
    (void)snprintf(g_ping, sizeof(g_ping),
-                  "[HB] t=%lu reeds=%u pir=%u lgt=%u lck=%u\r\n",
-                  (unsigned long)now,
-                  (unsigned int)ui_get_reed_count(),
-                  (unsigned int)ui_get_dev_online(eDEV_PIR),
-                  (unsigned int)ui_get_dev_online(eDEV_LIGHT),
-                  (unsigned int)ui_get_dev_online(eDEV_LOCK));
+               "[HB] t=%lu reeds=%u pir_slots=%u lgt=%u lck=%u\r\n",
+               (unsigned long)now,
+               (unsigned int)ui_get_reed_count(),
+               (unsigned int)ui_get_pir_count_slots(),
+               (unsigned int)ui_get_dev_online(eDEV_LIGHT),
+               (unsigned int)ui_get_dev_online(eDEV_LOCK));
    log_enqueue(g_ping);
 }
 

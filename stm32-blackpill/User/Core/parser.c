@@ -10,7 +10,8 @@
  *
  * \details Processes line-oriented ASCII messages from the ESP32. Messages
  *          follow the pattern "ID:field[,field...]". Supported IDs:
- *            REED_COUNT, DR1-DR6, PIR, LGT, LCK, MTR, STATE, OCC.
+ *            REED_COUNT, DR1-DR6, PIR_COUNT, PIR1-PIR4, OCC1-OCC4, PIR,
+ *            LGT, LCK, MTR, STATE, OCC.
  *          All parsing uses strtol() rather than atoi() for error detection.
  *
  *          Online/offline pattern (all devices including MTR):
@@ -22,6 +23,20 @@
  *          OCC:0 / OCC:1 sent by BeagleBone every UART_PUSH_INTERVAL_SEC.
  *          Derived from PIR sliding window on ESP32 hub — 1 ISR in the
  *          last 8 s asserts occupied. Routed to ui_set_pir_occupied().
+ *          Retained for backward compatibility during rollout.
+ *
+ * \note    Per-slot PIR frames (2026-05-XX):
+ *          PIR_COUNT:n sets the active PIR slot count and triggers
+ *          ui_reflow_pir(n) when the count changes — mirrors REED_COUNT.
+ *          PIR<n>:count,batt,age updates one PIR slot — mirrors DR<n>.
+ *          Both handlers are inserted before the single-value fallthrough
+ *          in parser_process_line() so they are dispatched first.
+ *
+ * \note    Per-slot OCC frames (2026-05-20):
+ *          OCC<1-4>:n dispatched before single-value fallthrough, mirrors
+ *          PIR<1-4> pattern. Calls ui_set_pir_slot_occupied(slot, val).
+ *          Legacy OCC:n handler retained in parse_single_value() for
+ *          backward compatibility during rollout.
  ******************************************************************************/
 
 #include "parser.h"
@@ -35,11 +50,13 @@
 
 /******************************** CONSTANTS ***********************************/
 
-#define BLE_AGE_THRESHOLD_S  150u  /**< Seconds before a BLE device is stale */
+#define BLE_AGE_THRESHOLD_S  300u  /**< Seconds before a BLE device is stale */
 #define STATE_FIELD_COUNT      8u  /**< Number of fields in a STATE message   */
 #define REED_SLOT_MIN          0   /**< First valid reed slot index            */
 #define DR_ID_PREFIX_LEN       2u  /**< Length of "DR" prefix in DRn IDs      */
 #define DR_DIGIT_OFFSET        2u  /**< Character offset of digit in "DR1"     */
+#define PIR_DIGIT_OFFSET       3u  /**< Character offset of digit in "PIR1"    */
+#define OCC_DIGIT_OFFSET       3u  /**< Character offset of digit in "OCC1"    */
 
 /************************** STATIC (PRIVATE) FUNCTIONS ************************/
 
@@ -50,13 +67,11 @@
  * \param  p_result - Output: parsed integer value on success.
  *
  * \return 0 on success, -1 on parse error or overflow.
- *
- * \author MichaelLynnCSU
  */
 static int parse_int(const char *p_str, int *p_result)
 {
-   char   *p_end   = NULL; /**< Points past last converted character */
-   long    val     = 0;    /**< strtol result                        */
+   char   *p_end   = NULL;
+   long    val     = 0;
 
    if ((NULL == p_str) || (NULL == p_result))
    {
@@ -79,15 +94,11 @@ static int parse_int(const char *p_str, int *p_result)
  * \brief  Handle a REED_COUNT:n message — update count and reflow UI.
  *
  * \param  p_rest - String after the colon, containing the count digit.
- *
- * \return void
- *
- * \author MichaelLynnCSU
  */
 static void parse_reed_count(const char *p_rest)
 {
-   int     n          = 0;     /**< Parsed reed count                    */
-   char    log_buf[48] = {0};  /**< Formatted log string                 */
+   int     n           = 0;
+   char    log_buf[48] = {0};
 
    if (0 != parse_int(p_rest, &n))
    {
@@ -109,23 +120,57 @@ static void parse_reed_count(const char *p_rest)
 }
 
 /**
+ * \brief  Handle a PIR_COUNT:n message — update active PIR slot count and
+ *         reflow UI.
+ *
+ * \param  p_rest - String after the colon, containing the count digit.
+ *
+ * \details Mirrors parse_reed_count(). Only calls ui_reflow_pir() when
+ *          the count actually changes to avoid unnecessary LVGL work.
+ */
+static void parse_pir_count(const char *p_rest)
+{
+   int     n           = 0;
+   char    log_buf[48] = {0};
+
+   if (0 != parse_int(p_rest, &n))
+   {
+      return;
+   }
+
+   if (n > (int)MAX_PIRS)
+   {
+      n = (int)MAX_PIRS;
+   }
+
+   if (n < 0)
+   {
+      n = 0;
+   }
+
+   if ((uint8_t)n != ui_get_pir_count_slots())
+   {
+      ui_set_pir_count_slots((uint8_t)n);
+      ui_reflow_pir(n);
+      (void)snprintf(log_buf, sizeof(log_buf), "[UI] Reflow pir_count=%d\r\n", n);
+      log_enqueue(log_buf);
+   }
+}
+
+/**
  * \brief  Handle a DRn:state,batt,age message — update one reed sensor slot.
  *
  * \param  slot   - Zero-based reed index (0..MAX_REEDS-1).
  * \param  p_rest - String after the colon: "state,batt,age".
- *
- * \return void
- *
- * \author MichaelLynnCSU
  */
 static void parse_reed_sensor(int slot, const char *p_rest)
 {
-   char    tmp[UART_LINE_LEN] = {0}; /**< Mutable copy for strtok          */
-   char   *p_tok              = NULL; /**< strtok pointer                   */
-   int     state              = -1;  /**< Parsed door state (0=closed,1=open)*/
-   int     batt               = -1;  /**< Parsed battery percentage         */
-   int     age                = 0xFFFF; /**< Parsed BLE age in seconds      */
-   uint32_t now               = 0u;  /**< Current tick in ms                */
+   char    tmp[UART_LINE_LEN] = {0};
+   char   *p_tok              = NULL;
+   int     state              = -1;
+   int     batt               = -1;
+   int     age                = 0xFFFF;
+   uint32_t now               = 0u;
 
    if ((slot < REED_SLOT_MIN) || (slot >= (int)MAX_REEDS))
    {
@@ -141,22 +186,13 @@ static void parse_reed_sensor(int slot, const char *p_rest)
    tmp[sizeof(tmp) - 1u] = '\0';
 
    p_tok = strtok(tmp, ",");
-   if (NULL != p_tok)
-   {
-      (void)parse_int(p_tok, &state);
-   }
+   if (NULL != p_tok) { (void)parse_int(p_tok, &state); }
 
    p_tok = strtok(NULL, ",");
-   if (NULL != p_tok)
-   {
-      (void)parse_int(p_tok, &batt);
-   }
+   if (NULL != p_tok) { (void)parse_int(p_tok, &batt); }
 
    p_tok = strtok(NULL, ",");
-   if (NULL != p_tok)
-   {
-      (void)parse_int(p_tok, &age);
-   }
+   if (NULL != p_tok) { (void)parse_int(p_tok, &age); }
 
    now = HAL_GetTick();
 
@@ -175,24 +211,80 @@ static void parse_reed_sensor(int slot, const char *p_rest)
 }
 
 /**
+ * \brief  Handle a PIR<n>:count,batt,age message — update one PIR slot.
+ *
+ * \param  slot   - Zero-based PIR index (0..MAX_PIRS-1).
+ * \param  p_rest - String after the colon: "count,batt,age".
+ *
+ * \details Mirrors parse_reed_sensor(). Stamps the slot online when age
+ *          is below BLE_AGE_THRESHOLD_S, identical to the reed pattern.
+ */
+static void parse_pir_slot(int slot, const char *p_rest)
+{
+   char     tmp[UART_LINE_LEN] = {0};
+   char    *p_tok              = NULL;
+   int      count              = 0;
+   int      batt               = -1;
+   int      age                = 0xFFFF;
+   uint32_t now                = 0u;
+
+   if ((slot < 0) || (slot >= (int)MAX_PIRS))
+   {
+      return;
+   }
+
+   if (NULL == p_rest)
+   {
+      return;
+   }
+
+   (void)strncpy(tmp, p_rest, sizeof(tmp) - 1u);
+   tmp[sizeof(tmp) - 1u] = '\0';
+
+   p_tok = strtok(tmp, ",");
+   if (NULL != p_tok) { (void)parse_int(p_tok, &count); }
+
+   p_tok = strtok(NULL, ",");
+   if (NULL != p_tok) { (void)parse_int(p_tok, &batt); }
+
+   p_tok = strtok(NULL, ",");
+   if (NULL != p_tok) { (void)parse_int(p_tok, &age); }
+
+   now = HAL_GetTick();
+
+   ui_set_pir_slot_count((uint8_t)slot, (uint32_t)count);
+   ui_set_pir_slot_batt((uint8_t)slot,  (int8_t)batt);
+   ui_set_pir_slot_age((uint8_t)slot,   (uint16_t)age);
+
+   if (age < (int)BLE_AGE_THRESHOLD_S)
+   {
+      ui_stamp_pir_online((uint8_t)slot, now);
+   }
+
+   char dbg[96];
+
+   snprintf(dbg, sizeof(dbg),
+         "[PIR] slot=%d count=%d batt=%d age=%d\r\n",
+         slot, count, batt, age);
+
+   log_enqueue(dbg);
+}
+
+/**
  * \brief  Handle a STATE:tmp,pir,lgt,lck,age_pir,age_lgt,age_lck,reed_count
  *         message — bulk sensor update from ESP32.
  *
  * \param  p_rest - String after the colon containing 8 comma-delimited fields.
- *
- * \return void
- *
- * \author MichaelLynnCSU
  */
 static void parse_state_message(const char *p_rest)
 {
-   char    tb[UART_LINE_LEN]         = {0}; /**< Mutable copy for strtok    */
-   char   *p_tok                     = NULL; /**< strtok pointer             */
-   int     f[STATE_FIELD_COUNT];             /**< Parsed field array         */
-   uint8_t i                         = 0u;  /**< Field index                */
-   uint32_t now                      = 0u;  /**< Current tick ms            */
-   int     old_proto                 = 0;   /**< Non-zero if legacy 3-field  */
-   int     n                         = 0;   /**< Reed count from STATE field */
+   char    tb[UART_LINE_LEN]         = {0};
+   char   *p_tok                     = NULL;
+   int     f[STATE_FIELD_COUNT];
+   uint8_t i                         = 0u;
+   uint32_t now                      = 0u;
+   int     old_proto                 = 0;
+   int     n                         = 0;
 
    if (NULL == p_rest)
    {
@@ -216,10 +308,10 @@ static void parse_state_message(const char *p_rest)
 
    now = HAL_GetTick();
 
-   if (f[0] >= 0) { ui_set_temp((uint8_t)f[0]);         }
-   if (f[1] >= 0) { ui_set_pir_count((uint32_t)f[1]);   }
-   if (f[2] >= 0) { ui_set_light((uint8_t)f[2]);        }
-   if (f[3] >= 0) { ui_set_lock((uint8_t)f[3]);         }
+   if (f[0] >= 0) { ui_set_temp((uint8_t)f[0]);       }
+   if (f[1] >= 0) { ui_set_pir_count((uint32_t)f[1]); }
+   if (f[2] >= 0) { ui_set_light((uint8_t)f[2]);      }
+   if (f[3] >= 0) { ui_set_lock((uint8_t)f[3]);       }
 
    ui_stamp_dev_online(eDEV_TEMP, now);
 
@@ -243,10 +335,7 @@ static void parse_state_message(const char *p_rest)
    if (f[7] > 0)
    {
       n = f[7];
-      if (n > (int)MAX_REEDS)
-      {
-         n = (int)MAX_REEDS;
-      }
+      if (n > (int)MAX_REEDS) { n = (int)MAX_REEDS; }
 
       if ((uint8_t)n != ui_get_reed_count())
       {
@@ -259,24 +348,16 @@ static void parse_state_message(const char *p_rest)
 /**
  * \brief  Handle a single-value message: PIR, LGT, LCK, MTR, or OCC.
  *
- * \param  p_id   - Null-terminated message identifier string.
- * \param  val    - Primary integer value already parsed from the message.
- * \param  batt   - Battery percentage, or -1 if not present.
+ * \param  p_id  - Null-terminated message identifier string.
+ * \param  val   - Primary integer value already parsed from the message.
+ * \param  batt  - Battery percentage, or -1 if not present.
  *
- * \return void
- *
- * \details All devices follow the same online/offline pattern:
- *          - Online: update value and stamp last-seen tick
- *          - Offline: do nothing — HB_TIMEOUT_MS expiry turns dot red
- *
- *          OCC:0/1 updates the PIR tile occupied prefix without affecting
- *          the online timestamp — occupancy and connectivity are independent.
- *
- * \author MichaelLynnCSU
+ * \note   OCC handler retained here for backward compatibility during rollout.
+ *         Per-slot OCC<1-4> is dispatched earlier in parser_process_line().
  */
 static void parse_single_value(const char *p_id, int val, int batt)
 {
-   uint32_t now = HAL_GetTick(); /**< Current tick ms */
+   uint32_t now = HAL_GetTick();
 
    if (NULL == p_id)
    {
@@ -286,10 +367,7 @@ static void parse_single_value(const char *p_id, int val, int batt)
    if (0 == strcmp(p_id, "PIR"))
    {
       ui_set_pir_count((uint32_t)val);
-      if (batt >= 0)
-      {
-         ui_set_pir_batt((uint8_t)batt);
-      }
+      if (batt >= 0) { ui_set_pir_batt((uint8_t)batt); }
    }
    else if (0 == strcmp(p_id, "LGT"))
    {
@@ -298,10 +376,7 @@ static void parse_single_value(const char *p_id, int val, int batt)
    else if (0 == strcmp(p_id, "LCK"))
    {
       ui_set_lock((uint8_t)val);
-      if (batt >= 0)
-      {
-         ui_set_lock_batt((int8_t)batt);
-      }
+      if (batt >= 0) { ui_set_lock_batt((int8_t)batt); }
    }
    else if (0 == strcmp(p_id, "MTR"))
    {
@@ -310,25 +385,14 @@ static void parse_single_value(const char *p_id, int val, int batt)
          ui_set_motor(1u);
          ui_stamp_dev_online(eDEV_MOTOR, now);
       }
-      if (batt > 0)
-      {
-         ui_set_motor_batt(batt);
-      }
-      /* val=0: do nothing — last known motor state stays on screen.
-       * HB_TIMEOUT_MS expiry drives the dot red, identical to how
-       * PIR, LGT, and LCK go offline. No explicit offline action needed. */
+      if (batt > 0) { ui_set_motor_batt(batt); }
    }
    else if (0 == strcmp(p_id, "OCC"))
    {
-      /* Sliding window occupancy from PIR node — 0=empty, 1=occupied.
-       * Does not affect the PIR online timestamp; connectivity and
-       * occupancy are independent. */
+      /* Legacy flat OCC — retained for backward compat during rollout */
       ui_set_pir_occupied((uint8_t)val);
    }
-   else
-   {
-      /* Unrecognised single-value ID — discard silently */
-   }
+   /* Unrecognised single-value ID — discard silently */
 }
 
 /************************** PUBLIC FUNCTIONS ***********************************/
@@ -338,24 +402,26 @@ static void parse_single_value(const char *p_id, int val, int batt)
  *
  * \param  p_line - Null-terminated message string, e.g. "PIR:42,87".
  *
- * \return void
- *
- * \details Splits on the first ':' to extract the message ID, then delegates
- *          to the appropriate static sub-parser. Unknown IDs are silently
- *          discarded.
- *
- * \author MichaelLynnCSU
+ * \details Dispatch order:
+ *          1. REED_COUNT  — dedicated handler, returns.
+ *          2. DR<1-6>     — reed slot handler, returns.
+ *          3. PIR_COUNT   — PIR slot count handler, returns.
+ *          4. PIR<1-4>    — per-slot PIR handler, returns.
+ *          5. OCC<1-4>    — per-slot occupancy handler, returns.
+ *          6. STATE       — bulk state handler, returns.
+ *          7. Everything else — single-value fallthrough (PIR, LGT, LCK,
+ *             MTR, OCC).
  */
 void parser_process_line(const char *p_line)
 {
-   char    buf[UART_LINE_LEN] = {0}; /**< Mutable working copy of the line  */
-   char   *p_colon            = NULL; /**< Points to ':' separator           */
-   char   *p_id               = NULL; /**< Points to message ID string       */
-   char   *p_rest             = NULL; /**< Points to value string after ':'  */
-   char   *p_comma            = NULL; /**< Points to optional ',' separator  */
-   int     val                = 0;   /**< Primary parsed integer value       */
-   int     batt               = -1;  /**< Optional battery field value       */
-   int     slot               = 0;   /**< Reed slot index for DRn messages   */
+   char    buf[UART_LINE_LEN] = {0};
+   char   *p_colon            = NULL;
+   char   *p_id               = NULL;
+   char   *p_rest             = NULL;
+   char   *p_comma            = NULL;
+   int     val                = 0;
+   int     batt               = -1;
+   int     slot               = 0;
 
    if (NULL == p_line)
    {
@@ -375,12 +441,14 @@ void parser_process_line(const char *p_line)
    p_id     = buf;
    p_rest   = p_colon + 1;
 
+   /* REED_COUNT:n */
    if (0 == strcmp(p_id, "REED_COUNT"))
    {
       parse_reed_count(p_rest);
       return;
    }
 
+   /* DR<1-6>:state,batt,age */
    if (('D' == p_id[0]) && ('R' == p_id[1]) &&
        (p_id[DR_DIGIT_OFFSET] >= '1') && (p_id[DR_DIGIT_OFFSET] <= '6'))
    {
@@ -389,13 +457,46 @@ void parser_process_line(const char *p_line)
       return;
    }
 
+   /* PIR_COUNT:n — must be checked before the PIR<n> digit test below */
+   if (0 == strcmp(p_id, "PIR_COUNT"))
+   {
+      parse_pir_count(p_rest);
+      return;
+   }
+
+   /* PIR<1-4>:count,batt,age
+    * ID is exactly 4 chars: P I R <digit> */
+   if (('P' == p_id[0]) && ('I' == p_id[1]) && ('R' == p_id[2]) &&
+       (p_id[PIR_DIGIT_OFFSET] >= '1') && (p_id[PIR_DIGIT_OFFSET] <= '4') &&
+       ('\0' == p_id[PIR_DIGIT_OFFSET + 1u]))
+   {
+      slot = (int)(p_id[PIR_DIGIT_OFFSET] - '1');
+      parse_pir_slot(slot, p_rest);
+      return;
+   }
+
+   /* OCC<1-4>:occupied — per-slot occupancy, mirrors PIR<1-4> pattern.
+    * \note Per-slot OCC (2026-05-20): replaces single OCC:n global frame.
+    *       BeagleBone sends OCC1:n..OCC4:n, one per active PIR slot.
+    * ID is exactly 4 chars: O C C <digit> */
+   if (('O' == p_id[0]) && ('C' == p_id[1]) && ('C' == p_id[2]) &&
+       (p_id[OCC_DIGIT_OFFSET] >= '1') && (p_id[OCC_DIGIT_OFFSET] <= '4') &&
+       ('\0' == p_id[OCC_DIGIT_OFFSET + 1u]))
+   {
+      slot = (int)(p_id[OCC_DIGIT_OFFSET] - '1');
+      (void)parse_int(p_rest, &val);
+      ui_set_pir_slot_occupied((uint8_t)slot, (uint8_t)val);
+      return;
+   }
+
+   /* STATE:... */
    if (0 == strcmp(p_id, "STATE"))
    {
       parse_state_message(p_rest);
       return;
    }
 
-   /* Single-value messages: extract optional battery field */
+   /* Single-value fallthrough — extract optional battery field */
    p_comma = strchr(p_rest, ',');
    if (NULL != p_comma)
    {
