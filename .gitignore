@@ -135,3 +135,4 @@ cloudflared-linux-amd64.deb
 **/build/config/
 **/build/bootloader/
 **/build/project_description.json
+Testing/Temporary/
