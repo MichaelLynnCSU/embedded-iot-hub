@@ -25,21 +25,27 @@
  * \note    WDT fix (2026-03-21):
  *          Idle loop vTaskDelay reduced from 10000 ms to 2000 ms and
  *          trinity_wdt_kick() added at the top of the idle loop.
- *          The 10 s delay was 2× the WDT timeout, guaranteeing a trigger
+ *          The 10 s delay was 2x the WDT timeout, guaranteeing a trigger
  *          even on a healthy boot.
- *          trinity_log_event() renamed to trinity_log_event() throughout.
  *
  * \note    PIR online threshold change (2026-05-06):
  *          PIR device age threshold changed from 30s to 60s.
- *          Reason: PIR heartbeat interval extended from 10s to 30s
- *          (main.h DEEP_SLEEP_INTERVAL_US) to reduce average current
- *          from ~19.93mA to ~6.6mA projected (~3x battery life improvement
- *          on 3000mAh LiPo: 6.3 days -> ~19 days).
- *          At 30s heartbeat the device age naturally reaches ~30s between
- *          packets during normal operation. The old 30s threshold caused
- *          the PIR to flicker online/offline in the hub log on every
- *          heartbeat cycle. 60s gives 2x the heartbeat interval as margin,
- *          matching the pattern used for LIGHT, LOCK, and REED devices.
+ *          Reason: PIR heartbeat interval extended from 10s to 30s to
+ *          reduce average current. 60s gives 2x the heartbeat interval
+ *          as margin.
+ *
+ * \note    PIR slot table (2026-05-20):
+ *          ble_get_motion_count() and ble_get_pir_batt() removed.
+ *          ble_get_pir_slot_info() and ble_get_pir_count() added,
+ *          forwarding to ble_scan_get_pir_slot_info() and
+ *          ble_scan_get_pir_count() in ble_scan.c.
+ *          Idle loop log line updated to loop over PIR slots.
+ *
+ * \note    Per-slot occupancy (2026-05-20):
+ *          ble_get_pir_occupied() now takes a slot index and forwards
+ *          to pir_window_get_occupied(slot). tcp_manager.c reads
+ *          per-slot occupied into PIR_SLOT_STATE_T.occupied inside
+ *          drain_queues() after the PIR BLE sync loop.
  ******************************************************************************/
 
 #include "config.h"
@@ -196,6 +202,10 @@ void ble_manager_init(void)
 void ble_manager_task(EventGroupHandle_t p_system_eg,
                       EventGroupHandle_t p_ble_eg)
 {
+   int      pir_count = 0; /**< number of seen PIR slots */
+   int      i         = 0; /**< loop index               */
+   uint16_t pir_age   = 0; /**< PIR slot age in seconds  */
+
    (void)p_system_eg;
 
    ESP_LOGI(TAG, "BLE task running on core %d", xPortGetCoreID());
@@ -223,21 +233,47 @@ void ble_manager_task(EventGroupHandle_t p_system_eg,
    while (1)
    {
       trinity_wdt_kick();
-      /* PIR threshold 60s -- 2x the 30s heartbeat interval.
-       * All other devices retain 30s threshold (120-240s heartbeat). */
-      ESP_LOGI(TAG, "[BLE] PIR=%s LIGHT=%s LOCK=%s REEDS=%d",
-         (ble_get_device_age_s(BLE_DEV_PIR)   < 60) ? "online" : "offline",
-         (ble_get_device_age_s(BLE_DEV_LIGHT)  < 30) ? "online" : "offline",
-         (ble_get_device_age_s(BLE_DEV_LOCK)   < 30) ? "online" : "offline",
+
+      /* Log each seen PIR slot — threshold 60s (2x 30s heartbeat) */
+      pir_count = ble_get_pir_count();
+      for (i = 0; i < pir_count; i++)
+      {
+         if (ble_get_pir_slot_info(i, NULL, NULL, NULL))
+         {
+            pir_age = ble_get_device_age_s((int)(DEV_IDX_PIR + i));
+            ESP_LOGI(TAG, "[BLE] PIR slot=%d %s occ=%d",
+                     i,
+                     (pir_age < PIR_OFFLINE_S) ? "online" : "offline",
+                     pir_window_get_occupied(i));
+         }
+      }
+
+      ESP_LOGI(TAG, "[BLE] LIGHT=%s LOCK=%s REEDS=%d",
+         (ble_get_device_age_s(BLE_DEV_LIGHT) < 30) ? "online" : "offline",
+         (ble_get_device_age_s(BLE_DEV_LOCK)  < 30) ? "online" : "offline",
           ble_get_reed_count());
+
       vTaskDelay(pdMS_TO_TICKS(BLE_IDLE_DELAY_MS));
    }
 }
 
-int ble_get_motion_count(void)
+/*---------------------------------------------------------------------------*/
+/* PIR slot API — forwards to ble_scan.c internal accessors                  */
+/*---------------------------------------------------------------------------*/
+
+bool ble_get_pir_slot_info(int slot, uint32_t *p_count, int *p_batt, uint16_t *p_age)
 {
-   return ble_scan_get_motion_count();
+   return ble_scan_get_pir_slot_info(slot, p_count, p_batt, p_age);
 }
+
+int ble_get_pir_count(void)
+{
+   return ble_scan_get_pir_count();
+}
+
+/*---------------------------------------------------------------------------*/
+/* Remaining public accessors                                                 */
+/*---------------------------------------------------------------------------*/
 
 uint8_t ble_get_light_state(void)
 {
@@ -249,14 +285,19 @@ uint8_t ble_get_lock_state(void)
    return (uint8_t)ble_lock_get_state();
 }
 
-int ble_get_pir_batt(void)
+/******************************************************************************
+ * \brief  Return per-slot PIR occupancy from the sliding window.
+ *
+ * \param  slot - Zero-based PIR slot index (0..MAX_PIRS-1).
+ *
+ * \return int - 1 if occupied, 0 if empty or out of range.
+ *
+ * \note   Per-slot occupancy (2026-05-20): slot argument added.
+ *         Previously called pir_window_get_occupied() with no argument.
+ ******************************************************************************/
+int ble_get_pir_occupied(int slot)
 {
-   return ble_scan_get_pir_batt();
-}
-
-int ble_get_pir_occupied(void)
-{
-   return pir_window_get_occupied();
+   return pir_window_get_occupied(slot);
 }
 
 int ble_get_lock_batt(void)

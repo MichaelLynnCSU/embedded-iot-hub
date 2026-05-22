@@ -16,6 +16,11 @@
  *          aws_manager.c and forwarded to tcp_manager.c via getters.
  *          PWM_DUTY_MAX added — maximum duty count sent to C3 motor node.
  *
+ * \note    PIR slot table (2026-05-20):
+ *          MAX_PIRS, PIR_NAME_PREFIX, PIR_NAME_PREFIX_LEN, PIR_OFFLINE_S
+ *          added to support dynamic multi-PIR slot table in ble_scan.c.
+ *          Mirrors the reed sensor pattern.
+ *
  * \warning AWS_LAMBDA_URL and network IPs are defined in network_config.h
  *          which is gitignored. Copy network_config.h.template to
  *          network_config.h and fill in values before building.
@@ -104,6 +109,37 @@
 #define PIR_WINDOW_SEC        60u   /**< sliding window width seconds */
 #define PIR_WINDOW_THRESHOLD  2u    /**< occ=1 events in window to declare occupied */
 #define PIR_HOLD_SEC          600u  /**< hold occupied seconds after last trigger */
+
+/** \brief PIR sensor slot table */
+#define MAX_PIRS             2u           /**< max concurrent PIR sensors          */
+#define PIR_NAME_PREFIX      "PIR_Motion" /**< PIR device name prefix              */
+#define PIR_NAME_PREFIX_LEN  10u          /**< length of PIR_NAME_PREFIX           */
+#define PIR_OFFLINE_S        300          /**< pir offline threshold seconds  */
+
+/** \brief Reed sensor slot table configuration */
+#define MAX_REEDS               6u            /**< max concurrent Reed sensors          */
+#define REED_NAME_PREFIX        "ReedSensor"  /**< Reed device name prefix              */
+#define REED_NAME_PREFIX_LEN    10u           /**< length of REED_NAME_PREFIX          */
+#define REED_OFFLINE_S          150           /**< reed offline threshold seconds */
+
+/** \brief Global BLE Allocation and Table Sizing */
+#define ADV_NAME_BUF_SIZE       32            /**< Buffer size for parsing BLE names    */
+#define SLOT_NAME_MAX           32            /**< Max string size for sensor identity  */
+#define COOLDOWN_COUNT          8             /**< Allocation cooldown slot pool size   */
+
+/** \brief Allocation State Machine Timing Parameters */
+#define BLE_COOLDOWN_MS         5000          /**< Prevention timeframe for bounce loops*/
+#define REED_OFFLINE_MS         150000        /**< Time before Reed sets to offline     */
+#define REED_REMOVE_MS          3600000       /**< Time before old slots are fully flushed*/
+
+/** \brief Logging and Throttling Limits */
+#define REED_AGE_LOG_THRESHOLD  10
+#define LOCK_AGE_LOG_THRESHOLD  10
+
+/** \brief Room Mapping Array Index References */
+#define ROOM_SENSOR_SLOT0_ID    0
+#define ROOM_SENSOR_SLOT1_ID    1
+
 /************************ STRUCTURE/UNION DATA TYPES **************************/
 
 /**

@@ -65,8 +65,10 @@
 /** \brief PIR motion sensor bus payload. */
 typedef struct
 {
-   uint32_t count; /*!< motion event count    */
-   int      batt;  /*!< battery SOC percent   */
+   uint8_t  id;     /*!< 1-based PIR slot index  */   // ← add this
+   uint8_t  slot;   /*!< 0-based PIR slot index  */   // ← can remove if redundant
+   uint32_t count;  /*!< motion event count      */
+   int      batt;   /*!< battery SOC percent     */
 } PIR_PAYLOAD_T;
 
 /** \brief Reed sensor bus payload. */
@@ -138,10 +140,11 @@ void bus_init(void);
 BUS_SUBSCRIBER_T bus_register_subscriber(EventBits_t mask);
 
 /** \brief Publish a PIR motion event.
+ *  \param slot  -
  *  \param count - Motion event count.
  *  \param batt  - Battery SOC percent.
  *  \return void */
-void bus_publish_pir(uint32_t count, int batt);
+void bus_publish_pir(uint8_t slot, uint32_t count, int batt);
 
 /** \brief Publish a reed sensor event.
  *  \param id    - Reed slot ID (1-based).

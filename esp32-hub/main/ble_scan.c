@@ -10,11 +10,11 @@
  *          state machine. Owns lock and light MAC discovery state.
  *
  *          Fixed devices (table-driven):
- *          - PIR_Motion  — motion count and battery
  *          - LightNF     — relay state, triggers GATT connect if pending
  *          - SmartLock   — lock state and battery, triggers GATT connect
  *
  *          Dynamic devices (prefix match):
+ *          - PIR_*       — up to MAX_PIRS slots, auto-allocated by MAC
  *          - ReedSensor* — up to MAX_REEDS slots, auto-allocated by MAC
  *
  *          Reed slot state machine:
@@ -25,8 +25,15 @@
  *          Thresholds:
  *          - OFFLINE:  150s — matches BLE_AGE_THRESHOLD_S on STM32
  *          - REMOVE:  3600s — 1 hour unseen, slot cleared, tile hidden
+ *
+ * \note    PIR slot table (2026-05-20):
+ *          PIR handling migrated from single static globals to dynamic
+ *          slot table matching reed pattern. handle_pir() replaced by
+ *          handle_pir_dynamic(). g_motion_count, g_pir_batt, g_pir_seen
+ *          removed. PIR_Motion entry removed from g_device_table[].
+ *          ble_scan_get_pir_slot_info() and ble_scan_get_pir_count() added.
  ******************************************************************************/
-
+#include "ble_proto.h"
 #include "config.h"
 #include "esp_log.h"
 #include "esp_gap_ble_api.h"
@@ -39,62 +46,51 @@
 #include "vroom_bus.h"
 #include <string.h>
 
-#define MAX_REEDS              6              /**< max concurrent reed sensors */
-#define REED_OFFLINE_MS        (150  * 1000)  /**< offline threshold ms */
-#define REED_REMOVE_MS         (3600 * 1000)  /**< removal threshold ms */
-#define COOLDOWN_COUNT         MAX_REEDS      /**< cooldown table depth */
-#define COOLDOWN_MS            (10   * 1000)  /**< re-discovery quiet window ms */
-#define ADV_NAME_BUF_SIZE      32             /**< advertisement name buffer size */
-#define REED_NAME_PREFIX       "ReedSensor"   /**< reed sensor name prefix */
-#define REED_NAME_PREFIX_LEN   10             /**< length of REED_NAME_PREFIX */
-#define ADV_TYPE_SHORT_NAME    0x08           /**< AD type: shortened local name */
-#define ADV_TYPE_FULL_NAME     0x09           /**< AD type: complete local name */
-#define REED_AGE_LOG_THRESHOLD 30             /**< seconds between periodic logs */
-#define LOCK_AGE_LOG_THRESHOLD 30             /**< seconds between periodic logs */
-#define MFG_PIR_MIN_LEN        6             /**< min PIR mfg data length */
-#define MFG_PIR_BATT_IDX       6             /**< PIR battery byte index */
-#define MFG_PIR_OCCUPIED_IDX   7             /* occupied flag byte index */
-#define MFG_REED_STATE_IDX     1             /**< reed state byte index */
-#define MFG_REED_BATT_IDX      2             /**< reed battery byte index */
-#define MFG_LIGHT_STATE_IDX    2             /**< light state byte index */
-#define MFG_LIGHT_MIN_LEN      2             /**< min light mfg data length */
-#define MFG_LOCK_STATE_IDX     1             /**< lock state byte index */
-#define MFG_LOCK_BATT_IDX      2             /**< lock battery byte index */
-#define MFG_LOCK_MIN_LEN       3             /**< min lock mfg data length */
-#define SLOT_NAME_MAX          31             /**< max slot name copy length */
-#define PIR_COUNT_BYTE0        2             /**< PIR count MSB index */
-#define PIR_COUNT_BYTE1        3             /**< PIR count byte 1 index */
-#define PIR_COUNT_BYTE2        4             /**< PIR count byte 2 index */
-#define PIR_COUNT_BYTE3        5             /**< PIR count LSB index */
-#define ROOM_SENSOR_SLOT0_ID   1             /**< room sensor ID for slot 0 */
-#define ROOM_SENSOR_SLOT1_ID   7             /**< room sensor ID for slot 1 */
-#define AGE_MAX_VALUE          0xFFFE        /**< max reportable age value */
+#define ADV_TYPE_SHORT_NAME    0x08           /**< AD type: shortened local name   */
+#define ADV_TYPE_FULL_NAME     0x09           /**< AD type: complete local name    */
+
+#define MFG_PIR_MIN_LEN        6             /**< min PIR mfg data length         */
+#define MFG_PIR_BATT_IDX       6             /**< PIR battery byte index          */
+#define MFG_PIR_OCCUPIED_IDX   7             /**< occupied flag byte index        */
+
+#define MFG_REED_STATE_IDX     1             /**< reed state byte index           */
+#define MFG_REED_BATT_IDX      2             /**< reed battery byte index         */
+
+#define MFG_LIGHT_STATE_IDX    2             /**< light state byte index          */
+#define MFG_LIGHT_MIN_LEN      2             /**< min light mfg data length       */
+
+#define MFG_LOCK_STATE_IDX     1             /**< lock state byte index           */
+#define MFG_LOCK_BATT_IDX      2             /**< lock battery byte index         */
+#define MFG_LOCK_MIN_LEN       3             /**< min lock mfg data length        */
+
+#define PIR_COUNT_BYTE0        2             /**< PIR count MSB index             */
+#define PIR_COUNT_BYTE1        3             /**< PIR count byte 1 index          */
+#define PIR_COUNT_BYTE2        4             /**< PIR count byte 2 index          */
+#define PIR_COUNT_BYTE3        5             /**< PIR count LSB index             */
+
+#define AGE_MAX_VALUE          0xFFFE        /**< max reportable age value        */
 
 static const char *TAG = "BLE_SCAN"; /**< ESP log tag */
 
-uint8_t             lock_mac[6]     = {0};              /**< lock device MAC */
-bool                lock_found      = false;            /**< lock MAC discovered */
-esp_ble_addr_type_t lock_addr_type  = BLE_ADDR_TYPE_PUBLIC; /**< lock addr type */
+uint8_t             lock_mac[6]     = {0};                   /**< lock device MAC    */
+bool                lock_found      = false;                 /**< lock MAC discovered */
+esp_ble_addr_type_t lock_addr_type  = BLE_ADDR_TYPE_PUBLIC;  /**< lock addr type     */
 
-uint8_t             light_mac[6]    = {0};              /**< light device MAC */
-bool                light_found     = false;            /**< light MAC discovered */
-esp_ble_addr_type_t light_addr_type = BLE_ADDR_TYPE_PUBLIC; /**< light addr type */
+uint8_t             light_mac[6]    = {0};                   /**< light device MAC    */
+bool                light_found     = false;                 /**< light MAC discovered */
+esp_ble_addr_type_t light_addr_type = BLE_ADDR_TYPE_PUBLIC;  /**< light addr type     */
 
-static int g_motion_count = DEFAULT_MOTION_COUNT; /**< PIR motion event count */
-static int g_pir_batt     = -1;                   /**< PIR battery SOC percent */
-
-static bool g_pir_seen   = false; /**< PIR first-seen flag */
-static bool g_lock_seen  = false; /**< lock first-seen flag */
+static bool g_lock_seen  = false; /**< lock first-seen flag  */
 static bool g_light_seen = false; /**< light first-seen flag */
 
 /******************************* ENUMERATIONS *********************************/
 
-/** \brief Reed slot state machine states. */
+/** \brief Slot state machine states. */
 typedef enum
 {
    SLOT_EMPTY   = 0, /**< never seen or expired */
-   SLOT_ACTIVE  = 1, /**< advertising within REED_OFFLINE_MS */
-   SLOT_OFFLINE = 2, /**< last seen > REED_OFFLINE_MS ago */
+   SLOT_ACTIVE  = 1, /**< advertising within offline threshold */
+   SLOT_OFFLINE = 2, /**< last seen > offline threshold ago */
 } SLOT_STATE_E;
 
 /************************ STRUCTURE/UNION DATA TYPES **************************/
@@ -102,20 +98,32 @@ typedef enum
 /** \brief Reed sensor slot entry. */
 typedef struct
 {
-   uint8_t      mac[6];        /*!< device MAC address */
-   char         name[ADV_NAME_BUF_SIZE]; /*!< BLE device name */
-   uint8_t      door_state;    /*!< 0=closed 1=open 0xFF=unknown */
-   int          batt;          /*!< battery SOC percent */
-   SLOT_STATE_E state;         /*!< slot state machine state */
-   uint32_t     last_seen_ms;  /*!< timestamp of last advertisement */
-   uint16_t     generation;    /*!< increments each time slot is reused */
+   uint8_t      mac[6];                  /*!< device MAC address          */
+   char         name[ADV_NAME_BUF_SIZE]; /*!< BLE device name             */
+   uint8_t      door_state;              /*!< 0=closed 1=open 0xFF=unknown */
+   int          batt;                    /*!< battery SOC percent          */
+   SLOT_STATE_E state;                   /*!< slot state machine state     */
+   uint32_t     last_seen_ms;            /*!< timestamp of last adv        */
+   uint16_t     generation;              /*!< increments on slot reuse     */
 } REED_SLOT_T;
+
+/** \brief PIR sensor slot entry. */
+typedef struct
+{
+   uint8_t      mac[6];                  /*!< device MAC address      */
+   char         name[ADV_NAME_BUF_SIZE]; /*!< BLE device name         */
+   uint32_t     count;                   /*!< motion event count      */
+   int          batt;                    /*!< battery SOC percent      */
+   SLOT_STATE_E state;                   /*!< slot state machine state */
+   uint32_t     last_seen_ms;            /*!< timestamp of last adv   */
+   uint16_t     generation;              /*!< increments on slot reuse */
+} PIR_SLOT_T;
 
 /** \brief Cooldown table entry — prevents immediate slot re-allocation. */
 typedef struct
 {
    uint8_t  mac[6];           /*!< MAC of recently removed device */
-   uint32_t removed_at_ms;    /*!< timestamp of removal */
+   uint32_t removed_at_ms;    /*!< timestamp of removal           */
 } COOLDOWN_ENTRY_T;
 
 /** \brief Advertisement handler function pointer type. */
@@ -127,26 +135,18 @@ typedef void (*adv_handler_t)(const uint8_t *p_adv,
 /** \brief Fixed device dispatch table entry. */
 typedef struct
 {
-   const char    *p_name;   /*!< exact BLE device name to match */
-   adv_handler_t  handler;  /*!< handler function for this device */
+   const char    *p_name;  /*!< exact BLE device name to match */
+   adv_handler_t  handler; /*!< handler function for this device */
 } DEVICE_ENTRY_T;
 
-static REED_SLOT_T      g_reed_table[MAX_REEDS];          /**< reed slot table */
-static COOLDOWN_ENTRY_T g_cooldown_table[COOLDOWN_COUNT]; /**< cooldown table */
-static StaticSemaphore_t g_reed_mutex_buf;                /**< static mutex buffer */
-static SemaphoreHandle_t g_reed_mutex = NULL;             /**< reed table mutex */
+static REED_SLOT_T       g_reed_table[MAX_REEDS];          /**< reed slot table    */
+static COOLDOWN_ENTRY_T  g_cooldown_table[COOLDOWN_COUNT]; /**< cooldown table     */
+static StaticSemaphore_t g_reed_mutex_buf;                 /**< static mutex buf   */
+static SemaphoreHandle_t g_reed_mutex = NULL;              /**< reed table mutex   */
 
-/*----------------------------------------------------------------------------*/
-
-int ble_scan_get_motion_count(void)
-{
-   return g_motion_count;
-}
-
-int ble_scan_get_pir_batt(void)
-{
-   return g_pir_batt;
-}
+static PIR_SLOT_T        g_pir_table[MAX_PIRS];            /**< PIR slot table     */
+static StaticSemaphore_t g_pir_mutex_buf;                  /**< static mutex buf   */
+static SemaphoreHandle_t g_pir_mutex = NULL;               /**< PIR table mutex    */
 
 /*----------------------------------------------------------------------------*/
 
@@ -163,9 +163,9 @@ int ble_scan_get_pir_batt(void)
  ******************************************************************************/
 static void cooldown_add(const uint8_t *p_mac)
 {
-   uint32_t now     = 0; /**< current tick in ms */
-   int      oldest  = 0; /**< index of oldest cooldown entry */
-   int      i       = 0; /**< loop index */
+   uint32_t now    = 0; /**< current tick in ms        */
+   int      oldest = 0; /**< index of oldest entry     */
+   int      i      = 0; /**< loop index                */
 
    now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
@@ -193,7 +193,7 @@ static void cooldown_add(const uint8_t *p_mac)
 static bool cooldown_check(const uint8_t *p_mac)
 {
    uint32_t now = 0; /**< current tick in ms */
-   int      i   = 0; /**< loop index */
+   int      i   = 0; /**< loop index         */
 
    now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
@@ -201,7 +201,7 @@ static bool cooldown_check(const uint8_t *p_mac)
    {
       if (0 == memcmp(g_cooldown_table[i].mac, p_mac, 6))
       {
-         if ((now - g_cooldown_table[i].removed_at_ms) < COOLDOWN_MS)
+         if ((now - g_cooldown_table[i].removed_at_ms) < BLE_COOLDOWN_MS)
          {
             return true;
          }
@@ -272,8 +272,8 @@ static int find_empty_slot(void)
 void ble_expire_reed_slots(void)
 {
    uint32_t now = 0; /**< current tick in ms */
-   uint32_t age = 0; /**< slot age in ms */
-   int      i   = 0; /**< loop index */
+   uint32_t age = 0; /**< slot age in ms     */
+   int      i   = 0; /**< loop index         */
 
    now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
@@ -333,10 +333,10 @@ static bool extract_name(const uint8_t *p_adv,
                           char *p_out,
                           int out_sz)
 {
-   int     i        = 0;    /**< advertisement parse index */
-   uint8_t flen     = 0;    /**< AD structure length */
-   uint8_t ftype    = 0;    /**< AD structure type */
-   int     name_len = 0;    /**< extracted name length */
+   int     i        = 0; /**< advertisement parse index */
+   uint8_t flen     = 0; /**< AD structure length       */
+   uint8_t ftype    = 0; /**< AD structure type         */
+   int     name_len = 0; /**< extracted name length     */
 
    while (i < len)
    {
@@ -373,8 +373,8 @@ static bool extract_name(const uint8_t *p_adv,
 /******************************************************************************
  * \brief Find manufacturer specific data in advertisement payload.
  *
- * \param p_adv    - Pointer to raw advertisement data.
- * \param len      - Length of advertisement data in bytes.
+ * \param p_adv     - Pointer to raw advertisement data.
+ * \param len       - Length of advertisement data in bytes.
  * \param p_out_len - Output for manufacturer data length in bytes.
  *
  * \return const uint8_t* - Pointer to manufacturer data, or NULL if not found.
@@ -386,8 +386,8 @@ static const uint8_t *find_mfg_data(const uint8_t *p_adv,
                                      int *p_out_len)
 {
    int     i     = 0; /**< advertisement parse index */
-   uint8_t flen  = 0; /**< AD structure length */
-   uint8_t ftype = 0; /**< AD structure type */
+   uint8_t flen  = 0; /**< AD structure length       */
+   uint8_t ftype = 0; /**< AD structure type         */
 
    while (i < len)
    {
@@ -458,33 +458,40 @@ static void update_room_for_slot(int slot, uint8_t door_state)
 }
 
 /******************************************************************************
- * \brief Handle PIR motion sensor advertisement.
+ * \brief Handle dynamic PIR sensor advertisement.
  *
- * \param p_adv    - Pointer to raw advertisement data.
- * \param len      - Length of advertisement data.
- * \param p_mac    - Pointer to device MAC address (unused).
+ * \param p_adv     - Pointer to raw advertisement data.
+ * \param len       - Length of advertisement data.
+ * \param p_mac     - Pointer to device MAC address.
  * \param addr_type - BLE address type (unused).
+ * \param p_name    - Null-terminated device name string.
  *
  * \return void
  *
- * \details Extracts motion count and battery SOC from manufacturer data.
- *          Publishes to vroom bus on first seen or count change.
- *          Delegates occupancy sliding-window logic to pir_window_update().
+ * \details Implements PIR slot state machine mirroring reed pattern.
+ *          Known MACs update their slot. New MACs are allocated a slot
+ *          if the table is not full. Publishes to vroom bus on first
+ *          seen or data change. Delegates occupancy logic to
+ *          pir_window_update().
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
-static void handle_pir(const uint8_t *p_adv,
-                        int len,
-                        const uint8_t *p_mac,
-                        uint8_t addr_type)
+static void handle_pir_dynamic(const uint8_t *p_adv,
+                                int            len,
+                                const uint8_t *p_mac,
+                                uint8_t        addr_type,
+                                const char    *p_name)
 {
-   int             mfg_len    = 0;    /**< manufacturer data length */
-   const uint8_t  *p_mfg     = NULL; /**< manufacturer data pointer */
-   uint32_t        count      = 0;    /**< motion event count */
-   bool            first_seen = false; /**< first advertisement flag */
-   bool            changed    = false; /**< state changed flag */
+   int            mfg_len  = 0;    /**< manufacturer data length    */
+   const uint8_t *p_mfg    = NULL; /**< manufacturer data pointer   */
+   uint32_t       count    = 0;    /**< motion event count          */
+   int            batt     = -1;   /**< battery SOC percent         */
+   uint32_t       now      = 0;    /**< current tick in ms          */
+   int            slot     = -1;   /**< slot index                  */
+   bool           changed  = false; /**< data changed flag          */
+   uint8_t        occupied = 0;    /**< occupied flag byte          */
+   uint16_t       gen      = 0;    /**< slot generation counter     */
 
-   (void)p_mac;
    (void)addr_type;
 
    p_mfg = find_mfg_data(p_adv, len, &mfg_len);
@@ -493,45 +500,116 @@ static void handle_pir(const uint8_t *p_adv,
       return;
    }
 
+   ESP_LOGI(TAG, "PIR adv mac=%02x:%02x:%02x:%02x:%02x:%02x type=%d name=%s",
+         p_mac[0], p_mac[1], p_mac[2], p_mac[3], p_mac[4], p_mac[5],
+         addr_type, p_name);
+   
    count = ((uint32_t)p_mfg[PIR_COUNT_BYTE0] << 24) |
            ((uint32_t)p_mfg[PIR_COUNT_BYTE1] << 16) |
            ((uint32_t)p_mfg[PIR_COUNT_BYTE2] <<  8) |
             (uint32_t)p_mfg[PIR_COUNT_BYTE3];
 
-   first_seen     = !g_pir_seen;
-   changed        = ((int)count != g_motion_count);
-   g_motion_count = (int)count;
-
    if (mfg_len >= MFG_PIR_BATT_IDX)
    {
-      g_pir_batt = (int)p_mfg[MFG_PIR_BATT_IDX];
+      batt = (int)p_mfg[MFG_PIR_BATT_IDX];
    }
 
    if (mfg_len >= (MFG_PIR_OCCUPIED_IDX + 1))
    {
-      uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-      pir_window_update(now_ms, (int)p_mfg[MFG_PIR_OCCUPIED_IDX]);
+      occupied = p_mfg[MFG_PIR_OCCUPIED_IDX];
    }
 
-   stamp_device(DEV_IDX_PIR);
+   now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-   if (first_seen || changed)
+   if (NULL == g_pir_mutex)
    {
-      g_pir_seen = true;
-      bus_publish_pir(count, g_pir_batt);
-      ESP_LOGI(TAG, ">>> PIR count=%u batt=%d%%", count, g_pir_batt);
+      return;
    }
-   ESP_LOGI(TAG, ">>> even if no change PIR count=%u batt=%d%%", count, g_pir_batt);
+
+   (void)xSemaphoreTake(g_pir_mutex, portMAX_DELAY);
+
+   /* search for existing slot by MAC */
+   for (int i = 0; i < MAX_PIRS; i++)
+   {
+      if ((SLOT_EMPTY != g_pir_table[i].state) &&
+          (0 == memcmp(g_pir_table[i].mac, p_mac, 6)))
+      {
+         slot = i;
+         break;
+      }
+   }
+
+   if (0 <= slot)
+   {
+      changed = (count != g_pir_table[slot].count) ||
+                (batt  != g_pir_table[slot].batt);
+
+      g_pir_table[slot].count        = count;
+      g_pir_table[slot].batt         = batt;
+      g_pir_table[slot].last_seen_ms = now;
+      g_pir_table[slot].state        = SLOT_ACTIVE;
+
+      (void)xSemaphoreGive(g_pir_mutex);
+
+      stamp_device((BLE_DEV_IDX_E)(DEV_IDX_PIR + slot));
+      pir_window_update(slot, now, (int)occupied);
+
+      if (changed)
+      {
+         bus_publish_pir((uint8_t)(slot + 1), count, batt);
+         ESP_LOGI(TAG, ">>> PIR slot %d count=%u batt=%d%%",
+                  slot, count, batt);
+      }
+
+      return;
+   }
+
+   /* allocate new slot */
+   for (int i = 0; i < MAX_PIRS; i++)
+   {
+      if (SLOT_EMPTY == g_pir_table[i].state)
+      {
+         slot = i;
+         break;
+      }
+   }
+
+   if (0 > slot)
+   {
+      (void)xSemaphoreGive(g_pir_mutex);
+      ESP_LOGW(TAG, "PIR table full (%d), ignoring %s", MAX_PIRS, p_name);
+      return;
+   }
+
+   (void)memcpy(g_pir_table[slot].mac, p_mac, 6);
+   (void)strncpy(g_pir_table[slot].name, p_name,
+                  sizeof(g_pir_table[slot].name) - 1);
+   g_pir_table[slot].name[sizeof(g_pir_table[slot].name) - 1] = '\0';
+   g_pir_table[slot].count        = count;
+   g_pir_table[slot].batt         = batt;
+   g_pir_table[slot].state        = SLOT_ACTIVE;
+   g_pir_table[slot].last_seen_ms = now;
+   g_pir_table[slot].generation++;
+   gen = g_pir_table[slot].generation;
+
+   (void)xSemaphoreGive(g_pir_mutex);
+
+   ESP_LOGI(TAG, "PIR slot %d assigned to %s (gen=%u)", slot, p_name, gen);
+   stamp_device((BLE_DEV_IDX_E)(DEV_IDX_PIR + slot));
+   pir_window_update(slot, now, (int)occupied);
+
+   bus_publish_pir((uint8_t)(slot + 1), count, batt);
+   ESP_LOGI(TAG, ">>> PIR slot %d count=%u batt=%d%%", slot, count, batt);
 }
 
 /******************************************************************************
  * \brief Handle dynamic reed sensor advertisement.
  *
- * \param p_adv    - Pointer to raw advertisement data.
- * \param len      - Length of advertisement data.
- * \param p_mac    - Pointer to device MAC address.
+ * \param p_adv     - Pointer to raw advertisement data.
+ * \param len       - Length of advertisement data.
+ * \param p_mac     - Pointer to device MAC address.
  * \param addr_type - BLE address type (unused).
- * \param p_name   - Null-terminated device name string.
+ * \param p_name    - Null-terminated device name string.
  *
  * \return void
  *
@@ -547,14 +625,14 @@ static void handle_reed_dynamic(const uint8_t *p_adv,
                                  uint8_t addr_type,
                                  const char *p_name)
 {
-   int            mfg_len    = 0;    /**< manufacturer data length */
-   const uint8_t *p_mfg     = NULL; /**< manufacturer data pointer */
-   uint8_t        door_state = 0xFF; /**< door state byte */
-   int            batt       = -1;  /**< battery SOC percent */
-   uint32_t       now        = 0;   /**< current tick in ms */
-   int            slot       = -1;  /**< slot index */
-   bool           was_offline = false; /**< slot was offline flag */
-   uint16_t       gen        = 0;   /**< slot generation counter */
+   int            mfg_len     = 0;    /**< manufacturer data length  */
+   const uint8_t *p_mfg      = NULL; /**< manufacturer data pointer */
+   uint8_t        door_state  = 0xFF; /**< door state byte           */
+   int            batt        = -1;   /**< battery SOC percent       */
+   uint32_t       now         = 0;    /**< current tick in ms        */
+   int            slot        = -1;   /**< slot index                */
+   bool           was_offline = false; /**< slot was offline flag    */
+   uint16_t       gen         = 0;    /**< slot generation counter   */
 
    (void)addr_type;
 
@@ -637,9 +715,9 @@ static void handle_reed_dynamic(const uint8_t *p_adv,
 /******************************************************************************
  * \brief Handle LightNF smart light advertisement.
  *
- * \param p_adv    - Pointer to raw advertisement data.
- * \param len      - Length of advertisement data.
- * \param p_mac    - Pointer to device MAC address.
+ * \param p_adv     - Pointer to raw advertisement data.
+ * \param len       - Length of advertisement data.
+ * \param p_mac     - Pointer to device MAC address.
  * \param addr_type - BLE address type.
  *
  * \return void
@@ -654,12 +732,12 @@ static void handle_light(const uint8_t *p_adv,
                           const uint8_t *p_mac,
                           uint8_t addr_type)
 {
-   int            mfg_len   = 0;    /**< manufacturer data length */
-   const uint8_t *p_mfg    = NULL; /**< manufacturer data pointer */
-   uint8_t        new_state = 0;   /**< extracted relay state */
+   int            mfg_len    = 0;    /**< manufacturer data length  */
+   const uint8_t *p_mfg     = NULL; /**< manufacturer data pointer */
+   uint8_t        new_state  = 0;   /**< extracted relay state     */
    bool           first_seen = false; /**< first advertisement flag */
-   bool           changed    = false; /**< state changed flag */
-   bool           log_due    = false; /**< periodic log due flag */
+   bool           changed    = false; /**< state changed flag       */
+   bool           log_due    = false; /**< periodic log due flag    */
 
    p_mfg = find_mfg_data(p_adv, len, &mfg_len);
    if ((NULL == p_mfg) || (mfg_len < MFG_LIGHT_MIN_LEN))
@@ -697,9 +775,9 @@ static void handle_light(const uint8_t *p_adv,
 /******************************************************************************
  * \brief Handle SmartLock advertisement.
  *
- * \param p_adv    - Pointer to raw advertisement data.
- * \param len      - Length of advertisement data.
- * \param p_mac    - Pointer to device MAC address.
+ * \param p_adv     - Pointer to raw advertisement data.
+ * \param len       - Length of advertisement data.
+ * \param p_mac     - Pointer to device MAC address.
  * \param addr_type - BLE address type.
  *
  * \return void
@@ -714,13 +792,13 @@ static void handle_lock(const uint8_t *p_adv,
                          const uint8_t *p_mac,
                          uint8_t addr_type)
 {
-   int            mfg_len   = 0;    /**< manufacturer data length */
-   const uint8_t *p_mfg    = NULL; /**< manufacturer data pointer */
-   uint8_t        new_state = 0;   /**< extracted lock state */
-   uint8_t        new_batt  = 0;   /**< extracted battery SOC */
+   int            mfg_len    = 0;    /**< manufacturer data length  */
+   const uint8_t *p_mfg     = NULL; /**< manufacturer data pointer */
+   uint8_t        new_state  = 0;   /**< extracted lock state      */
+   uint8_t        new_batt   = 0;   /**< extracted battery SOC     */
    bool           first_seen = false; /**< first advertisement flag */
-   bool           changed    = false; /**< state changed flag */
-   bool           log_due    = false; /**< periodic log due flag */
+   bool           changed    = false; /**< state changed flag       */
+   bool           log_due    = false; /**< periodic log due flag    */
 
    p_mfg = find_mfg_data(p_adv, len, &mfg_len);
    if ((NULL == p_mfg) || (mfg_len < MFG_LOCK_MIN_LEN))
@@ -759,9 +837,8 @@ static void handle_lock(const uint8_t *p_adv,
 
 static const DEVICE_ENTRY_T g_device_table[] =
 {
-   { "PIR_Motion", handle_pir   },
-   { "LightNF",    handle_light },
-   { "SmartLock",  handle_lock  },
+   { "LightNF",   handle_light },
+   { "SmartLock", handle_lock  },
 };
 
 #define DEVICE_TABLE_SIZE \
@@ -770,15 +847,16 @@ static const DEVICE_ENTRY_T g_device_table[] =
 /******************************************************************************
  * \brief Parse a BLE advertisement and dispatch to the appropriate handler.
  *
- * \param p_adv    - Pointer to raw advertisement data.
- * \param len      - Length of advertisement data.
- * \param p_mac    - Pointer to device MAC address.
+ * \param p_adv     - Pointer to raw advertisement data.
+ * \param len       - Length of advertisement data.
+ * \param p_mac     - Pointer to device MAC address.
  * \param addr_type - BLE address type.
  *
  * \return void
  *
- * \details Reed sensors matched by name prefix. Fixed devices matched
- *          by exact name via g_device_table.
+ * \details PIR sensors matched by "PIR_" prefix. Reed sensors matched
+ *          by "ReedSensor" prefix. Fixed devices matched by exact name
+ *          via g_device_table.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -788,10 +866,16 @@ static void parse_advertisement(const uint8_t *p_adv,
                                  uint8_t addr_type)
 {
    char name[ADV_NAME_BUF_SIZE] = {0}; /**< extracted device name */
-   int  i = 0;                         /**< loop index */
+   int  i = 0;                         /**< loop index            */
 
    if (!extract_name(p_adv, len, name, sizeof(name)))
    {
+      return;
+   }
+
+   if (0 == strncmp(name, PIR_NAME_PREFIX, PIR_NAME_PREFIX_LEN))
+   {
+      handle_pir_dynamic(p_adv, len, p_mac, addr_type, name);
       return;
    }
 
@@ -888,7 +972,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
 int ble_get_reed_count(void)
 {
    int count = 0; /**< highest non-empty slot index + 1 */
-   int i     = 0; /**< loop index */
+   int i     = 0; /**< loop index                       */
 
    if (NULL == g_reed_mutex)
    {
@@ -924,15 +1008,15 @@ int ble_get_reed_count(void)
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
-bool ble_get_reed_slot_info(int slot,
+bool ble_get_reed_slot_info(int       slot,
                              char     *p_name_out,
                              int      *p_batt_out,
                              uint16_t *p_age_out,
                              uint8_t  *p_state_out,
                              uint16_t *p_gen_out)
 {
-   uint32_t now_ms = 0; /**< current tick in ms */
-   uint32_t age_ms = 0; /**< slot age in ms */
+   uint32_t now_ms = 0; /**< current tick in ms  */
+   uint32_t age_ms = 0; /**< slot age in ms      */
    uint32_t age_s  = 0; /**< slot age in seconds */
 
    if ((0 > slot) || (slot >= MAX_REEDS))
@@ -975,9 +1059,9 @@ bool ble_get_reed_slot_info(int slot,
 
    if (NULL != p_age_out)
    {
-      now_ms  = xTaskGetTickCount() * portTICK_PERIOD_MS;
-      age_ms  = now_ms - g_reed_table[slot].last_seen_ms;
-      age_s   = age_ms / 1000;
+      now_ms     = xTaskGetTickCount() * portTICK_PERIOD_MS;
+      age_ms     = now_ms - g_reed_table[slot].last_seen_ms;
+      age_s      = age_ms / 1000;
       *p_age_out = (age_s > AGE_MAX_VALUE) ?
                    (uint16_t)AGE_MAX_VALUE : (uint16_t)age_s;
    }
@@ -985,6 +1069,82 @@ bool ble_get_reed_slot_info(int slot,
    (void)xSemaphoreGive(g_reed_mutex);
 
    return true;
+}
+
+/******************************************************************************
+ * \brief Get slot metrics for an active PIR sensor.
+ *
+ * \param slot        - Slot index (0-based).
+ * \param p_count_out - Output for cumulative motion count, or NULL.
+ * \param p_batt_out  - Output for battery SOC percent, or NULL.
+ *
+ * \return bool - true if slot is active or offline, false if empty or OOB.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+bool ble_scan_get_pir_slot_info(int slot, uint32_t *p_count_out, int *p_batt_out, uint16_t *p_age_out)
+{
+   uint32_t now_ms = 0;
+   uint32_t age_ms = 0;
+   uint32_t age_s  = 0;
+   bool active = false;
+   if ((slot < 0) || (slot >= MAX_PIRS) || (NULL == g_pir_mutex))
+   {
+      return false;
+   }
+   (void)xSemaphoreTake(g_pir_mutex, portMAX_DELAY);
+   if (g_pir_table[slot].state != SLOT_EMPTY)
+   {
+      if (p_count_out) { *p_count_out = g_pir_table[slot].count; }
+      if (p_batt_out)  { *p_batt_out  = g_pir_table[slot].batt;  }
+      if (p_age_out)
+      {
+         now_ms     = xTaskGetTickCount() * portTICK_PERIOD_MS;
+         age_ms     = now_ms - g_pir_table[slot].last_seen_ms;
+         age_s      = age_ms / 1000;
+         *p_age_out = (age_s > AGE_MAX_VALUE) ?
+                      (uint16_t)AGE_MAX_VALUE : (uint16_t)age_s;
+      }
+      active = true;
+   }
+   (void)xSemaphoreGive(g_pir_mutex);
+   return active;
+}
+
+/******************************************************************************
+ * \brief Get count of active or offline PIR sensor slots.
+ *
+ * \return int - Highest non-empty slot index + 1, or 0 if none.
+ *
+ * \details Returns the count such that all slots 0..count-1 are visible
+ *          on the dashboard. SLOT_EMPTY slots beyond the last active
+ *          slot cause the count to stop.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+int ble_scan_get_pir_count(void)
+{
+   int count = 0; /**< highest non-empty slot index + 1 */
+   int i     = 0; /**< loop index                        */
+
+   if (NULL == g_pir_mutex)
+   {
+      return 0;
+   }
+
+   (void)xSemaphoreTake(g_pir_mutex, portMAX_DELAY);
+
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      if (SLOT_EMPTY != g_pir_table[i].state)
+      {
+         count = i + 1;
+      }
+   }
+
+   (void)xSemaphoreGive(g_pir_mutex);
+
+   return count;
 }
 
 /******************************************************************************
@@ -1012,6 +1172,7 @@ void ble_scan_start(void)
    };
 
    configASSERT(g_reed_mutex);
+   configASSERT(g_pir_mutex);
 
    ret = esp_ble_gap_register_callback(gap_event_handler);
    if (ESP_OK != ret)
@@ -1037,7 +1198,7 @@ void ble_scan_start(void)
  *
  * \return void
  *
- * \details Creates reed mutex and zeroes reed and cooldown tables.
+ * \details Creates reed and PIR mutexes and zeroes all tables.
  *          Must be called before ble_gattc_init() and ble_scan_start().
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
@@ -1046,6 +1207,11 @@ void ble_scan_preinit(void)
 {
    g_reed_mutex = xSemaphoreCreateMutexStatic(&g_reed_mutex_buf);
    configASSERT(g_reed_mutex);
+
+   g_pir_mutex = xSemaphoreCreateMutexStatic(&g_pir_mutex_buf);
+   configASSERT(g_pir_mutex);
+
    (void)memset(g_reed_table,     0, sizeof(g_reed_table));
    (void)memset(g_cooldown_table, 0, sizeof(g_cooldown_table));
+   (void)memset(g_pir_table,      0, sizeof(g_pir_table));
 }

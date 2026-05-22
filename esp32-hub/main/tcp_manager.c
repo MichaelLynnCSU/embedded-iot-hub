@@ -46,6 +46,16 @@
  *            - accept() / listen failure    -> motor_online = 0
  *          No longer touched by disconnect_c3() (removed) or ping path
  *          (removed).
+ *
+ * \note    Per-slot PIR occupancy (2026-05-20):
+ *          PIR_SLOT_STATE_T gains occupied and offline fields.
+ *          drain_queues() PIR sync loop reads pir_window_get_occupied(i)
+ *          per slot after BLE snapshot. offline computed as age > PIR_OFFLINE_S.
+ *          Legacy flat g_state.pir_occupied retained for JSON backward
+ *          compat (set to slot 0 occupied). Per-slot occupied and offline
+ *          sent to BeagleBone via JSON pirs[] array fields.
+ *          flat motion_count fixed: summed across all active slots instead
+ *          of last-write-wins mailbox race.
  ******************************************************************************/
 
 #include "config.h"
@@ -69,9 +79,8 @@
 #include "trinity_log.h"
 #include "pi_controller.h"
 #include "motor_sm.h"
+#include "pir_window.h"
 
-#define MAX_REEDS               6
-#define REED_OFFLINE_S          150
 #define BB_CONNECT_TIMEOUT_MS   2000
 #define BLOCK_COUNT_MAX         5
 #define SOCK_POLL_DELAY_MS      100
@@ -82,10 +91,7 @@
 #define TCP_STATE_CONNECTING    1
 #define TCP_STATE_CONNECTED     2
 
-/* Motor server accept() timeout -- non-blocking so the main loop continues
- * even when the motor is idle and no connection arrives this cycle.       */
-#define MOTOR_ACCEPT_TIMEOUT_MS  50
-/* Battery reply read timeout after PWM frame sent */
+#define MOTOR_ACCEPT_TIMEOUT_MS     50
 #define MOTOR_BATT_RECV_TIMEOUT_MS  500
 
 static const char *TAG = "TCP_MGR";
@@ -102,6 +108,16 @@ typedef struct
 
 typedef struct
 {
+    int      batt;
+    uint32_t motion_count;
+    uint16_t age;
+    bool     active;
+    int      occupied; /**< per-slot sliding window occupancy — 2026-05-20 */
+    uint8_t  offline;  /**< age > PIR_OFFLINE_S — 2026-05-20               */
+} PIR_SLOT_STATE_T;
+
+typedef struct
+{
    int               avg_temp;
    uint32_t          motion_count;
    int               pir_batt;
@@ -112,21 +128,27 @@ typedef struct
    uint8_t           motor_online;
    int               motor_batt;
    REED_SLOT_STATE_T reed_slots[MAX_REEDS];
+   PIR_SLOT_STATE_T  pir_slots[MAX_PIRS];
    uint16_t          age_pir;
    uint16_t          age_lgt;
    uint16_t          age_lck;
    int               reed_count;
+   int               pir_count;
 } TCP_STATE_T;
 
 static TCP_STATE_T g_state =
 {
-   .avg_temp   = DEFAULT_AVG_TEMP,
-   .pir_batt   = -1,
-   .lock_batt  = -1,
-   .motor_batt = -1,
-   .age_pir    = 0xFFFF,
-   .age_lgt    = 0xFFFF,
-   .age_lck    = 0xFFFF,
+    .avg_temp     = DEFAULT_AVG_TEMP,
+    .pir_batt     = -1,
+    .motion_count = 0,
+    .pir_occupied = 0,
+    .lock_batt    = -1,
+    .motor_batt   = -1,
+    .age_pir      = 0xFFFF,
+    .age_lgt      = 0xFFFF,
+    .age_lck      = 0xFFFF,
+    .reed_count   = 0,
+    .pir_count    = 0,
 };
 
 /*----------------------------------------------------------------------------*/
@@ -140,6 +162,7 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
    TEMP_PAYLOAD_T  p_temp;
    MOTOR_PAYLOAD_T p_motor;
    int             slot        = 0;
+   int             i           = 0;
    const char     *p_state_str = NULL;
 
    /* ---- LOCK first: latency sensitive ---- */
@@ -168,11 +191,29 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
       else if (2 == p_reed.id) { ble_update_room_sensor(7, p_state_str); }
    }
 
-   /* ---- PIR ---- */
+   /* ---- PIR mailbox — update per-slot count and batt only ---- */
    if (pdTRUE == xQueueReceive(sub.mb_pir, &p_pir, 0))
    {
-      g_state.motion_count = p_pir.count;
-      g_state.pir_batt     = p_pir.batt;
+      int p_slot = (int)p_pir.id - 1;
+      if ((0 <= p_slot) && (p_slot < MAX_PIRS))
+      {
+         g_state.pir_slots[p_slot].motion_count = p_pir.count;
+         g_state.pir_slots[p_slot].batt         = p_pir.batt;
+         g_state.pir_slots[p_slot].active        = true;
+      }
+
+      /* Flat motion_count: sum all active slots — fixes last-write-wins race */
+      g_state.motion_count = 0;
+      for (i = 0; i < MAX_PIRS; i++)
+      {
+         if (g_state.pir_slots[i].active)
+         {
+            g_state.motion_count += g_state.pir_slots[i].motion_count;
+         }
+      }
+
+      /* Flat batt: report the slot that just fired */
+      g_state.pir_batt = p_pir.batt;
    }
 
    /* ---- LIGHT ---- */
@@ -197,17 +238,16 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
    }
 
    /* ---- snapshot BLE state after mailboxes drained ---- */
-   g_state.pir_occupied = ble_get_pir_occupied();
-   g_state.age_pir      = ble_get_device_age_s(BLE_DEV_PIR);
-   g_state.age_lgt      = ble_get_device_age_s(BLE_DEV_LIGHT);
-   g_state.age_lck      = ble_get_device_age_s(BLE_DEV_LOCK);
+   g_state.age_pir = ble_get_device_age_s(BLE_DEV_PIR);
+   g_state.age_lgt = ble_get_device_age_s(BLE_DEV_LIGHT);
+   g_state.age_lck = ble_get_device_age_s(BLE_DEV_LOCK);
 
-   int      count = ble_get_reed_count();
-   int      i     = 0;
-   uint16_t age   = 0xFFFF;
+   int      count      = ble_get_reed_count();
+   uint16_t age        = 0xFFFF;
    uint8_t  slot_state = 0xFF;
-   uint16_t gen   = 0;
+   uint16_t gen        = 0;
 
+   /* Sync and cache Reed array */
    for (i = 0; (i < count) && (i < MAX_REEDS); i++)
    {
       age = 0xFFFF; slot_state = 0xFF; gen = 0;
@@ -218,15 +258,49 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
       g_state.reed_slots[i].gen     = gen;
    }
 
+   /* Sync and cache PIR array — per-slot occupied and offline */
+   g_state.pir_count = ble_get_pir_count();
+   for (i = 0; (i < g_state.pir_count) && (i < MAX_PIRS); i++)
+   {
+      age = 0xFFFF;
+      int batt_pir = 0;
+      (void)ble_get_pir_slot_info(i, NULL, &batt_pir, &age);
+      g_state.pir_slots[i].batt     = batt_pir;
+      g_state.pir_slots[i].age      = age;
+      g_state.pir_slots[i].active   = true;
+      g_state.pir_slots[i].occupied = pir_window_get_occupied(i);
+      g_state.pir_slots[i].offline  = (age > PIR_OFFLINE_S) ? 1 : 0;
+   }
+
+   /* Legacy flat occupied — slot 0 for backward compat */
+   g_state.pir_occupied = (g_state.pir_count > 0) ?
+                           g_state.pir_slots[0].occupied : 0;
+
+   /* ---- Reed debug log ---- */
    for (i = 0; i < MAX_REEDS; i++)
    {
       if (g_state.reed_slots[i].active)
       {
          ESP_LOGI(TAG, "[REED] slot=%d state=%d batt=%d age=%d offline=%d gen=%d",
-                  i + 1, g_state.reed_slots[i].state, g_state.reed_slots[i].batt,
-                  g_state.reed_slots[i].age, g_state.reed_slots[i].offline,
+                  i + 1,
+                  g_state.reed_slots[i].state,
+                  g_state.reed_slots[i].batt,
+                  g_state.reed_slots[i].age,
+                  g_state.reed_slots[i].offline,
                   g_state.reed_slots[i].gen);
       }
+   }
+
+   /* ---- PIR debug log — matches reed format, one line per slot ---- */
+   for (i = 0; i < g_state.pir_count; i++)
+   {
+      ESP_LOGI(TAG, "[PIR] slot=%d count=%u batt=%d age=%d offline=%d occ=%d",
+               i + 1,
+               (unsigned)g_state.pir_slots[i].motion_count,
+               g_state.pir_slots[i].batt,
+               g_state.pir_slots[i].age,
+               g_state.pir_slots[i].offline,
+               g_state.pir_slots[i].occupied);
    }
 }
 
@@ -261,6 +335,7 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
    cJSON   *p_reeds = NULL;
    cJSON   *p_rooms = NULL;
    cJSON   *p_entry = NULL;
+   cJSON   *p_pirs  = NULL;
    char    *p_msg   = NULL;
    char     name[REED_NAME_BUF_SIZE] = {0};
    uint8_t  door_state = 0xFF;
@@ -329,6 +404,28 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
       (void)cJSON_AddItemToObject(p_root, "rooms", p_rooms);
    }
 
+   /* PIR array — per-slot count, batt, age, occupied, offline */
+   p_pirs = cJSON_CreateArray();
+   if (NULL != p_pirs)
+   {
+      for (i = 0; (i < g_state.pir_count) && (i < MAX_PIRS); i++)
+      {
+         p_entry = cJSON_CreateObject();
+         if (NULL != p_entry)
+         {
+            (void)cJSON_AddNumberToObject(p_entry, "id",       i + 1);
+            (void)cJSON_AddNumberToObject(p_entry, "count",    g_state.pir_slots[i].motion_count);
+            (void)cJSON_AddNumberToObject(p_entry, "batt",     g_state.pir_slots[i].batt);
+            (void)cJSON_AddNumberToObject(p_entry, "age",      g_state.pir_slots[i].age);
+            (void)cJSON_AddNumberToObject(p_entry, "occupied", g_state.pir_slots[i].occupied);
+            (void)cJSON_AddNumberToObject(p_entry, "offline",  g_state.pir_slots[i].offline);
+            (void)cJSON_AddItemToArray(p_pirs, p_entry);
+         }
+      }
+      (void)cJSON_AddItemToObject(p_root, "pirs", p_pirs);
+   }
+   (void)cJSON_AddNumberToObject(p_root, "pir_count", g_state.pir_count);
+
    p_msg = cJSON_PrintUnformatted(p_root);
    cJSON_Delete(p_root);
    if (NULL == p_msg) { ESP_LOGE(TAG, "cJSON serialize failed (BB)"); return; }
@@ -341,26 +438,33 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
    else
    {
       *p_bb_block_count = 0;
-      ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u occ=%d lgt=%d lck=%d reeds=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d",
-               g_state.avg_temp, (unsigned)g_state.motion_count, g_state.pir_occupied,
+
+      /* BB summary line */
+      ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u occ=%d lgt=%d lck=%d "
+                    "reeds=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d",
+               g_state.avg_temp, (unsigned)g_state.motion_count,
+               g_state.pir_occupied,
                g_state.light_state, g_state.lock_state, g_state.reed_count,
                (int)g_state.motor_online, g_state.motor_batt,
                g_state.pir_batt, g_state.lock_batt);
+
+      /* Per-slot PIR send log — matches drain_queues format */
+      for (i = 0; i < g_state.pir_count; i++)
+      {
+         ESP_LOGI(TAG, "[PIR_SEND] slot=%d count=%u batt=%d age=%d offline=%d occ=%d",
+                  i + 1,
+                  (unsigned)g_state.pir_slots[i].motion_count,
+                  g_state.pir_slots[i].batt,
+                  g_state.pir_slots[i].age,
+                  g_state.pir_slots[i].offline,
+                  g_state.pir_slots[i].occupied);
+      }
    }
    cJSON_free(p_msg);
 }
 
 /*----------------------------------------------------------------------------*/
 
-/**
- * \brief  Open the hub-side motor listen socket.
- *
- * \return Listening socket fd on success, SOCK_INVALID on failure.
- *
- * \details Called once at task startup (and again if the socket is lost).
- *          Bound to HUB_MOTOR_PORT on INADDR_ANY. Non-blocking so the
- *          accept() loop can return immediately when no motor is connecting.
- */
 static int open_motor_listen_socket(void)
 {
    struct sockaddr_in addr =
@@ -369,8 +473,8 @@ static int open_motor_listen_socket(void)
       .sin_port        = htons(HUB_MOTOR_PORT),
       .sin_addr.s_addr = htonl(INADDR_ANY),
    };
-   int sock = SOCK_INVALID;
-   int opt  = 1;
+   int sock  = SOCK_INVALID;
+   int opt   = 1;
    int flags = 0;
 
    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
@@ -406,13 +510,6 @@ static int open_motor_listen_socket(void)
 
 /*----------------------------------------------------------------------------*/
 
-/**
- * \brief  Non-blocking accept on the motor listen socket.
- *
- * \param  listen_sock  fd returned by open_motor_listen_socket().
- *
- * \return Accepted client fd, or SOCK_INVALID if no connection pending.
- */
 static int accept_motor_connection(int listen_sock)
 {
    int client = SOCK_INVALID;
@@ -432,30 +529,8 @@ static int accept_motor_connection(int listen_sock)
    return client;
 }
 
-/**
- * \brief  Send PWM command to a connected motor client and read batt reply.
- *
- * \param  client_sock  fd from accept_motor_connection() -- closed here.
- * \param  pwm_pct      Effective PWM percent from motor state machine.
- *
- * \details Sends {"pwm": X}, waits up to MOTOR_BATT_RECV_TIMEOUT_MS for
- *          {"batt_motor": Y}, updates g_state, closes client_sock.
- *          motor_online set to 1 on success.
- *
- * \note    Single recv() assumption (2026-05-XX):
- *          Current implementation assumes one recv() call returns a complete
- *          JSON payload. This holds in practice because the battery reply is
- *          small (~18 bytes) relative to MTU and the motor closes after
- *          sending, forcing a kernel flush before select() fires.
- *
- *          PENDING: If packet loss rates observed in trinity_log indicate
- *          EVENT: MOTOR_BATT_PARSE_FAIL is occurring with frequency, the
- *          single recv() must be replaced with a sliding window read loop
- *          that accumulates fragments until FIN (rlen == 0) before parsing.
- *          Threshold for logic change: treat any consistent parse failure
- *          pattern in the logs as evidence the single-shot assumption is
- *          breaking down and the recv loop in tcp_manager.c must be adopted.
- */
+/*----------------------------------------------------------------------------*/
+
 static void send_pwm_to_c3(int client_sock, float pwm_pct)
 {
    cJSON      *p_root    = NULL;
@@ -495,53 +570,52 @@ static void send_pwm_to_c3(int client_sock, float pwm_pct)
 
    ESP_LOGI(TAG, "[MOTOR_SRV] Sent pwm=%d (%.1f%%)", duty, pwm_pct);
 
-   /* Read battery reply with timeout */
    FD_ZERO(&fds);
    FD_SET(client_sock, &fds);
    tv.tv_sec  = MOTOR_BATT_RECV_TIMEOUT_MS / 1000;
    tv.tv_usec = (MOTOR_BATT_RECV_TIMEOUT_MS % 1000) * 1000;
 
-if (0 < select(client_sock + 1, &fds, NULL, NULL, &tv))
-{
-   rlen = recv(client_sock, rx, sizeof(rx) - 1, 0);
-   if (rlen > 0)
+   if (0 < select(client_sock + 1, &fds, NULL, NULL, &tv))
    {
-      rx[rlen]  = '\0';
-      p_rx_json = cJSON_Parse(rx);
-      if (NULL != p_rx_json)
+      rlen = recv(client_sock, rx, sizeof(rx) - 1, 0);
+      if (rlen > 0)
       {
-         p_batt = cJSON_GetObjectItem(p_rx_json, "batt_motor");
-         if ((NULL != p_batt) && (p_batt->valueint >= 0))
+         rx[rlen]  = '\0';
+         p_rx_json = cJSON_Parse(rx);
+         if (NULL != p_rx_json)
          {
-            g_state.motor_batt = p_batt->valueint;
-            ESP_LOGI(TAG, "[MOTOR_SRV] batt_motor=%d%%", g_state.motor_batt);
+            p_batt = cJSON_GetObjectItem(p_rx_json, "batt_motor");
+            if ((NULL != p_batt) && (p_batt->valueint >= 0))
+            {
+               g_state.motor_batt = p_batt->valueint;
+               ESP_LOGI(TAG, "[MOTOR_SRV] batt_motor=%d%%", g_state.motor_batt);
+            }
+            cJSON_Delete(p_rx_json);
          }
-         cJSON_Delete(p_rx_json);
+         else
+         {
+            ESP_LOGW(TAG, "[MOTOR_SRV] JSON parse failed (rlen=%d) rx='%.*s'",
+                     rlen, rlen, rx);
+            trinity_log_event("EVENT: MOTOR_BATT_PARSE_FAIL\n");
+         }
+      }
+      else if (0 == rlen)
+      {
+         ESP_LOGW(TAG, "[MOTOR_SRV] Motor closed before sending batt reply");
+         trinity_log_event("EVENT: MOTOR_BATT_EMPTY_RECV\n");
       }
       else
       {
-         ESP_LOGW(TAG, "[MOTOR_SRV] JSON parse failed (rlen=%d) rx='%.*s'",
-                  rlen, rlen, rx);
-         trinity_log_event("EVENT: MOTOR_BATT_PARSE_FAIL\n");
+         ESP_LOGW(TAG, "[MOTOR_SRV] recv() error (errno=%d)", errno);
+         trinity_log_event("EVENT: MOTOR_BATT_RECV_ERR\n");
       }
-   }
-   else if (0 == rlen)
-   {
-      ESP_LOGW(TAG, "[MOTOR_SRV] Motor closed before sending batt reply");
-      trinity_log_event("EVENT: MOTOR_BATT_EMPTY_RECV\n");
    }
    else
    {
-      ESP_LOGW(TAG, "[MOTOR_SRV] recv() error (errno=%d)", errno);
-      trinity_log_event("EVENT: MOTOR_BATT_RECV_ERR\n");
+      ESP_LOGW(TAG, "[MOTOR_SRV] batt reply timed out after %d ms",
+               MOTOR_BATT_RECV_TIMEOUT_MS);
+      trinity_log_event("EVENT: MOTOR_BATT_TIMEOUT\n");
    }
-}
-else
-{
-   ESP_LOGW(TAG, "[MOTOR_SRV] batt reply timed out after %d ms",
-            MOTOR_BATT_RECV_TIMEOUT_MS);
-   trinity_log_event("EVENT: MOTOR_BATT_TIMEOUT\n");
-}
 
    g_state.motor_online = 1;
    bus_publish_motor(1, g_state.motor_batt);
@@ -643,7 +717,7 @@ void tcp_manager_task(EventGroupHandle_t p_system_eg,
    uint32_t    now              = 0;
    float       pi_out           = 0.0f;
    float       eff_pwm          = 0.0f;
-   bool        do_connect       = false;   /* unused, kept for run_motor_sm signature */
+   bool        do_connect       = false;
    bool        do_disconnect    = false;
 
    (void)p_system_eg;
@@ -660,7 +734,6 @@ void tcp_manager_task(EventGroupHandle_t p_system_eg,
                                pdFALSE, pdTRUE, portMAX_DELAY);
    ESP_LOGI(TAG, "TCP task running");
 
-   /* Open motor listen socket once -- kept open for the task lifetime. */
    motor_listen = open_motor_listen_socket();
    if (SOCK_INVALID == motor_listen)
    {
@@ -676,22 +749,17 @@ void tcp_manager_task(EventGroupHandle_t p_system_eg,
       pi_out  = run_pi_controller(now);
       eff_pwm = run_motor_sm(pi_out, now, &do_connect, &do_disconnect);
 
-      /* Motor server: non-blocking accept each loop iteration.
-       * If the motor woke and connected, send current PWM and read batt.
-       * do_disconnect from SM just drives eff_pwm=0 -- listen stays open. */
       if (SOCK_INVALID != motor_listen)
       {
          motor_client = accept_motor_connection(motor_listen);
          if (SOCK_INVALID != motor_client)
          {
-            /* send_pwm_to_c3() closes motor_client internally */
             send_pwm_to_c3(motor_client, eff_pwm);
             motor_client = SOCK_INVALID;
          }
       }
       else
       {
-         /* Attempt to re-open listen socket if it was lost */
          motor_listen = open_motor_listen_socket();
          if (SOCK_INVALID == motor_listen)
          {

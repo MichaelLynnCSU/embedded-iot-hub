@@ -17,6 +17,12 @@
  *          Startup sequence (called by ble_manager.c):
  *          1. ble_gattc_init()  — registers GATT callback and app
  *          2. ble_scan_start()  — sets scan params, starts scanning
+ *
+ * \note    PIR slot table (2026-05-20):
+ *          DEV_IDX_PIR2 added for second PIR age tracking.
+ *          All subsequent indices incremented by one.
+ *          ble_scan_get_pir_slot_info() and ble_scan_get_pir_count()
+ *          added as internal scan-module accessors.
  ******************************************************************************/
 
 #ifndef INCLUDE_BLE_INTERNAL_H_
@@ -40,15 +46,18 @@
  * \brief BLE device index for per-device age tracking.
  *
  * \details Used with stamp_device() and ble_get_device_age_s().
+ *          PIR slot n maps to DEV_IDX_PIR + n so stamp_device() can be
+ *          called as stamp_device((BLE_DEV_IDX_E)(DEV_IDX_PIR + slot)).
  */
 typedef enum
 {
-   DEV_IDX_PIR   = 0, /**< PIR motion sensor */
-   DEV_IDX_REED1 = 1, /**< reed sensor 1 */
-   DEV_IDX_REED2 = 2, /**< reed sensor 2 */
-   DEV_IDX_LIGHT = 3, /**< smart light relay */
-   DEV_IDX_LOCK  = 4, /**< smart lock */
-   DEV_IDX_COUNT = 5  /**< total device count — must be last */
+   DEV_IDX_PIR   = 0, /**< PIR slot 0 — PIR_Motion  */
+   DEV_IDX_PIR2  = 1, /**< PIR slot 1 — PIR_Motion2 */
+   DEV_IDX_REED1 = 2, /**< reed sensor 1             */
+   DEV_IDX_REED2 = 3, /**< reed sensor 2             */
+   DEV_IDX_LIGHT = 4, /**< smart light relay         */
+   DEV_IDX_LOCK  = 5, /**< smart lock                */
+   DEV_IDX_COUNT = 6  /**< total device count — must be last */
 } BLE_DEV_IDX_E;
 
 /************************ STRUCTURE/UNION DATA TYPES **************************/
@@ -174,8 +183,26 @@ void ble_light_handle_event(esp_gattc_cb_event_t event,
  *  \return void */
 void ble_gattc_init(void);
 
+/** \brief Pre-initialize the BLE scan module.
+ *  \return void */
+void ble_scan_preinit(void);
+
 /** \brief Start BLE scanning.
  *  \return void */
 void ble_scan_start(void);
+
+/** \brief Get slot metrics for an active PIR sensor.
+ *  \param slot        - Slot index (0-based).
+ *  \param p_count_out - Output for cumulative motion count, or NULL.
+ *  \param p_batt_out  - Output for battery SOC percent, or NULL.
+ *  \return bool - true if slot is active or offline, false if empty or OOB. */
+bool ble_scan_get_pir_slot_info(int       slot,
+                                uint32_t *p_count_out,
+                                int      *p_batt_out,
+                                uint16_t *p_age_out);
+
+/** \brief Get count of seen PIR slots — internal scan module accessor.
+ *  \return int - Number of PIR slots seen at least once. */
+int ble_scan_get_pir_count(void);
 
 #endif /* INCLUDE_BLE_INTERNAL_H_ */

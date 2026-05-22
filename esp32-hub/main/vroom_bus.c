@@ -133,6 +133,7 @@ static void bus_signal(EventBits_t bits)
 /******************************************************************************
  * \brief Publish a PIR motion event to the bus.
  *
+ * \param count - Id
  * \param count - Motion event count.
  * \param batt  - PIR battery SOC percent.
  *
@@ -144,9 +145,9 @@ static void bus_signal(EventBits_t bits)
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
-void bus_publish_pir(uint32_t count, int batt)
+void bus_publish_pir(uint8_t slot, uint32_t count, int batt)
 {
-   PIR_PAYLOAD_T p = { .count = count, .batt = batt }; /**< PIR payload */
+   PIR_PAYLOAD_T p = {.id = slot, .count = count, .batt = batt }; /**< PIR payload */
    int           i = 0;                                 /**< loop index  */
 
    for (i = 0; i < g_sub_count; i++)
