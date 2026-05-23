@@ -9,10 +9,16 @@
  *          blue pill. Two threads run concurrently:
  *
  *          uart_reader_thread — reads line-framed data from STM32,
- *          parses device frames, stamps heartbeats, saves to DB.
+ *          parses device frames, stamps heartbeats, saves to DB,
+ *          pushes parsed frames onto g_uart_ring, and signals
+ *          uart_push_thread via g_uart_frame_sem.
  *
- *          uart_push_thread — sends consolidated sensor state to STM32
- *          every UART_PUSH_INTERVAL_SEC seconds.
+ *          uart_push_thread — blocks on g_uart_frame_sem rather than
+ *          sleeping on a fixed timer. Wakes immediately when a frame
+ *          arrives, pops from g_uart_ring, builds and sends the
+ *          consolidated state to STM32. Falls back to a 5s deadline
+ *          (UART_PUSH_INTERVAL_SEC) as a watchdog push if no frames
+ *          arrive — preserving the existing heartbeat behavior.
  *
  *          UART frame format (inbound from STM32):
  *          <ID>:<value>[,<batt>]\n
@@ -50,13 +56,24 @@
  *          latest_data.pir_slots[i].occupied. build_and_push() emits
  *          OCC1:n..OCC<pir_count>:n after the PIR<n> lines.
  *          STM32 parser.c handles OCC<1-4> mirroring PIR<1-4> pattern.
+ *
+ * \note    Counting semaphore + ring buffer (2026-05-22):
+ *          uart_ring_push() and uart_ring_pop() added — single-producer
+ *          single-consumer ring buffer (capacity UART_RING_SIZE frames).
+ *          uart_parse_line() calls uart_ring_push() then sem_post() so
+ *          the semaphore count equals the number of frames in the buffer
+ *          at all times. uart_push_thread() calls sem_timedwait() then
+ *          uart_ring_pop() — the successful wait guarantees a frame exists,
+ *          so pop never races. This eliminates payload loss from the previous
+ *          latest_data overwrite pattern and removes the fixed sleep() poll.
+ *          shm_sem replaced by shm_data->shm_mutex throughout.
  ******************************************************************************/
 
 #include <termios.h>
 #include "controller_internal.h"
 #include "controller_logic.h"
 
-#define UART_PUSH_INTERVAL_SEC  5       /**< push thread send interval seconds */
+#define UART_PUSH_INTERVAL_SEC  5       /**< max wait in sem_timedwait — watchdog ceiling */
 #define UART_RETRY_DELAY_SEC    5       /**< delay before retrying UART open */
 #define UART_PUSH_DELAY_US      100000  /**< delay after write in microseconds */
 #define UART_MSG_BUF_SIZE       512     /**< push message buffer size bytes */
@@ -69,6 +86,77 @@ static pthread_mutex_t g_uart_write_mutex =
 
 /** \brief Lock state machine — owned here, protected by data_mutex */
 static LOCK_STATE_E g_lock_state = LOCK_STATE_LOCKED;
+
+/******************************************************************************
+ * \brief Push one UartFrame onto the ring buffer.
+ *
+ * \param p_frame - Pointer to frame to copy into the ring.
+ *
+ * \return void
+ *
+ * \details Protected by g_uart_ring.mutex so multiple callers cannot
+ *          corrupt head simultaneously (only uart_reader_thread calls
+ *          this today, but the guard makes it safe if that changes).
+ *
+ *          When the ring is full the oldest frame is silently overwritten
+ *          and a warning is logged. For sensor data, the newest reading
+ *          is always more relevant than the oldest — last-write-wins is
+ *          the correct overflow policy here.
+ *
+ *          Caller must call sem_post(&g_uart_frame_sem) after this
+ *          returns to keep the semaphore count in sync with ring depth.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+void uart_ring_push(const UartFrame *p_frame)
+{
+   unsigned next_head = 0; /**< candidate new head index */
+
+   pthread_mutex_lock(&g_uart_ring.mutex);
+
+   next_head = (g_uart_ring.head + 1) & (UART_RING_SIZE - 1);
+
+   if (next_head == g_uart_ring.tail)
+   {
+      /* Ring full — advance tail to drop the oldest frame */
+      LOG_WRN("[RING] Ring full — dropping oldest UART frame");
+      g_uart_ring.tail = (g_uart_ring.tail + 1) & (UART_RING_SIZE - 1);
+   }
+
+   g_uart_ring.frames[g_uart_ring.head] = *p_frame;
+   g_uart_ring.head                     = next_head;
+
+   pthread_mutex_unlock(&g_uart_ring.mutex);
+}
+
+/******************************************************************************
+ * \brief Pop one UartFrame from the ring buffer.
+ *
+ * \param p_frame - Output pointer to receive the popped frame.
+ *
+ * \return int - 1 if a frame was popped, 0 if the ring was empty.
+ *
+ * \details Called only after sem_timedwait(&g_uart_frame_sem) succeeds,
+ *          so the ring should never be empty at the call site. The empty
+ *          check is a safety guard — if it fires it indicates a semaphore
+ *          count / ring depth mismatch, which should never happen.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+int uart_ring_pop(UartFrame *p_frame)
+{
+   if (g_uart_ring.tail == g_uart_ring.head)
+   {
+      /* Should never happen — sem count and ring depth are always in sync */
+      LOG_WRN("[RING] Pop called on empty ring — semaphore mismatch");
+      return 0;
+   }
+
+   *p_frame         = g_uart_ring.frames[g_uart_ring.tail];
+   g_uart_ring.tail = (g_uart_ring.tail + 1) & (UART_RING_SIZE - 1);
+
+   return 1;
+}
 
 /******************************************************************************
  * \brief Open UART device at 115200 8N1.
@@ -166,6 +254,11 @@ static void uart_process_lock(int val, int batt)
 
 /******************************************************************************
  * \brief Parse and process one inbound UART frame from STM32.
+ *
+ * \details After updating latest_data, pushes a UartFrame onto g_uart_ring
+ *          and calls sem_post(&g_uart_frame_sem). The semaphore count
+ *          therefore equals the number of frames in the ring buffer at all
+ *          times, which is the invariant uart_push_thread relies on.
  ******************************************************************************/
 static void uart_parse_line(const char *p_line)
 {
@@ -177,6 +270,7 @@ static void uart_parse_line(const char *p_line)
    int         val      = 0;
    int         batt     = -1;
    DEV_ID_E    idx      = (DEV_ID_E)-1;
+   UartFrame   frame    = {0};              /**< frame pushed to ring buffer */
    struct CommandMsg auto_cmd = {.cmd = CMD_GET_LATEST};
 
    (void)strncpy(buf, p_line, sizeof(buf) - 1);
@@ -243,6 +337,16 @@ static void uart_parse_line(const char *p_line)
 
       pthread_mutex_unlock(&data_mutex);
    }
+
+   /* Push frame onto ring buffer then signal the consumer.
+    * Order is mandatory: push before post so the frame is visible
+    * to uart_push_thread the moment it wakes from sem_timedwait.
+    * Semaphore value after post == number of frames in the ring. */
+   frame.idx  = idx;
+   frame.val  = val;
+   frame.batt = batt;
+   uart_ring_push(&frame);
+   sem_post(&g_uart_frame_sem);
 
    handle_get_latest(&auto_cmd);
 }
@@ -373,17 +477,6 @@ static void snapshot_reed_slots(uint8_t  *p_r_state,
 
 /******************************************************************************
  * \brief Snapshot PIR slot state from latest_data under data_mutex.
- *
- * \param p_count     - Output array of motion counts, size MAX_PIRS.
- * \param p_batt      - Output array of battery SOC, size MAX_PIRS.
- * \param p_age       - Output array of ages in seconds, size MAX_PIRS.
- * \param p_active    - Output array of active flags, size MAX_PIRS.
- * \param p_occ       - Output array of per-slot occupied flags, size MAX_PIRS.
- * \param p_pir_count - Output for number of active PIR slots.
- *
- * \note  Per-slot OCC (2026-05-20): p_occ[] added, populated from
- *        latest_data.pir_slots[i].occupied set by data_controller.c
- *        when it processes the ESP32 JSON pirs[].occupied field.
  ******************************************************************************/
 static void snapshot_pir_slots(uint32_t *p_count,
                                 int8_t   *p_batt,
@@ -417,10 +510,6 @@ static void snapshot_pir_slots(uint32_t *p_count,
 
 /******************************************************************************
  * \brief Build UART push payload and send to STM32.
- *
- * \note  Per-slot OCC (2026-05-20): p_pocc[] added. Single OCC:n global
- *        frame replaced by OCC<n>:n per-slot frames emitted after PIR<n>
- *        lines. STM32 parser handles OCC<1-4> identically to PIR<1-4>.
  ******************************************************************************/
 static void build_and_push(double temp, int motion, int lgt, int lck,
                             uint16_t age_pir, uint16_t age_lgt,
@@ -446,7 +535,6 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                    (int)temp, motion, lgt, lck,
                    age_pir, age_lgt, age_lck, reed_count);
 
-   /* Legacy flat PIR line — preserved for STM32 backward compatibility */
    if (0 <= batt_pir)
    {
       pos += snprintf(msg + pos, sizeof(msg) - pos,
@@ -458,7 +546,6 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                       "PIR:%d\n", motion);
    }
 
-   /* Per-slot PIR lines — mirrors reed DR<n> pattern */
    pos += snprintf(msg + pos, sizeof(msg) - pos,
                    "PIR_COUNT:%d\n", pir_count);
 
@@ -471,7 +558,6 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                       i + 1, (unsigned)p_pc[i], p_pb[i], p_pa[i]);
    }
 
-   /* Per-slot OCC frames (2026-05-20) — replaces single OCC:n */
    for (i = 0; i < pir_count; i++)
    {
       if (!p_pactive[i]) { continue; }
@@ -519,7 +605,21 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
 }
 
 /******************************************************************************
- * \brief Thread — sends sensor state to STM32 every UART_PUSH_INTERVAL_SEC.
+ * \brief Thread — sends sensor state to STM32, driven by g_uart_frame_sem.
+ *
+ * \details Replaces the previous sleep(UART_PUSH_INTERVAL_SEC) polling loop.
+ *          sem_timedwait blocks with zero CPU until uart_parse_line() posts
+ *          a new frame onto g_uart_ring, or until UART_PUSH_INTERVAL_SEC
+ *          elapses as a watchdog ceiling (preserves existing heartbeat
+ *          push behavior when UART is quiet).
+ *
+ *          After waking, pops all pending frames from g_uart_ring to drain
+ *          any burst that arrived while the previous push was executing.
+ *          The pop count is logged for burst visibility. latest_data is
+ *          then snapshotted for the consolidated push to STM32.
+ *
+ *          shm_data is read under shm_data->shm_mutex (process-shared),
+ *          replacing the previous sem_timedwait(shm_sem) pattern.
  ******************************************************************************/
 void *uart_push_thread(void *p_arg)
 {
@@ -537,45 +637,63 @@ void *uart_push_thread(void *p_arg)
    int      motor_online = 0;
    int      reed_count   = 0;
    int      pir_count    = 0;
+   int      frames_ready = 0; /**< frames drained from ring this wake */
+   UartFrame frame       = {0};
 
    uint8_t  r_state[MAX_REEDS];
    int8_t   r_batt[MAX_REEDS];
    uint16_t r_age[MAX_REEDS];
 
-   uint32_t p_count[MAX_PIRS];  /**< PIR motion count snapshot  */
-   int8_t   p_batt[MAX_PIRS];   /**< PIR battery snapshot       */
-   uint16_t p_age[MAX_PIRS];    /**< PIR age snapshot           */
-   uint8_t  p_active[MAX_PIRS]; /**< PIR active flags snapshot  */
-   int      p_occ[MAX_PIRS];    /**< PIR per-slot occupied flags — 2026-05-20 */
+   uint32_t p_count[MAX_PIRS];
+   int8_t   p_batt[MAX_PIRS];
+   uint16_t p_age[MAX_PIRS];
+   uint8_t  p_active[MAX_PIRS];
+   int      p_occ[MAX_PIRS];
 
    (void)p_arg;
 
-   LOG("[PUSH] Push thread started (interval=%ds)", UART_PUSH_INTERVAL_SEC);
+   LOG("[PUSH] Push thread started (sem-driven, ceiling=%ds)",
+       UART_PUSH_INTERVAL_SEC);
 
    while (running)
    {
-      sleep(UART_PUSH_INTERVAL_SEC);
+      /* Block until uart_parse_line() signals a new frame, or the
+       * watchdog ceiling expires. UART_PUSH_INTERVAL_SEC preserves
+       * the original worst-case push cadence for quiet periods.      */
+      {
+         struct timespec deadline;
+         clock_gettime(CLOCK_REALTIME, &deadline);
+         deadline.tv_sec += UART_PUSH_INTERVAL_SEC;
+         sem_timedwait(&g_uart_frame_sem, &deadline);
+      }
+
+      if (!running) { break; }
 
       if (0 > g_uart_fd) { continue; }
 
+      /* Drain all frames that arrived since the last push.
+       * Each successful pop decrements the semaphore count by one
+       * (already decremented by sem_timedwait for the first frame).
+       * frames_ready tells us the burst depth — logged for visibility. */
+      frames_ready = 0;
+      if (uart_ring_pop(&frame)) { frames_ready = 1; }
+      while (sem_trywait(&g_uart_frame_sem) == 0)
       {
-         struct timespec ts;
-         clock_gettime(CLOCK_REALTIME, &ts);
-         ts.tv_sec += 2;
-
-         if (0 != sem_timedwait(shm_sem, &ts))
-         {
-            LOG("[PUSH] shm_sem timeout -- web process may be dead, skipping");
-            continue;
-         }
+         uart_ring_pop(&frame); /* keep frame = newest in burst */
+         frames_ready++;
       }
 
+      LOG("[PUSH] Woke: %d UART frame(s) in burst", frames_ready);
+
+      /* Read shm_data under the process-shared mutex.
+       * Replaces the previous sem_timedwait(shm_sem) pattern. */
+      pthread_mutex_lock(&shm_data->shm_mutex);
       valid  = shm_data->data_valid;
       temp   = shm_data->current_temp;
       motion = shm_data->current_motion;
       lgt    = shm_data->current_light;
       lck    = shm_data->current_lock;
-      sem_post(shm_sem);
+      pthread_mutex_unlock(&shm_data->shm_mutex);
 
       if (!valid)
       {

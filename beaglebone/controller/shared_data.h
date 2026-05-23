@@ -10,9 +10,20 @@
  *          include this header — the layout must never change without
  *          recompiling both binaries.
  *
- * \warning SHM_NAME and SEM_NAME are also defined in controller_internal.h.
+ * \warning SHM_NAME is also defined in controller_internal.h.
  *          shared_data.h is the authoritative definition — controller_internal.h
- *          includes this header and should not redefine them.
+ *          includes this header and should not redefine it.
+ *
+ * \note    Semaphore → mutex migration (2026-05-22):
+ *          shm_sem (named POSIX semaphore, binary, val=1) replaced by
+ *          shm_mutex (pthread_mutex_t, PTHREAD_PROCESS_SHARED) embedded
+ *          as the first field of SharedSensorData. Embedding the mutex
+ *          inside the mapped region means any process that calls mmap()
+ *          on SHM_NAME gets the mutex automatically — no named semaphore
+ *          object, no sem_open/sem_close/sem_unlink in any process.
+ *          shm_mutex must be initialized with PTHREAD_PROCESS_SHARED
+ *          before any other process maps the region (done in
+ *          data_controller.c:init_shared_memory()).
  ******************************************************************************/
 
 #ifndef INCLUDE_SHARED_DATA_H_
@@ -20,6 +31,7 @@
 
 #include <time.h>
 #include <stdint.h>
+#include <pthread.h>
 
 /******************************** CONSTANTS ***********************************/
 
@@ -50,19 +62,19 @@ struct HistoryPoint
 /** \brief System alert entry. */
 struct Alert
 {
-   long timestamp;          /*!< Unix timestamp of alert */
+   long timestamp;               /*!< Unix timestamp of alert */
    char message[ALERT_MSG_SIZE]; /*!< alert description string */
-   int  severity;           /*!< severity level: 1=low, 2=medium, 3=high */
+   int  severity;                /*!< severity level: 1=low, 2=medium, 3=high */
 };
 
 /** \brief Room sensor status entry. */
 struct RoomStatus
 {
-   int  sensor_id;             /*!< unique room sensor identifier */
+   int  sensor_id;               /*!< unique room sensor identifier */
    char room_name[ROOM_NAME_SZ]; /*!< room name string */
-   char state[ROOM_STATE_SZ];  /*!< current state e.g. "open" or "closed" */
-   char location[ROOM_LOC_SZ]; /*!< physical location string */
-   long timestamp;             /*!< Unix timestamp of last update */
+   char state[ROOM_STATE_SZ];    /*!< current state e.g. "open" or "closed" */
+   char location[ROOM_LOC_SZ];   /*!< physical location string */
+   long timestamp;               /*!< Unix timestamp of last update */
 };
 
 /**
@@ -71,9 +83,19 @@ struct RoomStatus
  * \warning Both controller and LCD display must be compiled with the same
  *          version of this struct. Any layout change requires recompiling
  *          both binaries.
+ *
+ * \note    shm_mutex is the first field so its alignment is always correct
+ *          regardless of platform. It must be initialized once by the
+ *          controller process before the LCD process maps the region.
  */
 struct SharedSensorData
 {
+   /* Process-shared mutex — replaces the named shm_sem semaphore.
+    * Initialized with PTHREAD_PROCESS_SHARED in init_shared_memory().
+    * All readers and writers in any process lock this before touching
+    * any other field in this struct.                                    */
+   pthread_mutex_t shm_mutex;
+
    uint8_t device_online[DEVICE_COUNT]; /*!< online flags indexed by DEV_ID_E */
 
    /* Current sensor reading */
@@ -81,7 +103,7 @@ struct SharedSensorData
    int    current_motion;    /*!< latest PIR motion event count */
    int    current_light;     /*!< latest smart light relay state */
    int    current_lock;      /*!< latest smart lock state */
-   int    batt_motor;        /*!< motor battery percentage (0–100), -1=unknown */
+   int    batt_motor;        /*!< motor battery percentage (0-100), -1=unknown */
    long   current_timestamp; /*!< Unix timestamp of latest reading */
    int    data_valid;        /*!< 1 if at least one reading has been received */
 
@@ -104,12 +126,12 @@ struct SharedSensorData
    double peak_temp_time;    /*!< time of peak temperature */
 
    /* Alerts */
-   int          alert_count;           /*!< number of active alerts */
+   int          alert_count;            /*!< number of active alerts */
    struct Alert alerts[ALERT_BUF_SIZE]; /*!< active alert array */
 
    /* Room sensor status */
-   int               room_count;            /*!< number of valid room entries */
-   struct RoomStatus rooms[ROOM_BUF_SIZE];  /*!< room sensor status array */
+   int               room_count;           /*!< number of valid room entries */
+   struct RoomStatus rooms[ROOM_BUF_SIZE]; /*!< room sensor status array */
 
    /* System information */
    int  total_records;       /*!< total database record count */

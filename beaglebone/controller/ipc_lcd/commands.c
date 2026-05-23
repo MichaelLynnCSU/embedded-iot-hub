@@ -10,15 +10,20 @@
  *
  * \warning Many commands are currently stubbed with printf logging.
  *          See TODO tags for commands requiring full implementation.
+ *
+ * \note    Semaphore → mutex (2026-05-22):
+ *          extern sem_t *shm_sem removed — the named semaphore no longer
+ *          exists. shm_data protection is now shm_data->shm_mutex, used
+ *          directly by the handler functions in cmd_handler.c.
+ *          process_command() itself never touched shm, so no logic changes
+ *          here beyond removing the stale extern declaration.
  ******************************************************************************/
 
 #include <stdio.h>
-#include <semaphore.h>
-#include "commands.h"
 #include "../shared_data.h"
+#include "commands.h"
 
 extern struct SharedSensorData *shm_data; /**< shared memory data pointer */
-extern sem_t                   *shm_sem;  /**< shared memory semaphore */
 
 void handle_get_latest(struct CommandMsg *p_cmd);
 void handle_get_device_status(struct CommandMsg *p_cmd);

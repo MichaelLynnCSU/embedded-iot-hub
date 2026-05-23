@@ -18,7 +18,9 @@
  *
  *          Thread safety:
  *          - data_mutex protects latest_data reads and writes
- *          - shm_sem protects shared memory access
+ *          - shm_data->shm_mutex (PTHREAD_PROCESS_SHARED) protects all
+ *            shared memory access, replacing the previous shm_sem named
+ *            semaphore
  *
  *          DB writes in process_sensor_frame() are batched in one
  *          Unit of Work transaction (db_begin/db_commit) to reduce
@@ -27,6 +29,15 @@
  *
  *          handle_get_room_status() owns the shm write — db_query_rooms()
  *          returns domain structs only (Repository pattern).
+ *
+ * \note    Semaphore → mutex (2026-05-22):
+ *          All sem_wait(shm_sem) / sem_post(shm_sem) calls replaced with
+ *          pthread_mutex_lock(&shm_data->shm_mutex) /
+ *          pthread_mutex_unlock(&shm_data->shm_mutex).
+ *          Four call sites updated: handle_get_latest,
+ *          handle_get_device_status, handle_get_room_status,
+ *          update_shm_rooms. No logic changes — lock granularity and
+ *          critical section boundaries are identical.
  ******************************************************************************/
 
 #include <sys/stat.h>
@@ -55,8 +66,8 @@ pthread_mutex_t data_mutex = PTHREAD_MUTEX_INITIALIZER; /**< latest_data mutex *
  *
  * \return void
  *
- * \details Acquires shm_sem and data_mutex, copies latest_data fields
- *          into shm_data, increments sequence counter, and sets
+ * \details Acquires shm_data->shm_mutex and data_mutex, copies latest_data
+ *          fields into shm_data, increments sequence counter, and sets
  *          command result.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
@@ -65,7 +76,7 @@ void handle_get_latest(struct CommandMsg *p_cmd)
 {
    (void)p_cmd;
 
-   sem_wait(shm_sem);
+   pthread_mutex_lock(&shm_data->shm_mutex);
 
    pthread_mutex_lock(&data_mutex);
    shm_data->current_temp      = latest_data.avg_temp;
@@ -80,7 +91,7 @@ void handle_get_latest(struct CommandMsg *p_cmd)
 
    shm_data->last_command   = CMD_GET_LATEST;
    shm_data->command_result = 0;
-   sem_post(shm_sem);
+   pthread_mutex_unlock(&shm_data->shm_mutex);
 
    LOG("CMD_GET_LATEST: %.1fC %d motions",
        shm_data->current_temp,
@@ -100,12 +111,12 @@ void handle_get_device_status(struct CommandMsg *p_cmd)
 {
    (void)p_cmd;
 
-   sem_wait(shm_sem);
+   pthread_mutex_lock(&shm_data->shm_mutex);
    heartbeat_snapshot_online(shm_data->device_online, DEV_COUNT);
    shm_data->last_command   = CMD_GET_DEVICE_STATUS;
    shm_data->command_result = 0;
    shm_data->sequence++;
-   sem_post(shm_sem);
+   pthread_mutex_unlock(&shm_data->shm_mutex);
 
    LOG("CMD_GET_DEVICE_STATUS served");
 }
@@ -134,7 +145,7 @@ void handle_get_room_status(struct CommandMsg *p_cmd)
 
    count = db_query_rooms(rooms, ROOM_BUF_SIZE);
 
-   sem_wait(shm_sem);
+   pthread_mutex_lock(&shm_data->shm_mutex);
 
    if (0 > count)
    {
@@ -163,29 +174,18 @@ void handle_get_room_status(struct CommandMsg *p_cmd)
       shm_data->sequence++;
    }
 
-   sem_post(shm_sem);
+   pthread_mutex_unlock(&shm_data->shm_mutex);
 
    LOG("CMD_GET_ROOM_STATUS complete (%d rooms)", count);
 }
 
 /******************************************************************************
  * \brief Check for reed slot generation change and log if detected.
- *
- * \param slot    - Reed slot index (0-based).
- * \param old_gen - Previous generation counter value.
- * \param new_gen - New generation counter value.
- *
- * \return void
- *
- * \details Generation change indicates a different physical device claimed
- *          the slot. Logs to application log and saves event to database.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void check_reed_generation(int slot, uint16_t old_gen, uint16_t new_gen)
 {
-   char ev[REED_EVENT_BUF_SIZE] = {0}; /**< event description string */
-   char dev[REED_DEV_BUF_SIZE]  = {0}; /**< device name string */
+   char ev[REED_EVENT_BUF_SIZE] = {0};
+   char dev[REED_DEV_BUF_SIZE]  = {0};
 
    if ((old_gen > 0) && (new_gen != old_gen))
    {
@@ -200,22 +200,12 @@ static void check_reed_generation(int slot, uint16_t old_gen, uint16_t new_gen)
 
 /******************************************************************************
  * \brief Check for reed slot online/offline transition and log if detected.
- *
- * \param slot        - Reed slot index (0-based).
- * \param was_offline - Previous offline flag value.
- * \param now_offline - Current offline flag value.
- *
- * \return void
- *
- * \details Logs transition to application log and saves event to database.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void check_reed_online_state(int slot,
                                      uint8_t was_offline,
                                      uint8_t now_offline)
 {
-   char dev[REED_DEV_BUF_SIZE] = {0}; /**< device name string */
+   char dev[REED_DEV_BUF_SIZE] = {0};
 
    (void)snprintf(dev, sizeof(dev), "REED%d", slot + 1);
 
@@ -238,25 +228,15 @@ static void check_reed_online_state(int slot,
 /******************************************************************************
  * \brief Update latest_data reed slots and detect state transitions.
  *
- * \param p_data - Pointer to received sensor data struct.
- *
- * \return void
- *
- * \details Detects generation changes and online/offline transitions,
- *          updates latest_data reed slots, and logs active slot status.
- *          DB writes are NOT done here — caller batches them into the
- *          Unit of Work transaction in process_sensor_frame().
- *          Must be called with data_mutex held.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ * \details Must be called with data_mutex held.
  ******************************************************************************/
 static void process_reed_slots(const struct SensorData *p_data)
 {
-   int      i           = 0;    /**< loop index */
-   uint16_t old_gen     = 0;    /**< previous slot generation */
-   uint16_t new_gen     = 0;    /**< new slot generation */
-   uint8_t  was_offline = 0;    /**< previous offline flag */
-   uint8_t  now_offline = 0;    /**< current offline flag */
+   int      i           = 0;
+   uint16_t old_gen     = 0;
+   uint16_t new_gen     = 0;
+   uint8_t  was_offline = 0;
+   uint8_t  now_offline = 0;
 
    for (i = 0; i < MAX_REEDS; i++)
    {
@@ -272,9 +252,6 @@ static void process_reed_slots(const struct SensorData *p_data)
          check_reed_online_state(i, was_offline, now_offline);
       }
 
-      /* Phantom widget fix (2026-04-21): only overwrite when active.
-       * Unconditional overwrite was clearing active=0 on slots missing
-       * from one JSON frame, dropping reed_count and hiding the widget. */
       if (p_data->reed_slots[i].active)
       {
          latest_data.reed_slots[i] = p_data->reed_slots[i];
@@ -297,20 +274,12 @@ static void process_reed_slots(const struct SensorData *p_data)
 
 /******************************************************************************
  * \brief Copy room data from sensor frame into shared memory.
- *
- * \param p_data - Pointer to received sensor data struct.
- *
- * \return void
- *
- * \details Acquires shm_sem and copies room_count and room fields.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void update_shm_rooms(const struct SensorData *p_data)
 {
-   int i = 0; /**< loop index */
+   int i = 0;
 
-   sem_wait(shm_sem);
+   pthread_mutex_lock(&shm_data->shm_mutex);
    shm_data->room_count = p_data->room_count;
 
    for (i = 0; (i < p_data->room_count) && (i < MAX_ROOMS); i++)
@@ -327,28 +296,16 @@ static void update_shm_rooms(const struct SensorData *p_data)
                     ROOM_LOC_SZ - 1);
    }
 
-   sem_post(shm_sem);
+   pthread_mutex_unlock(&shm_data->shm_mutex);
 }
 
 /******************************************************************************
  * \brief Receive and process one complete sensor data frame.
- *
- * \param p_data - Pointer to received sensor data struct.
- *
- * \return void
- *
- * \details Updates latest_data, processes reed slots, pushes to shared
- *          memory, updates rooms, and saves all data to database in one
- *          Unit of Work transaction (one fsync on BeagleBone SD card).
- *          All DB writes — readings, motor, and all active reed slots —
- *          are batched inside a single BEGIN/COMMIT.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void process_sensor_frame(const struct SensorData *p_data)
 {
-   struct CommandMsg auto_cmd = {.cmd = CMD_GET_LATEST}; /**< auto command */
-   int               i        = 0;                       /**< reed loop index */
+   struct CommandMsg auto_cmd = {.cmd = CMD_GET_LATEST};
+   int               i        = 0;
 
    pthread_mutex_lock(&data_mutex);
 
@@ -373,7 +330,6 @@ static void process_sensor_frame(const struct SensorData *p_data)
       latest_data.pir_slots[i] = p_data->pir_slots[i];
    }
    latest_data.pir_count = p_data->pir_count;
-
 
    pthread_mutex_unlock(&data_mutex);
 
@@ -403,9 +359,6 @@ static void process_sensor_frame(const struct SensorData *p_data)
    handle_get_latest(&auto_cmd);
    update_shm_rooms(p_data);
 
-   /* Unit of Work — all DB writes for this frame in one transaction.
-    * readings + motor + all active reed slots share one BEGIN/COMMIT
-    * and one fsync — meaningful speedup on BeagleBone eMMC/SD. */
    db_begin();
    db_save_reading(p_data);
    db_save_motor(p_data->motor_online, p_data->batt_motor);
@@ -425,21 +378,12 @@ static void process_sensor_frame(const struct SensorData *p_data)
 
 /******************************************************************************
  * \brief Thread — reads SensorData structs from sensor_pipe.
- *
- * \param p_arg - Unused thread argument.
- *
- * \return void* - Always returns NULL.
- *
- * \details Opens SENSOR_PIPE and reads SensorData frames in a loop.
- *          Reopens pipe on closure. Runs until running flag is cleared.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void *receive_data_thread(void *p_arg)
 {
-   int               pipe_fd = -1; /**< sensor pipe file descriptor */
-   ssize_t           bytes   = 0;  /**< bytes read */
-   struct SensorData data;         /**< received sensor frame */
+   int               pipe_fd = -1;
+   ssize_t           bytes   = 0;
+   struct SensorData data;
 
    (void)p_arg;
 
@@ -479,22 +423,12 @@ void *receive_data_thread(void *p_arg)
 
 /******************************************************************************
  * \brief Thread — reads CommandMsg structs from command_pipe.
- *
- * \param p_arg - Unused thread argument.
- *
- * \return void* - Always returns NULL.
- *
- * \details Creates and opens COMMAND_PIPE, reads CommandMsg frames and
- *          dispatches to process_command(). Reopens pipe on closure.
- *          Runs until running flag is cleared.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void *command_handler_thread(void *p_arg)
 {
-   int               pipe_fd = -1; /**< command pipe file descriptor */
-   ssize_t           bytes   = 0;  /**< bytes read */
-   struct CommandMsg cmd;           /**< received command message */
+   int               pipe_fd = -1;
+   ssize_t           bytes   = 0;
+   struct CommandMsg cmd;
 
    (void)p_arg;
 

@@ -14,12 +14,26 @@
  *          - uart_push_thread:       pushes UART data to sensor pipe
  *
  *          Shared resources:
- *          - shm_data:  POSIX shared memory for LCD display IPC
- *          - shm_sem:   POSIX semaphore protecting shm_data
- *          - db:        SQLite database handle
- *          - log_fp:    log file handle
- *          - log_mutex: serialises log writes across all threads
- *          - running:   volatile flag cleared by signal handler
+ *          - shm_data:          POSIX shared memory for LCD display IPC
+ *          - shm_data->shm_mutex: process-shared mutex protecting shm_data
+ *          - g_uart_frame_sem:  counting semaphore — value equals number of
+ *                               frames queued in g_uart_ring
+ *          - g_uart_ring:       ring buffer between uart_reader_thread and
+ *                               uart_push_thread
+ *          - db:                SQLite database handle
+ *          - log_fp:            log file handle
+ *          - log_mutex:         serialises log writes across all threads
+ *          - running:           volatile flag cleared by signal handler
+ *
+ * \note    Semaphore → mutex + ring buffer (2026-05-22):
+ *          shm_sem (named POSIX semaphore, O_CREAT, val=1) removed.
+ *          Replaced by shm_data->shm_mutex (PTHREAD_PROCESS_SHARED)
+ *          embedded in the shared memory struct — no named object,
+ *          no sem_open/sem_close/sem_unlink, LCD process gets the mutex
+ *          automatically when it maps the same region.
+ *          g_uart_frame_sem added as a process-local counting semaphore
+ *          (pshared=0, val=0). g_uart_ring added as the backing store.
+ *          Both are initialized here and destroyed in cleanup().
  ******************************************************************************/
 
 #include <sys/mman.h>
@@ -30,9 +44,18 @@
 FILE                    *log_fp    = NULL; /**< log file handle */
 pthread_mutex_t          log_mutex = PTHREAD_MUTEX_INITIALIZER; /**< log serialiser */
 struct SharedSensorData *shm_data  = NULL; /**< shared memory data pointer */
-sem_t                   *shm_sem   = NULL; /**< shared memory semaphore */
 sqlite3                 *db        = NULL; /**< SQLite database handle */
 volatile int             running   = 1;    /**< main loop run flag */
+
+/* Counting semaphore — value == frames queued in g_uart_ring.
+ * Initialized to 0: no frames pending at startup.
+ * Producer: uart_parse_line() calls sem_post() after uart_ring_push().
+ * Consumer: uart_push_thread() calls sem_timedwait() before uart_ring_pop(). */
+sem_t       g_uart_frame_sem;
+
+/* Ring buffer — single producer (uart_reader_thread),
+ * single consumer (uart_push_thread). */
+uart_ring_t g_uart_ring;
 
 /******************************************************************************
  * \brief POSIX signal handler — initiates graceful shutdown.
@@ -49,22 +72,31 @@ static void signal_handler(int sig)
 {
    LOG_WRN("Signal %d received, shutting down", sig);
    running = 0;
+
+   /* Wake uart_push_thread immediately so it can observe running == 0
+    * rather than blocking until the sem_timedwait deadline expires. */
+   sem_post(&g_uart_frame_sem);
 }
 
 /******************************************************************************
- * \brief Initialize POSIX shared memory and semaphore.
+ * \brief Initialize POSIX shared memory and process-shared mutex.
  *
  * \return int - 0 on success, -1 on failure.
  *
- * \details Unlinks any existing shared memory and semaphore, creates new
- *          ones, maps shared memory, zeroes it, and opens the semaphore
- *          with initial value 1.
+ * \details Unlinks any existing shared memory, creates and maps a new
+ *          region, zeroes it, then initializes shm_data->shm_mutex with
+ *          PTHREAD_PROCESS_SHARED so the LCD process can lock it after
+ *          mapping the same region.
+ *
+ *          Also initializes g_uart_frame_sem (pshared=0, val=0) and
+ *          g_uart_ring for the UART frame producer/consumer path.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 int init_shared_memory(void)
 {
-   int shm_fd = -1; /**< shared memory file descriptor */
+   int                 shm_fd = -1; /**< shared memory file descriptor */
+   pthread_mutexattr_t attr;        /**< mutex attribute for PROCESS_SHARED */
 
    (void)shm_unlink(SHM_NAME);
 
@@ -91,16 +123,34 @@ int init_shared_memory(void)
 
    (void)memset(shm_data, 0, sizeof(struct SharedSensorData));
 
-   (void)sem_unlink(SEM_NAME);
+   /* Initialize the process-shared mutex embedded in the shared region.
+    * PTHREAD_PROCESS_SHARED: any process that maps this region can lock it.
+    * Must be called before the LCD process maps the region. */
+   pthread_mutexattr_init(&attr);
+   pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
 
-   shm_sem = sem_open(SEM_NAME, O_CREAT, 0666, 1);
-   if (SEM_FAILED == shm_sem)
+   if (0 != pthread_mutex_init(&shm_data->shm_mutex, &attr))
    {
-      LOG_ERR("sem_open failed");
+      LOG_ERR("shm_mutex init failed");
+      pthread_mutexattr_destroy(&attr);
       return -1;
    }
 
-   LOG_INF("Shared memory initialized");
+   pthread_mutexattr_destroy(&attr);
+
+   /* Counting semaphore — process-local (pshared=0), starts at 0.
+    * Value tracks frames queued in g_uart_ring exactly. */
+   if (0 != sem_init(&g_uart_frame_sem, 0, 0))
+   {
+      LOG_ERR("g_uart_frame_sem init failed");
+      return -1;
+   }
+
+   /* Ring buffer — zero head/tail, mutex default-initialized. */
+   (void)memset(&g_uart_ring, 0, sizeof(g_uart_ring));
+   pthread_mutex_init(&g_uart_ring.mutex, NULL);
+
+   LOG_INF("Shared memory and semaphores initialized");
    return 0;
 }
 
@@ -168,8 +218,9 @@ static int create_threads(pthread_t *p_rx_thread,
  *
  * \return void
  *
- * \details Unmaps and unlinks shared memory, closes and unlinks semaphore,
- *          closes SQLite database, and closes log file.
+ * \details Destroys shm_mutex inside the mapped region, then unmaps and
+ *          unlinks shared memory. Destroys g_uart_frame_sem and the ring
+ *          buffer mutex. Closes SQLite database and log file.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -177,15 +228,13 @@ static void cleanup(void)
 {
    if (NULL != shm_data)
    {
+      pthread_mutex_destroy(&shm_data->shm_mutex);
       (void)munmap(shm_data, sizeof(struct SharedSensorData));
       (void)shm_unlink(SHM_NAME);
    }
 
-   if (NULL != shm_sem)
-   {
-      (void)sem_close(shm_sem);
-      (void)sem_unlink(SEM_NAME);
-   }
+   sem_destroy(&g_uart_frame_sem);
+   pthread_mutex_destroy(&g_uart_ring.mutex);
 
    if (NULL != db)
    {
@@ -204,8 +253,8 @@ static void cleanup(void)
  * \return int - 0 on clean exit, 1 on initialization failure.
  *
  * \details Opens log file, registers signal handlers, initializes shared
- *          memory, database, and sensor pipe, then spawns worker threads.
- *          Joins all threads before cleanup and exit.
+ *          memory and semaphores, database, and sensor pipe, then spawns
+ *          worker threads. Joins all threads before cleanup and exit.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/

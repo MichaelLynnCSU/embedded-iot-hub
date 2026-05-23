@@ -12,7 +12,13 @@
  *
  *          Thread safety:
  *          - dev_mutex protects all reads and writes to devices[]
- *          - shm_sem protects shared memory updates
+ *          - shm_data->shm_mutex protects shared memory updates
+ *
+ * \note    Semaphore → mutex (2026-05-22):
+ *          sem_wait(shm_sem) / sem_post(shm_sem) in heartbeat_monitor_thread
+ *          replaced with pthread_mutex_lock(&shm_data->shm_mutex) /
+ *          pthread_mutex_unlock(&shm_data->shm_mutex). One call site.
+ *          No logic changes — critical section boundary unchanged.
  ******************************************************************************/
 
 #include "controller_internal.h"
@@ -67,14 +73,11 @@ void heartbeat_stamp(DEV_ID_E idx)
  *
  * \return void
  *
- * \details Called by handle_get_device_status() in cmd_handler.c to
- *          populate shared memory device_online array.
- *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void heartbeat_snapshot_online(uint8_t *p_out, int count)
 {
-   int i = 0; /**< loop index */
+   int i = 0;
 
    pthread_mutex_lock(&g_dev_mutex);
 
@@ -95,17 +98,18 @@ void heartbeat_snapshot_online(uint8_t *p_out, int count)
  *
  * \details Checks all devices every HB_POLL_SEC. On online/offline
  *          transition: logs event, saves to database, and updates
- *          shared memory device_online array and sequence counter.
+ *          shared memory device_online array and sequence counter
+ *          under shm_data->shm_mutex (process-shared).
  *          Runs until running flag is cleared.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void *heartbeat_monitor_thread(void *p_arg)
 {
-   time_t   now       = 0;    /**< current timestamp */
-   int      i         = 0;    /**< loop index */
-   uint8_t  is_online = 0;    /**< computed online status */
-   const char *p_ev   = NULL; /**< event string pointer */
+   time_t      now       = 0;
+   int         i         = 0;
+   uint8_t     is_online = 0;
+   const char *p_ev      = NULL;
 
    (void)p_arg;
 
@@ -134,10 +138,10 @@ void *heartbeat_monitor_thread(void *p_arg)
             LOG("[HB] %-6s went %s", dev_names[i], p_ev);
             db_save_event(dev_names[i], p_ev);
 
-            sem_wait(shm_sem);
+            pthread_mutex_lock(&shm_data->shm_mutex);
             shm_data->device_online[i] = is_online;
             shm_data->sequence++;
-            sem_post(shm_sem);
+            pthread_mutex_unlock(&shm_data->shm_mutex);
          }
       }
 

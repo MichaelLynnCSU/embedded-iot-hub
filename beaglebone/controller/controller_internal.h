@@ -33,6 +33,22 @@
  *          and LatestData to support dynamic multi-PIR slot tracking,
  *          mirroring the ReedSlotData pattern. Must match sensor_types.h
  *          in the server exactly.
+ *
+ * \note    Semaphore → mutex + ring buffer (2026-05-22):
+ *          - shm_sem (named POSIX semaphore, binary) removed. All shared
+ *            memory protection now uses shm_data->shm_mutex, a
+ *            PTHREAD_PROCESS_SHARED mutex embedded in SharedSensorData.
+ *          - SEM_NAME constant removed — no named semaphore object exists.
+ *          - g_uart_frame_sem (counting semaphore) added. Producer:
+ *            uart_parse_line() posts once per parsed UART frame after
+ *            pushing the frame onto g_uart_ring. Consumer: uart_push_thread()
+ *            calls sem_timedwait() — blocks with zero CPU until a frame
+ *            arrives or UART_PUSH_INTERVAL_SEC elapses, then pops from
+ *            g_uart_ring. Semaphore value == frames in ring buffer at all
+ *            times — this invariant prevents payload loss and eliminates
+ *            the fixed sleep() polling loop.
+ *          - UartFrame / uart_ring_t ring buffer types added here so all
+ *            translation units share one definition.
  ******************************************************************************/
 
 #ifndef INCLUDE_CONTROLLER_INTERNAL_H_
@@ -55,13 +71,12 @@
 
 /** \brief IPC and filesystem paths */
 #define SHM_NAME           "/sensor_shm"                   /**< shared memory name */
-#define SEM_NAME           "/sensor_sem"                   /**< shared semaphore name */
 #define SENSOR_PIPE        "/tmp/sensor_pipe"              /**< sensor data named pipe */
 #define COMMAND_PIPE       "/tmp/controller_cmd"           /**< command named pipe */
 #ifndef DB_PATH
 #define DB_PATH            "/home/debian/db/sensors.db"   /**< SQLite database path */
 #endif
-#define CONTROLLER_LOG     "/var/log/data_controller.log" /**< log file path */
+#define CONTROLLER_LOG     "/var/log/data_controller.log"     /**< log file path */
 #define CONTROLLER_LOG_OLD "/var/log/data_controller.log.old" /**< rotated log */
 #define UART_DEV           "/dev/ttyS1"                   /**< UART device for STM32 */
 
@@ -70,6 +85,9 @@
 #define MAX_REEDS       6    /**< must match ESP32 tcp_manager.c and ble_scan.c */
 #define MAX_PIRS        2    /**< must match ESP32 tcp_manager.c and sensor_types.h */
 #define UART_LINE_LEN   64   /**< UART line buffer size bytes */
+
+/** \brief Ring buffer capacity — must be a power of two for mask wrapping */
+#define UART_RING_SIZE  16   /**< max queued UART frames before oldest is dropped */
 
 /** \brief Room name field sizes */
 #define ROOM_NAME_SIZE  32   /**< room name string buffer size */
@@ -263,15 +281,70 @@ struct LatestData
    uint8_t             pir_count;           /*!< number of active PIR slots */
 };
 
+/**
+ * \brief One captured UART frame — stored in the ring buffer.
+ *
+ * \details uart_parse_line() fills one of these and pushes it onto
+ *          g_uart_ring before calling sem_post(&g_uart_frame_sem).
+ *          uart_push_thread() pops after sem_timedwait() succeeds.
+ *          Fields mirror the subset of LatestData that a UART frame
+ *          can update: device index, parsed value, and battery SOC.
+ */
+typedef struct
+{
+   DEV_ID_E idx;  /*!< device that generated the frame */
+   int      val;  /*!< parsed sensor value              */
+   int      batt; /*!< battery SOC, -1 if absent        */
+} UartFrame;
+
+/**
+ * \brief Lock-free single-producer / single-consumer ring buffer for
+ *        UartFrame objects.
+ *
+ * \details head is written only by the producer (uart_reader_thread).
+ *          tail is written only by the consumer (uart_push_thread).
+ *          Both are read by both sides — declared volatile so the
+ *          compiler does not cache them in registers across the
+ *          sem_post / sem_timedwait barrier.
+ *
+ *          Capacity is UART_RING_SIZE frames. When the buffer is full
+ *          the producer overwrites the oldest frame and logs a warning
+ *          — this is a deliberate last-write-wins policy for sensor
+ *          data where the newest reading is always most relevant.
+ */
+typedef struct
+{
+   UartFrame        frames[UART_RING_SIZE]; /*!< frame storage              */
+   volatile unsigned head;                  /*!< producer write index        */
+   volatile unsigned tail;                  /*!< consumer read index         */
+   pthread_mutex_t  mutex;                  /*!< producer-side push guard    */
+} uart_ring_t;
+
 /*************************** SHARED GLOBALS ***********************************/
 
 extern struct LatestData        latest_data;
 extern pthread_mutex_t          data_mutex;
 extern struct SharedSensorData *shm_data;
-extern sem_t                   *shm_sem;
 extern sqlite3                 *db;
 extern volatile int             running;
 extern const char              *dev_names[DEV_COUNT];
+
+/**
+ * \brief Counting semaphore — pending UART frames in g_uart_ring.
+ *
+ * \details Invariant: sem value == number of frames between tail and head
+ *          in g_uart_ring at all times.
+ *          Initialized to 0 (no frames pending at startup).
+ *          Producer increments via sem_post() after uart_ring_push().
+ *          Consumer decrements via sem_timedwait() before uart_ring_pop().
+ */
+extern sem_t       g_uart_frame_sem;
+
+/**
+ * \brief Ring buffer shared between uart_reader_thread (producer) and
+ *        uart_push_thread (consumer).
+ */
+extern uart_ring_t g_uart_ring;
 
 /*************************** FUNCTION PROTOTYPES *****************************/
 
@@ -298,7 +371,9 @@ int  db_query_rooms(struct RoomStatus *p_out, int max_rooms);
 
 void *uart_reader_thread(void *p_arg);
 void *uart_push_thread(void *p_arg);
-void  uart_sync_lock_state(int state); /**< sync TCP lock state into UART state machine */
+void  uart_sync_lock_state(int state);
+void  uart_ring_push(const UartFrame *p_frame);
+int   uart_ring_pop(UartFrame *p_frame);
 
 /* -- ipc_lcd/cmd_handler -------------------------------------------------- */
 
