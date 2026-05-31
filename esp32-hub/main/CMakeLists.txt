@@ -20,6 +20,8 @@ idf_component_register(
         "trinity_nvs_idf.c"
         "trinity_stats_idf.c"
         "trinity_panic_idf.c"
+        "motor_server.c"
+        "cam_trigger.c"
     INCLUDE_DIRS "."
     REQUIRES
         bt
