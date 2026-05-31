@@ -136,3 +136,5 @@ cloudflared-linux-amd64.deb
 **/build/bootloader/
 **/build/project_description.json
 Testing/Temporary/
+main/wifi_secrets.h
+beaglebone/wifi/secrets/
