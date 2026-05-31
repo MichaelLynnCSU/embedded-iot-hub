@@ -5,23 +5,19 @@
  *
  * \brief TCP manager for ESP32 hub node.
  *
- * \details Maintains non-blocking TCP connections to BeagleBone and
- *          ESP32-C3 motor controller. Drains vroom bus queues and sends
- *          consolidated JSON payloads every TCP_SEND_INTERVAL_MS.
+ * \details Maintains a non-blocking TCP client connection to BeagleBone.
+ *          Drains vroom bus queues and sends consolidated JSON payloads
+ *          every TCP_SEND_INTERVAL_MS.
  *
- *          BeagleBone connection (outbound client, unchanged):
+ *          BeagleBone connection (outbound client):
  *          State 0 — disconnected, create socket and initiate connect
  *          State 1 — connect in progress, poll with select()
  *          State 2 — connected, ready to send
  *
- *          Motor connection (inbound server, NEW):
- *          Hub listens on HUB_MOTOR_PORT. Motor wakes from deep sleep,
- *          connects in, receives {"pwm": X}, sends back {"batt_motor": Y},
- *          closes. Hub accept()s each wake-cycle connection, dispatches
- *          send_pwm_to_c3(), reads battery reply, closes client socket.
- *          No persistent C3 client socket. No connect state machine for C3.
+ *          Motor server: delegated to motor_server.c / motor_server.h.
+ *          CAM trigger:  delegated to cam_trigger.c  / cam_trigger.h.
  *
- *          Backpressure handling (BeagleBone only, unchanged):
+ *          Backpressure handling (BeagleBone only):
  *          - EAGAIN/EWOULDBLOCK increments block counter
  *          - 5 consecutive blocks triggers force reconnect
  *
@@ -29,33 +25,12 @@
  * \note    WDT fix (2026-03-21): (unchanged)
  * \note    Motor battery (2026-04-08, updated 2026-04-27): (unchanged)
  * \note    PI controller + motor state machine (2026-05-04): (unchanged)
- *
- * \note    Motor server flip (2026-05-XX):
- *          Hub is now TCP server for motor. run_c3_state_machine() and
- *          disconnect_c3() removed. open_motor_listen_socket() and
- *          accept_motor_connection() replace them.
- *          send_pwm_to_c3() updated: takes the accepted client fd directly,
- *          no longer owns a persistent socket.
- *          Ping path removed: ping_motor_for_health() / motor_sm_ping_due()
- *          no longer called. Motor self-reports batt on every wake connection.
- *          motor_online set to 1 on successful accept+send, 0 on listen fail.
- *
- * \note    motor_online ownership (2026-05-05, updated 2026-05-XX):
- *          motor_online owned by:
- *            - successful send_pwm_to_c3()  -> motor_online = 1
- *            - accept() / listen failure    -> motor_online = 0
- *          No longer touched by disconnect_c3() (removed) or ping path
- *          (removed).
- *
- * \note    Per-slot PIR occupancy (2026-05-20):
- *          PIR_SLOT_STATE_T gains occupied and offline fields.
- *          drain_queues() PIR sync loop reads pir_window_get_occupied(i)
- *          per slot after BLE snapshot. offline computed as age > PIR_OFFLINE_S.
- *          Legacy flat g_state.pir_occupied retained for JSON backward
- *          compat (set to slot 0 occupied). Per-slot occupied and offline
- *          sent to BeagleBone via JSON pirs[] array fields.
- *          flat motion_count fixed: summed across all active slots instead
- *          of last-write-wins mailbox race.
+ * \note    Motor server flip (2026-05-XX): motor paths moved to motor_server.c
+ * \note    Per-slot PIR occupancy (2026-05-20): per-slot occupied/offline in
+ *          PIR_SLOT_STATE_T; flat g_state.pir_occupied retained for JSON
+ *          backward compat (slot 0).
+ * \note    ESP32-CAM UDP trigger (2026-05-31): moved to cam_trigger.c;
+ *          0->1 transition detection remains here in drain_queues().
  ******************************************************************************/
 
 #include "config.h"
@@ -80,6 +55,8 @@
 #include "pi_controller.h"
 #include "motor_sm.h"
 #include "pir_window.h"
+#include "motor_server.h"
+#include "cam_trigger.h"
 
 #define BB_CONNECT_TIMEOUT_MS   2000
 #define BLOCK_COUNT_MAX         5
@@ -91,10 +68,12 @@
 #define TCP_STATE_CONNECTING    1
 #define TCP_STATE_CONNECTED     2
 
-#define MOTOR_ACCEPT_TIMEOUT_MS     50
-#define MOTOR_BATT_RECV_TIMEOUT_MS  500
-
 static const char *TAG = "TCP_MGR";
+
+/* Per-slot previous occupied state for 0->1 transition detection */
+static int g_pir_prev_occupied[MAX_PIRS] = {0};
+
+/*----------------------------------------------------------------------------*/
 
 typedef struct
 {
@@ -112,8 +91,8 @@ typedef struct
     uint32_t motion_count;
     uint16_t age;
     bool     active;
-    int      occupied; /**< per-slot sliding window occupancy — 2026-05-20 */
-    uint8_t  offline;  /**< age > PIR_OFFLINE_S — 2026-05-20               */
+    int      occupied;
+    uint8_t  offline;
 } PIR_SLOT_STATE_T;
 
 typedef struct
@@ -202,7 +181,6 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
          g_state.pir_slots[p_slot].active        = true;
       }
 
-      /* Flat motion_count: sum all active slots — fixes last-write-wins race */
       g_state.motion_count = 0;
       for (i = 0; i < MAX_PIRS; i++)
       {
@@ -212,7 +190,6 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
          }
       }
 
-      /* Flat batt: report the slot that just fired */
       g_state.pir_batt = p_pir.batt;
    }
 
@@ -228,7 +205,7 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
       g_state.avg_temp = p_temp.avg_temp;
    }
 
-   /* ---- MOTOR: drain only, motor_online owned by accept/send paths ---- */
+   /* ---- MOTOR: drain only, motor_online owned by motor_server paths ---- */
    if (pdTRUE == xQueueReceive(sub.mb_motor, &p_motor, 0))
    {
       if (p_motor.batt >= 0)
@@ -270,6 +247,13 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
       g_state.pir_slots[i].active   = true;
       g_state.pir_slots[i].occupied = pir_window_get_occupied(i);
       g_state.pir_slots[i].offline  = (age > PIR_OFFLINE_S) ? 1 : 0;
+
+      /* ESP32-CAM trigger on 0->1 occupancy transition */
+      if (g_state.pir_slots[i].occupied && !g_pir_prev_occupied[i])
+      {
+         send_cam_trigger();
+      }
+      g_pir_prev_occupied[i] = g_state.pir_slots[i].occupied;
    }
 
    /* Legacy flat occupied — slot 0 for backward compat */
@@ -291,7 +275,7 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
       }
    }
 
-   /* ---- PIR debug log — matches reed format, one line per slot ---- */
+   /* ---- PIR debug log ---- */
    for (i = 0; i < g_state.pir_count; i++)
    {
       ESP_LOGI(TAG, "[PIR] slot=%d count=%u batt=%d age=%d offline=%d occ=%d",
@@ -404,7 +388,6 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
       (void)cJSON_AddItemToObject(p_root, "rooms", p_rooms);
    }
 
-   /* PIR array — per-slot count, batt, age, occupied, offline */
    p_pirs = cJSON_CreateArray();
    if (NULL != p_pirs)
    {
@@ -439,7 +422,6 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
    {
       *p_bb_block_count = 0;
 
-      /* BB summary line */
       ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u occ=%d lgt=%d lck=%d "
                     "reeds=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d",
                g_state.avg_temp, (unsigned)g_state.motion_count,
@@ -448,7 +430,6 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
                (int)g_state.motor_online, g_state.motor_batt,
                g_state.pir_batt, g_state.lock_batt);
 
-      /* Per-slot PIR send log — matches drain_queues format */
       for (i = 0; i < g_state.pir_count; i++)
       {
          ESP_LOGI(TAG, "[PIR_SEND] slot=%d count=%u batt=%d age=%d offline=%d occ=%d",
@@ -461,165 +442,6 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
       }
    }
    cJSON_free(p_msg);
-}
-
-/*----------------------------------------------------------------------------*/
-
-static int open_motor_listen_socket(void)
-{
-   struct sockaddr_in addr =
-   {
-      .sin_family      = AF_INET,
-      .sin_port        = htons(HUB_MOTOR_PORT),
-      .sin_addr.s_addr = htonl(INADDR_ANY),
-   };
-   int sock  = SOCK_INVALID;
-   int opt   = 1;
-   int flags = 0;
-
-   sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-   if (0 > sock)
-   {
-      ESP_LOGE(TAG, "[MOTOR_SRV] socket() failed (errno=%d)", errno);
-      return SOCK_INVALID;
-   }
-
-   (void)setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-   if (0 > bind(sock, (struct sockaddr *)&addr, sizeof(addr)))
-   {
-      ESP_LOGE(TAG, "[MOTOR_SRV] bind() failed (errno=%d)", errno);
-      close(sock);
-      return SOCK_INVALID;
-   }
-
-   if (0 > listen(sock, 1))
-   {
-      ESP_LOGE(TAG, "[MOTOR_SRV] listen() failed (errno=%d)", errno);
-      close(sock);
-      return SOCK_INVALID;
-   }
-
-   flags = fcntl(sock, F_GETFL, 0);
-   (void)fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-
-   ESP_LOGI(TAG, "[MOTOR_SRV] Listening on port %d", HUB_MOTOR_PORT);
-   trinity_log_event("EVENT: MOTOR_SRV_LISTENING\n");
-   return sock;
-}
-
-/*----------------------------------------------------------------------------*/
-
-static int accept_motor_connection(int listen_sock)
-{
-   int client = SOCK_INVALID;
-
-   if (SOCK_INVALID == listen_sock) { return SOCK_INVALID; }
-
-   client = accept(listen_sock, NULL, NULL);
-   if (0 > client)
-   {
-      if ((EAGAIN == errno) || (EWOULDBLOCK == errno)) { return SOCK_INVALID; }
-      ESP_LOGW(TAG, "[MOTOR_SRV] accept() error (errno=%d)", errno);
-      return SOCK_INVALID;
-   }
-
-   ESP_LOGI(TAG, "[MOTOR_SRV] Motor connected fd=%d", client);
-   trinity_log_event("EVENT: TCP_MOTOR_ACCEPTED\n");
-   return client;
-}
-
-/*----------------------------------------------------------------------------*/
-
-static void send_pwm_to_c3(int client_sock, float pwm_pct)
-{
-   cJSON      *p_root    = NULL;
-   cJSON      *p_rx_json = NULL;
-   cJSON      *p_batt    = NULL;
-   char       *p_msg     = NULL;
-   char        rx[64]    = {0};
-   int         duty      = 0;
-   int         sent      = 0;
-   int         rlen      = 0;
-   fd_set      fds;
-   struct timeval tv;
-
-   if (SOCK_INVALID == client_sock) { return; }
-
-   duty   = (int)((pwm_pct / PWM_OUT_MAX) * (float)PWM_DUTY_MAX);
-   p_root = cJSON_CreateObject();
-   if (NULL == p_root) { ESP_LOGE(TAG, "cJSON root alloc failed (C3)"); close(client_sock); return; }
-
-   (void)cJSON_AddNumberToObject(p_root, "pwm", duty);
-   p_msg = cJSON_PrintUnformatted(p_root);
-   cJSON_Delete(p_root);
-   if (NULL == p_msg) { ESP_LOGE(TAG, "cJSON serialize failed (C3)"); close(client_sock); return; }
-
-   sent = send(client_sock, p_msg, strlen(p_msg), 0);
-   cJSON_free(p_msg);
-
-   if (0 > sent)
-   {
-      ESP_LOGW(TAG, "[MOTOR_SRV] send() failed (errno=%d) -- motor offline", errno);
-      trinity_log_event("EVENT: TCP_MOTOR_SEND_FAIL\n");
-      g_state.motor_online = 0;
-      bus_publish_motor(0, -1);
-      close(client_sock);
-      return;
-   }
-
-   ESP_LOGI(TAG, "[MOTOR_SRV] Sent pwm=%d (%.1f%%)", duty, pwm_pct);
-
-   FD_ZERO(&fds);
-   FD_SET(client_sock, &fds);
-   tv.tv_sec  = MOTOR_BATT_RECV_TIMEOUT_MS / 1000;
-   tv.tv_usec = (MOTOR_BATT_RECV_TIMEOUT_MS % 1000) * 1000;
-
-   if (0 < select(client_sock + 1, &fds, NULL, NULL, &tv))
-   {
-      rlen = recv(client_sock, rx, sizeof(rx) - 1, 0);
-      if (rlen > 0)
-      {
-         rx[rlen]  = '\0';
-         p_rx_json = cJSON_Parse(rx);
-         if (NULL != p_rx_json)
-         {
-            p_batt = cJSON_GetObjectItem(p_rx_json, "batt_motor");
-            if ((NULL != p_batt) && (p_batt->valueint >= 0))
-            {
-               g_state.motor_batt = p_batt->valueint;
-               ESP_LOGI(TAG, "[MOTOR_SRV] batt_motor=%d%%", g_state.motor_batt);
-            }
-            cJSON_Delete(p_rx_json);
-         }
-         else
-         {
-            ESP_LOGW(TAG, "[MOTOR_SRV] JSON parse failed (rlen=%d) rx='%.*s'",
-                     rlen, rlen, rx);
-            trinity_log_event("EVENT: MOTOR_BATT_PARSE_FAIL\n");
-         }
-      }
-      else if (0 == rlen)
-      {
-         ESP_LOGW(TAG, "[MOTOR_SRV] Motor closed before sending batt reply");
-         trinity_log_event("EVENT: MOTOR_BATT_EMPTY_RECV\n");
-      }
-      else
-      {
-         ESP_LOGW(TAG, "[MOTOR_SRV] recv() error (errno=%d)", errno);
-         trinity_log_event("EVENT: MOTOR_BATT_RECV_ERR\n");
-      }
-   }
-   else
-   {
-      ESP_LOGW(TAG, "[MOTOR_SRV] batt reply timed out after %d ms",
-               MOTOR_BATT_RECV_TIMEOUT_MS);
-      trinity_log_event("EVENT: MOTOR_BATT_TIMEOUT\n");
-   }
-
-   g_state.motor_online = 1;
-   bus_publish_motor(1, g_state.motor_batt);
-   close(client_sock);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -754,7 +576,8 @@ void tcp_manager_task(EventGroupHandle_t p_system_eg,
          motor_client = accept_motor_connection(motor_listen);
          if (SOCK_INVALID != motor_client)
          {
-            send_pwm_to_c3(motor_client, eff_pwm);
+            send_pwm_to_c3(motor_client, eff_pwm,
+                           &g_state.motor_online, &g_state.motor_batt);
             motor_client = SOCK_INVALID;
          }
       }
