@@ -5,7 +5,7 @@ persistence, networking, inference, and display each run as isolated processes
 or dedicated hardware nodes for independent failure recovery.
 
 ## Architecture
-![System Architecture](docs/Arch%20diagram.png)
+![System Architecture](docs/Arch%20diagram2.png)
 
 ## Hardware
 
