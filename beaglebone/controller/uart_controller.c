@@ -501,7 +501,7 @@ static void snapshot_pir_slots(uint32_t *p_count,
 
       if (latest_data.pir_slots[i].active)
       {
-         *p_pir_count = i + 1;
+         *p_pir_count = latest_data.pir_count;
       }
    }
 
