@@ -1,40 +1,71 @@
 # Smart Home IoT System
 
-A fault-tolerant distributed IoT system across 8 MCUs — sensing, control, persistence, networking, and display each run as isolated processes or dedicated hardware nodes for independent failure recovery.
+A fault-tolerant distributed IoT system across 10 MCUs — sensing, control,
+persistence, networking, inference, and display each run as isolated processes
+or dedicated hardware nodes for independent failure recovery.
 
 ## Architecture
-![System Architecture](docs/Arch%20diagram.png)
-
+![System Architecture](docs/Arch%20diagram2.png)
 
 ## Hardware
 
 | Node | MCU | Role |
 |------|-----|------|
-| BLE Hub | ESP32 | BLE scan, TCP forwarding, UART bridge |
+| BLE Hub | ESP32 | BLE scan, TCP forwarding, UART bridge, PIR→CAM trigger |
 | Dashboard | STM32F411 BlackPill | LVGL display, ILI9341 240x320 |
-| Temp/UART | STM32F103 Blue Pill | DHT11 avg_temp → UART to ESP32 |
+| Temp/UART | STM32F103 BluePill | DHT11 avg_temp → UART to ESP32 |
 | Motor | ESP32-C3 | PWM motor control, TCP server |
 | Reed x2 | nRF52840 | Door state + battery SOC via BLE adv |
-| PIR | ESP32-C3 | Motion count + battery SOC via BLE adv |
+| PIR x5 | ESP32-C3 (Zephyr) | Motion count + battery SOC via BLE adv |
 | Smart Lock | nRF52840 | Lock state + battery SOC via BLE adv |
 | Smart Light | nRF52840 | Light state via BLE adv + GATT write |
+| ESP32-CAM | ESP32-S3 | PIR-triggered JPEG capture → BeagleBone |
+| BeagleBone | AM335x | Linux pipeline: parse, persist, infer, display |
 
 ## BLE Protocol
 
-All nRF52840 nodes broadcast state passively in manufacturer advertisement data — zero connection overhead for monitoring. The ESP32 hub tracks device age and battery from scan data alone.
+All nRF52840 nodes broadcast state passively in manufacturer advertisement
+data — zero connection overhead for monitoring. The ESP32 hub tracks device
+age and battery from scan data alone.
 
 | Device | Company ID | Payload |
-|--------|-----------|---------|
+|--------|------------|---------|
 | Reed Sensors | 0xAB | `[state, batt_soc]` |
 | Smart Lock | 0xAC | `[state, batt_soc]` |
 | Smart Light | 0xAD | `[state]` |
-| PIR | 0xFF 0xFF | `[count BE 4 bytes, batt_soc]` |
+| PIR (x5) | 0xFF 0xFF | `[count BE 4 bytes, batt_soc]` |
 
-GATT connections established only for write commands (lock/light control). Device disconnects immediately after write confirmation.
+GATT connections established only for write commands (lock/light control).
+Device disconnects immediately after write confirmation.
+
+## PIR Occupancy and Camera Trigger Pipeline
+
+The hub maintains a per-slot sliding window occupancy state for each of the
+5 PIR sensors. On a 0→1 occupied transition the hub fires a UDP `CAPTURE`
+packet to the ESP32-CAM. The CAM connects to the BeagleBone inference daemon,
+sends a JPEG, and closes the connection.
+
+```
+PIR motion event
+    → hub BLE scan
+    → pir_window_update(slot)
+    → drain_queues() detects 0->1 transition
+    → send_cam_trigger() UDP CAPTURE → 10.0.0.222:9091
+    → ESP32-CAM wakes, captures 320x240 JPEG
+    → TCP connect → BeagleBone 10.0.0.206:9090
+    → inference_daemon receives JPEG
+    → TFLite person detection
+    → result saved to /data/pending/
+```
+
+The ESP32-CAM connects per-trigger — no persistent TCP connection. A counting
+semaphore (max=5) prevents burst capture loss when multiple PIR zones fire
+simultaneously.
 
 ## Dynamic Reed Discovery
 
-Reed sensors are auto-discovered by BLE name prefix `ReedSensor*`. Adding a new sensor requires no code changes anywhere in the stack:
+Reed sensors are auto-discovered by BLE name prefix `ReedSensor*`. Adding a
+new sensor requires no code changes anywhere in the stack:
 
 1. Flash nRF52840 with `CONFIG_BT_DEVICE_NAME="ReedSensor3"`
 2. Power on — ESP32 assigns a slot by MAC address
@@ -48,30 +79,50 @@ SLOT_OFFLINE — unseen > 150s            → red dot, tile stays
 SLOT_EMPTY   — unseen > 3600s           → tile hidden, layout reflows
 ```
 
-Cooldown table prevents immediate slot re-allocation after removal. Generation counter increments on device swap — detectable across the full stack.
+Cooldown table prevents immediate slot re-allocation after removal. Generation
+counter increments on device swap — detectable across the full stack.
 
 ## BeagleBone Pipeline
 
-Six-process architecture, each an independent systemd service:
+Seven-process architecture, each an independent systemd service:
 
 ```
-sensor_server   — UART rx from ESP32, JSON parse, named pipe write
-data_controller — pipe read, SQLite write, shared memory update
-uart_controller — UART tx to STM32F411 every 5s
-heartbeat       — device online/offline tracking
-cmd_handler     — IPC command dispatch
-db_manager      — SQLite persistence
+esp01-tcp-server  — AT command setup for ESP-01 WiFi module (oneshot)
+sensor_server     — UART rx from ESP32, JSON parse, named pipe write
+data_controller   — pipe read, SQLite write, shared memory update
+uart_controller   — UART tx to STM32F411 every 5s
+heartbeat         — device online/offline tracking
+cmd_handler       — IPC command dispatch
+db_manager        — SQLite persistence
+inference_daemon  — TCP server for ESP32-CAM JPEG, TFLite person detection
+```
+
+**Service boot order:**
+```
+network-online.target
+    → esp01-tcp-server  (oneshot, configures ESP-01 AT server)
+    → data-controller
+    → sensor-server     (wrapper polls for named pipe before exec)
+    → inference_daemon
 ```
 
 UART push format to STM32:
 ```
 STATE:tmp,pir,lgt,lck,age_pir,age_lgt,age_lck,reed_count
+PIR:total_count
+PIR_COUNT:n
+PIR1:count,batt,age
+PIR2:count,batt,age
+...PIRn
+OCC1:occupied
+OCC2:occupied
+...OCCn
 REED_COUNT:n
 DR1:state,batt,age
 DR2:state,batt,age
-PIR:count,batt
 LGT:state
 LCK:state,batt
+MTR:online
 ```
 
 ## Crash Logging
@@ -93,6 +144,12 @@ cd esp32-hub
 idf.py build flash monitor
 ```
 
+### ESP32-CAM
+```bash
+cd esp32-cam
+idf.py build flash monitor
+```
+
 ### BeagleBone
 ```bash
 cd beaglebone/controller
@@ -103,7 +160,11 @@ gcc data_controller.c commands.c db_manager.c heartbeat.c \
 cd ../server
 gcc sensor_server.c -o sensor_server -ljson-c
 
-sudo systemctl restart data-controller sensor-server
+cd ../inference/app
+gcc inference_daemon.c -o inference_daemon \
+    -L../lib -ltensorflowlite_c -lm
+
+sudo systemctl restart data-controller sensor-server inference
 ```
 
 ### STM32F411 / STM32F103
@@ -121,26 +182,41 @@ cd esp32c3/idf/motor/
 idf.py build flash monitor
 ```
 
+### ESP32-C3 PIR
+```bash
+cd esp32c3/zephyr/pir/
+west build && west flash
+```
+
 ## Project Structure
 
 ```
 embedded-iot-hub/
 ├── esp32-hub/                  # ESP-IDF BLE central + TCP forwarder
 │   ├── main/                   # aws, ble, tcp, uart, wifi managers
+│   │   ├── tcp_manager.c       # BB state machine, drain_queues, g_state
+│   │   ├── motor_server.c/h    # TCP server for ESP32-C3 motor
+│   │   ├── cam_trigger.c/h     # UDP CAPTURE trigger for ESP32-CAM
+│   │   └── pir_window.c/h      # per-slot occupancy sliding window
 │   ├── managed_components/
 │   ├── tests/
 │   ├── CMakeLists.txt
 │   ├── partitions.csv
 │   └── sdkconfig
 │
+├── esp32-cam/                  # ESP32-S3-CAM PIR-triggered capture
+│   └── main/
+│       └── main.c              # UDP trigger rx, JPEG capture, TCP push
+│
 ├── beaglebone/                 # Embedded Linux pipeline
 │   ├── controller/             # cmd_handler, data_controller, uart_controller
-│   ├── server/                 # sensor_server
-│   └── wifi/                  # ESP-01 TCP setup tools
+│   ├── server/                 # sensor_server, json_parser
+│   ├── inference/              # TFLite inference_daemon, detect.tflite
+│   └── wifi/                   # ESP-01 AT setup script
 │
 ├── esp32c3/                    # ESP32-C3 targets
-│   ├── idf/motor/             # Motor PWM controller (ESP-IDF)
-│   └── zephyr/pir/            # PIR sensor (Zephyr)
+│   ├── idf/motor/              # Motor PWM controller (ESP-IDF)
+│   └── zephyr/pir/             # PIR sensor x5 (Zephyr)
 │
 ├── nrf52840/                   # Zephyr BLE peripheral nodes
 │   ├── reed-sensor/
@@ -162,6 +238,7 @@ embedded-iot-hub/
 ├── README.md
 └── ENVIRONMENT.md
 ```
+
 ## Testing
 
 All unit tests run on-host — no hardware required.
@@ -218,10 +295,28 @@ cmake .. && make && ./test_server
 
 ## Key Design Decisions
 
-**Why scan-based BLE?** Passive advertisement monitoring gives the hub continuous device age and state with zero connection overhead. Battery life on coin/AA nodes is measured in months.
+**Why scan-based BLE?** Passive advertisement monitoring gives the hub
+continuous device age and state with zero connection overhead. Battery life
+on coin/AA nodes is measured in months.
 
-**Why BeagleBone?** AM335x gives a full Linux environment for SQLite, systemd service isolation, and future HTTP/AWS expansion without the constraints of an RTOS.
+**Why BeagleBone?** AM335x gives a full Linux environment for SQLite, systemd
+service isolation, TFLite inference, and future HTTP/AWS expansion without
+the constraints of an RTOS.
 
-**Why FRAM for crash logging on STM32F103?** Unlimited write endurance and byte-addressable writes survive hard power loss. No wear leveling needed, no erase cycles, no filesystem overhead.
+**Why FRAM for crash logging on STM32F103?** Unlimited write endurance and
+byte-addressable writes survive hard power loss. No wear leveling needed, no
+erase cycles, no filesystem overhead.
 
-**Why dedicated ESP32-C3 for motor?** Oscilloscope analysis confirmed DHT11 timing violations under shared STM32 interrupt load. Dedicated silicon eliminates the constraint entirely.
+**Why dedicated ESP32-C3 for motor?** Oscilloscope analysis confirmed DHT11
+timing violations under shared STM32 interrupt load. Dedicated silicon
+eliminates the constraint entirely.
+
+**Why per-trigger TCP for ESP32-CAM?** A persistent connection from the CAM
+to the BeagleBone timed out during long idle intervals between PIR triggers.
+Connecting per-trigger eliminates the timeout entirely with negligible latency
+overhead given the infrequent capture rate.
+
+**Why static PIR slots?** The static slot system gives predictable memory
+layout, zero heap fragmentation, and FreeRTOS-friendly fixed allocation.
+Adding sensors beyond MAX_PIRS requires a recompile and reflash. See issue
+#38 for the dynamic discovery roadmap if sensor count grows.
