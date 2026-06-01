@@ -83,7 +83,7 @@
 /** \brief Sizing constants */
 #define MAX_ROOMS       10   /**< maximum room sensors in SensorData */
 #define MAX_REEDS       6    /**< must match ESP32 tcp_manager.c and ble_scan.c */
-#define MAX_PIRS        2    /**< must match ESP32 tcp_manager.c and sensor_types.h */
+#define MAX_PIRS        5    /**< must match ESP32 tcp_manager.c and sensor_types.h */
 #define UART_LINE_LEN   64   /**< UART line buffer size bytes */
 
 /** \brief Ring buffer capacity — must be a power of two for mask wrapping */

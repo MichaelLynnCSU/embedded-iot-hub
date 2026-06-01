@@ -111,7 +111,7 @@
 #define PIR_HOLD_SEC          600u  /**< hold occupied seconds after last trigger */
 
 /** \brief PIR sensor slot table */
-#define MAX_PIRS             2u           /**< max concurrent PIR sensors          */
+#define MAX_PIRS             5u           /**< max concurrent PIR sensors          */
 #define PIR_NAME_PREFIX      "PIR_Motion" /**< PIR device name prefix              */
 #define PIR_NAME_PREFIX_LEN  10u          /**< length of PIR_NAME_PREFIX           */
 #define PIR_OFFLINE_S        300          /**< pir offline threshold seconds  */

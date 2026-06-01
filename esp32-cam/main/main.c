@@ -319,7 +319,7 @@ void app_main(void)
 {
     nvs_flash_init();
 
-    g_trigger_sem = xSemaphoreCreateBinary();
+    g_trigger_sem = xSemaphoreCreateCounting(5, 0);
 
     if (ESP_OK != camera_init())
     {

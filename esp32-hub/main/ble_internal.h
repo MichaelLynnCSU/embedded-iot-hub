@@ -53,11 +53,14 @@ typedef enum
 {
    DEV_IDX_PIR   = 0, /**< PIR slot 0 — PIR_Motion  */
    DEV_IDX_PIR2  = 1, /**< PIR slot 1 — PIR_Motion2 */
-   DEV_IDX_REED1 = 2, /**< reed sensor 1             */
-   DEV_IDX_REED2 = 3, /**< reed sensor 2             */
-   DEV_IDX_LIGHT = 4, /**< smart light relay         */
-   DEV_IDX_LOCK  = 5, /**< smart lock                */
-   DEV_IDX_COUNT = 6  /**< total device count — must be last */
+   DEV_IDX_PIR3  = 2, /**< PIR slot 2 — PIR_Motion3 */
+   DEV_IDX_PIR4  = 3, /**< PIR slot 3 — PIR_Motion4 */
+   DEV_IDX_PIR5  = 4, /**< PIR slot 4 — PIR_Motion5 */
+   DEV_IDX_REED1 = 5, /**< reed sensor 1             */
+   DEV_IDX_REED2 = 6, /**< reed sensor 2             */
+   DEV_IDX_LIGHT = 7, /**< smart light relay         */
+   DEV_IDX_LOCK  = 8, /**< smart lock                */
+   DEV_IDX_COUNT = 9  /**< total device count — must be last */
 } BLE_DEV_IDX_E;
 
 /************************ STRUCTURE/UNION DATA TYPES **************************/

@@ -35,7 +35,7 @@
 
 /******************************** CONSTANTS ***********************************/
 
-#define DEVICE_COUNT      6   /**< number of tracked devices in device_online */
+#define DEVICE_COUNT      9   /**< number of tracked devices in device_online */
 #define HISTORY_BUF_SIZE  100 /**< history ring buffer capacity */
 #define ALERT_BUF_SIZE    10  /**< maximum simultaneous alerts */
 #define ROOM_BUF_SIZE     10  /**< maximum room sensors in shared memory */

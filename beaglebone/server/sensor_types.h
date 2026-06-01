@@ -21,7 +21,7 @@
 
 #define MAX_ROOMS      10  /**< max room sensors per frame */
 #define MAX_REEDS      6   /**< must match ESP32 and controller */
-#define MAX_PIRS       2   /**< must match ESP32 and controller */
+#define MAX_PIRS       5   /**< must match ESP32 and controller */
 #define REED_NAME_LEN  16  /**< reed BLE name buffer size */
 #define ROOM_NAME_LEN  32  /**< room name buffer size */
 #define ROOM_STATE_LEN 16  /**< room state buffer size */
