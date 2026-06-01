@@ -5,7 +5,7 @@ persistence, networking, inference, and display each run as isolated processes
 or dedicated hardware nodes for independent failure recovery.
 
 ## Architecture
-![System Architecture](docs/Arch%20diagram2.png)
+![System Architecture](docs/Arch%20diagram.png)
 
 ## Hardware
 
@@ -240,6 +240,30 @@ embedded-iot-hub/
 ```
 
 ## Testing
+
+### CI/CD — Jenkins + Cloudflare Tunnel
+
+Every push to `master` triggers a full automated test run via Jenkins. The
+Jenkins server runs on the local network and is exposed externally through a
+Cloudflare Tunnel — no port forwarding or static IP required.
+
+The pipeline runs all test suites in sequence, collects JUnit XML results, and
+publishes per-module coverage reports via the Coverage plugin:
+
+| Stage | Framework | Coverage |
+|-------|-----------|----------|
+| BeagleBone Controller | CUnit | gcovr → Cobertura XML |
+| BeagleBone Server | CUnit | gcovr → Cobertura XML |
+| ESP32 Hub | Unity (FetchContent) | gcovr → Cobertura XML |
+| ESP32-C3 Motor | Unity (FetchContent) | gcovr → Cobertura XML |
+| STM32 BlackPill | Unity (FetchContent) | gcovr → Cobertura XML |
+| STM32 BluePill | Unity (FetchContent) | gcovr → Cobertura XML |
+| nRF52840 + PIR (Zephyr) | ztest · native_sim | gcovr → Cobertura XML |
+
+The Zephyr stage runs with `catchError(buildResult: 'UNSTABLE')` — a missing
+toolchain marks the build unstable rather than failed so other stages still run.
+
+### Manual testing
 
 All unit tests run on-host — no hardware required.
 
