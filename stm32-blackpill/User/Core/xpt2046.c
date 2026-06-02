@@ -4,8 +4,8 @@
 #define TOUCH_X_MAX     1919
 #define TOUCH_Y_MIN     159
 #define TOUCH_Y_MAX     1952
-#define TOUCH_SCREEN_W  320
-#define TOUCH_SCREEN_H  240
+#define TOUCH_SCREEN_W  240
+#define TOUCH_SCREEN_H  320
 
 #define T_CS_LOW()   HAL_GPIO_WritePin(T_CS_GPIO_Port, T_CS_Pin, GPIO_PIN_RESET)
 #define T_CS_HIGH()  HAL_GPIO_WritePin(T_CS_GPIO_Port, T_CS_Pin, GPIO_PIN_SET)
@@ -49,19 +49,27 @@ TouchPoint_t XPT2046_GetTouch(void)
 {
     TouchPoint_t tp = {0, 0};
     uint32_t raw_x = 0, raw_y = 0;
+    char raw_dbg[64];
+
     for (uint8_t i = 0; i < 4; i++) {
-        raw_x += XPT2046_ReadRaw(0xD0);
-        raw_y += XPT2046_ReadRaw(0x90);
+        raw_x += XPT2046_ReadRaw(0x90);
+        raw_y += XPT2046_ReadRaw(0xD0);
     }
     raw_x /= 4;
     raw_y /= 4;
+
+    /* TEMP calibration debug — remove after done */
+    snprintf(raw_dbg, sizeof(raw_dbg), "[RAW] rx=%lu ry=%lu\r\n", raw_x, raw_y);
+    log_enqueue(raw_dbg);
 
     if (raw_x < TOUCH_X_MIN) raw_x = TOUCH_X_MIN;
     if (raw_x > TOUCH_X_MAX) raw_x = TOUCH_X_MAX;
     if (raw_y < TOUCH_Y_MIN) raw_y = TOUCH_Y_MIN;
     if (raw_y > TOUCH_Y_MAX) raw_y = TOUCH_Y_MAX;
 
-    tp.x = (raw_x - TOUCH_X_MIN) * TOUCH_SCREEN_W / (TOUCH_X_MAX - TOUCH_X_MIN);
-    tp.y = (raw_y - TOUCH_Y_MIN) * TOUCH_SCREEN_H / (TOUCH_Y_MAX - TOUCH_Y_MIN);
+    tp.x = (raw_y - TOUCH_Y_MIN) * TOUCH_SCREEN_W / (TOUCH_Y_MAX - TOUCH_Y_MIN);
+    tp.y = (raw_x - TOUCH_X_MIN) * TOUCH_SCREEN_H / (TOUCH_X_MAX - TOUCH_X_MIN);
+    tp.y = TOUCH_SCREEN_H - tp.y;
+
     return tp;
 }

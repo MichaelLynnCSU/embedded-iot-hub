@@ -467,7 +467,7 @@ void parser_process_line(const char *p_line)
    /* PIR<1-4>:count,batt,age
     * ID is exactly 4 chars: P I R <digit> */
    if (('P' == p_id[0]) && ('I' == p_id[1]) && ('R' == p_id[2]) &&
-       (p_id[PIR_DIGIT_OFFSET] >= '1') && (p_id[PIR_DIGIT_OFFSET] <= '4') &&
+       (p_id[PIR_DIGIT_OFFSET] >= '1') && (p_id[PIR_DIGIT_OFFSET] <= '5') &&
        ('\0' == p_id[PIR_DIGIT_OFFSET + 1u]))
    {
       slot = (int)(p_id[PIR_DIGIT_OFFSET] - '1');
@@ -480,7 +480,7 @@ void parser_process_line(const char *p_line)
     *       BeagleBone sends OCC1:n..OCC4:n, one per active PIR slot.
     * ID is exactly 4 chars: O C C <digit> */
    if (('O' == p_id[0]) && ('C' == p_id[1]) && ('C' == p_id[2]) &&
-       (p_id[OCC_DIGIT_OFFSET] >= '1') && (p_id[OCC_DIGIT_OFFSET] <= '4') &&
+       (p_id[OCC_DIGIT_OFFSET] >= '1') && (p_id[OCC_DIGIT_OFFSET] <= '5') &&
        ('\0' == p_id[OCC_DIGIT_OFFSET + 1u]))
    {
       slot = (int)(p_id[OCC_DIGIT_OFFSET] - '1');

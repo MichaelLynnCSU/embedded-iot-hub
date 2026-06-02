@@ -11,10 +11,11 @@
  * \details Initialises all peripherals (SPI, UART, USB, LVGL), starts the
  *          ILI9341 display and XPT2046 touch controller, then enters the
  *          main loop which:
- *            1. Drives the LVGL timer handler.
- *            2. Drains the USB CDC log queue.
- *            3. Processes queued UART telemetry lines from the ESP32.
- *            4. Refreshes the dashboard UI on every heartbeat tick.
+ *            1. Polls touch input and switches views on nav bar tap.
+ *            2. Drives the LVGL timer handler.
+ *            3. Drains the USB CDC log queue.
+ *            4. Processes queued UART telemetry lines from the ESP32.
+ *            5. Refreshes the dashboard UI on every heartbeat tick.
  *
  *          UART telemetry is received one byte at a time via interrupt and
  *          assembled into lines by ring_buffer.c. The main loop dequeues and
@@ -52,20 +53,19 @@
  *          in < 1ms. Violating this degrades UI frame timing and risks
  *          dropping UART bytes.
  *
- *
  * \note    Render trigger:
  *          ui_update() is called conditionally, not on every loop tick.
  *          drain_uart_queue() triggers it only when new telemetry arrived.
  *          heartbeat_tick() triggers it once per second as a fallback.
  *          This is intentional -- unconditional rendering adds SPI
  *          traffic and LVGL work with no visual benefit on a
- *          sporadically-updated dashboard. The pipeline is still
- *          deterministic; the render stage is just gated on dirty state.
+ *          sporadically-updated dashboard.
  *
- *          Event-driven render on new telemetry, 1Hz periodic render as a
- *          liveness guarantee when the ESP32 is silent heartbeat and ui_update()
- *          never fires unconditionally.
- *
+ * \note    Touch polling (2026-06-01):
+ *          ui_poll_touch() added as the first call in the main loop.
+ *          Placing it first minimises tap-to-view-switch latency.
+ *          The function is debounced internally; it returns immediately
+ *          when no touch is present or debounce is active.
  ******************************************************************************/
 
 #include "crash_log.h"
@@ -95,7 +95,7 @@ static SPI_HandleTypeDef  g_hspi2;  /**< SPI2 — XPT2046 touch controller      
 UART_HandleTypeDef        g_huart1; /**< USART1 — ESP32 telemetry             */
 I2C_HandleTypeDef         g_hi2c1;  /**< I2C1 — FRAM chip PB6/PB7            */
 
-static uint8_t  g_uart_rx_byte = 0u; /**< Single-byte DMA target              */
+static uint8_t  g_uart_rx_byte = 0u;  /**< Single-byte DMA target             */
 static uint32_t g_last_hb      = 0ul; /**< Tick of last heartbeat check       */
 
 /************************** STATIC (PRIVATE) PROTOTYPES ***********************/
@@ -110,17 +110,11 @@ static void mx_usart1_uart_init(void);
 
 /**
  * \brief  Process all pending UART lines and refresh the UI if any arrived.
- *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
  */
 static void drain_uart_queue(void)
 {
-   char    tmp[UART_LINE_LEN] = {0}; /**< Local copy of dequeued line         */
-   uint8_t ui_dirty           = 0u;  /**< Non-zero when UI needs refreshing   */
+   char    tmp[UART_LINE_LEN] = {0};
+   uint8_t ui_dirty           = 0u;
 
    while (rb_dequeue(tmp))
    {
@@ -136,35 +130,27 @@ static void drain_uart_queue(void)
 
 /**
  * \brief  Emit a periodic heartbeat log line and refresh the UI.
- *
- * \param  void
- *
- * \return void
- *
- * \author MichaelLynnCSU
  */
 static void heartbeat_tick(void)
 {
-   static char g_ping[PING_BUF_LEN]; /**< Static: avoids stack alloc each call */
+   static char g_ping[PING_BUF_LEN];
    uint32_t    now = 0ul;
 
    now = HAL_GetTick();
 
-   if ((now - g_last_hb) < HB_CHECK_MS)
-   {
-      return;
-   }
+   if ((now - g_last_hb) < HB_CHECK_MS) { return; }
 
    g_last_hb = now;
    trinity_check_stack();
    ui_update();
    (void)snprintf(g_ping, sizeof(g_ping),
-               "[HB] t=%lu reeds=%u pir_slots=%u lgt=%u lck=%u\r\n",
+               "[HB] t=%lu reeds=%u pir_slots=%u lgt=%u lck=%u view=%u\r\n",
                (unsigned long)now,
                (unsigned int)ui_get_reed_count(),
                (unsigned int)ui_get_pir_count_slots(),
                (unsigned int)ui_get_dev_online(eDEV_LIGHT),
-               (unsigned int)ui_get_dev_online(eDEV_LOCK));
+               (unsigned int)ui_get_dev_online(eDEV_LOCK),
+               (unsigned int)ui_get_view());
    log_enqueue(g_ping);
 }
 
@@ -261,24 +247,10 @@ static void mx_gpio_init(void)
 
 /************************** PUBLIC FUNCTIONS ***********************************/
 
-/**
- * \brief  UART receive-complete ISR callback — feeds bytes into ring buffer.
- *
- * \param  p_huart - HAL UART handle that triggered the callback.
- *
- * \return void
- *
- * \author MichaelLynnCSU
- */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *p_huart)
 {
-   if ((NULL == p_huart) || (USART1 != p_huart->Instance))
-   {
-      return;
-   }
-
+   if ((NULL == p_huart) || (USART1 != p_huart->Instance)) { return; }
    rb_push_byte(g_uart_rx_byte);
-
    (void)HAL_UART_Receive_IT(&g_huart1, &g_uart_rx_byte, 1u);
 }
 
@@ -333,7 +305,7 @@ int main(void)
 
    /* I2C bus scan -- remove after FRAM confirmed */
    {
-      char scan_msg[48];
+      char    scan_msg[48];
       uint8_t found = 0u;
       for (uint16_t a = 0x08u; a < 0x78u; a++)
       {
@@ -353,7 +325,7 @@ int main(void)
    mx_spi2_init();
    mx_usart1_uart_init();
 
-   rb_init();                   /* Initialise UART ring buffer                */
+   rb_init();
 
    ILI9341_Init(&g_hspi1);
    XPT2046_Init(&g_hspi2);
@@ -367,6 +339,7 @@ int main(void)
 
    while (1)
    {
+      ui_poll_touch();              /* Touch first — lowest latency nav switch */
       (void)lv_timer_handler();
       log_drain();
       drain_uart_queue();
