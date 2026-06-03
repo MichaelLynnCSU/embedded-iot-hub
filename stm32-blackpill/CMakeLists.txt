@@ -39,6 +39,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "User/Core/ili9341.c"
     "User/Core/xpt2046.c"
 
+    # Segger Logging using J-Link
+    "User/Core/SEGGER_RTT.c"
+    "User/Core/SEGGER_RTT_printf.c"
+
     # Refactored dashboard modules
     "User/Core/log.c"
     "User/Core/parser.c"

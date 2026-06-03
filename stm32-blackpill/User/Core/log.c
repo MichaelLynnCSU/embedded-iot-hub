@@ -17,6 +17,7 @@
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
 #include <string.h>
+#include "SEGGER_RTT.h"
 
 /************************** STATIC (PRIVATE) DATA *****************************/
 
@@ -69,24 +70,37 @@ void log_enqueue(const char *p_msg)
  */
 void log_drain(void)
 {
-   extern USBD_HandleTypeDef hUsbDeviceFS;
-   uint8_t ret = 0u; /**< CDC transmit return code */
+    extern USBD_HandleTypeDef hUsbDeviceFS;
+    uint8_t ret = 0u;
 
-   if (USBD_STATE_CONFIGURED != hUsbDeviceFS.dev_state)
-   {
-      return;
-   }
+    /* Static index tracking where RTT is up to in the global queue */
+    static uint8_t rtt_tail = 0u; 
 
-   while (g_log_q_count > 0u)
-   {
-      ret = CDC_Transmit_FS((uint8_t *)g_log_queue[g_log_q_tail],
-                            (uint16_t)strlen(g_log_queue[g_log_q_tail]));
-      if (USBD_BUSY == ret)
-      {
-         break;
-      }
+    /* 1. Drain to RTT independently (Never blocks, works without USB) */
+    while (rtt_tail != g_log_q_head)
+    {
+        (void)SEGGER_RTT_WriteNoLock(0u, 
+                                     g_log_queue[rtt_tail], 
+                                     (unsigned int)strlen(g_log_queue[rtt_tail]));
+        rtt_tail = (uint8_t)((rtt_tail + 1u) % LOG_QUEUE_DEPTH);
+    }
 
-      g_log_q_tail  = (uint8_t)((g_log_q_tail + 1u) % LOG_QUEUE_DEPTH);
-      g_log_q_count--;
-   }
+    /* 2. Existing USB CDC Pipeline */
+    if (USBD_STATE_CONFIGURED != hUsbDeviceFS.dev_state)
+    {
+        return;
+    }
+
+    while (g_log_q_count > 0u)
+    {
+        ret = CDC_Transmit_FS((uint8_t *)g_log_queue[g_log_q_tail],
+                              (uint16_t)strlen(g_log_queue[g_log_q_tail]));
+        if (USBD_BUSY == ret)
+        {
+            break;
+        }
+
+        g_log_q_tail  = (uint8_t)((g_log_q_tail + 1u) % LOG_QUEUE_DEPTH);
+        g_log_q_count--;
+    }
 }
