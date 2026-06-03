@@ -73,12 +73,13 @@ BUS_SUBSCRIBER_T bus_register_subscriber(EventBits_t mask)
    sub.mb_lock  = xQueueCreate(1, sizeof(LOCK_PAYLOAD_T));
    sub.mb_light = xQueueCreate(1, sizeof(LIGHT_PAYLOAD_T));
    sub.mb_temp  = xQueueCreate(1, sizeof(TEMP_PAYLOAD_T));
-   sub.mb_motor = xQueueCreate(1, sizeof(MOTOR_PAYLOAD_T));
+   sub.mb_motor    = xQueueCreate(1, sizeof(MOTOR_PAYLOAD_T));
+   sub.mb_ble_temp = xQueueCreate(1, sizeof(BLE_TEMP_PAYLOAD_T));
 
    if ((NULL == sub.events)   || (NULL == sub.mb_pir)  ||
        (NULL == sub.mb_reed)  || (NULL == sub.mb_lock) ||
        (NULL == sub.mb_light) || (NULL == sub.mb_temp) ||
-       (NULL == sub.mb_motor))
+       (NULL == sub.mb_motor) || (NULL == sub.mb_ble_temp))
    {
       ESP_LOGE(TAG, "Subscriber mailbox alloc failed — check heap");
       return sub;
