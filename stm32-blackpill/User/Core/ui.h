@@ -30,6 +30,8 @@
 
 #define MAX_REEDS          6u    /**< Maximum number of reed sensors supported */
 #define MAX_PIRS           5u    /**< Maximum number of per-slot PIR sensors   */
+#define MAX_TEMPS          4u    /**< Maximum number of BLE temp sensors       */
+
 #define HB_TIMEOUT_MS  30000ul  /**< ms before a device is considered offline  */
 #define TILE_GAP           4u   /**< Pixel gap between adjacent tiles          */
 #define TILE_LEFT_MARGIN   5u   /**< Left edge x-coordinate for left column    */
@@ -108,6 +110,15 @@ void ui_set_pir_slot_count(uint8_t slot, uint32_t val);
 void ui_set_pir_slot_batt(uint8_t slot, int8_t batt);
 void ui_set_pir_slot_age(uint8_t slot, uint16_t age);
 void ui_set_pir_slot_occupied(uint8_t slot, uint8_t val);
+
+/* ---- Temp slot setters ---- */
+void ui_set_temp_count_slots(uint8_t count);
+uint8_t ui_get_temp_count_slots(void);
+void ui_set_temp_slot_decidegc(uint8_t slot, int16_t val);
+void ui_set_temp_slot_batt(uint8_t slot, int8_t batt);
+void ui_set_temp_slot_age(uint8_t slot, uint16_t age);
+void ui_stamp_temp_online(uint8_t slot, uint32_t tick);
+void ui_reflow_temp(int n);
 
 void ui_set_reed_state(uint8_t slot, uint8_t state);
 void ui_set_reed_batt(uint8_t slot, int8_t batt);

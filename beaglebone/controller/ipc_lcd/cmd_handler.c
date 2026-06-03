@@ -331,6 +331,12 @@ static void process_sensor_frame(const struct SensorData *p_data)
    }
    latest_data.pir_count = p_data->pir_count;
 
+   for (i = 0; i < MAX_TEMPS; i++)
+   {
+      latest_data.temp_slots[i] = p_data->temp_slots[i];
+   }
+   latest_data.temp_count = p_data->temp_count;
+
    pthread_mutex_unlock(&data_mutex);
 
    LOG("Sensor: temp=%.1f motion=%d occ=%d lgt=%d lck=%d mtr=%d "

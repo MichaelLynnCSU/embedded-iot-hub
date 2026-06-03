@@ -19,6 +19,8 @@
 
 #include <stdint.h>
 
+#define MAX_TEMPS      4   /**< must match ESP32 and controller */
+#define TEMP_NAME_LEN  32  /**< temp sensor BLE name buffer size */
 #define MAX_ROOMS      10  /**< max room sensors per frame */
 #define MAX_REEDS      6   /**< must match ESP32 and controller */
 #define MAX_PIRS       5   /**< must match ESP32 and controller */
@@ -62,6 +64,22 @@ struct __attribute__((packed)) PirSlotData
 };
 
 /**
+ * \brief Temperature sensor slot -- packed wire format.
+ *
+ * \warning Must match controller_internal.h TempSlotData exactly.
+ */
+struct __attribute__((packed)) TempSlotData
+{
+   int16_t  temp_decidegc; /*!< temperature in tenths of °C      */
+   uint16_t age;           /*!< seconds since last adv           */
+   int8_t   batt;          /*!< battery SOC percent, -1=unknown  */
+   uint8_t  active;        /*!< 1=slot occupied                  */
+   uint8_t  offline;       /*!< age > TEMP_OFFLINE_S             */
+   uint8_t  _pad;          /*!< padding for alignment            */
+   char     name[TEMP_NAME_LEN]; /*!< BLE advertised name        */
+};
+
+/**
  * \brief Sensor data pipe wire format.
  *
  * \warning Must match controller_internal.h SensorData exactly.
@@ -96,6 +114,9 @@ struct SensorData
 
    struct PirSlotData pir_slots[MAX_PIRS]; /*!< dynamic PIR slot array */
    uint8_t            pir_count;           /*!< number of active PIR slots */
+
+   struct TempSlotData temp_slots[MAX_TEMPS]; /*!< dynamic temp slot array */
+   uint8_t             temp_count;            /*!< number of active temp slots */
 };
 
 #endif /* SENSOR_TYPES_H */

@@ -224,6 +224,79 @@ static void parse_pir_slots(struct json_object *p_pirs_arr,
 }
 
 /******************************************************************************
+ * \brief Parse "temps" JSON array into p_data->temp_slots[].
+ *
+ * \details Mirrors parse_pir_slots(). Each entry has id (1-based),
+ *          temp (whole degrees C), batt, age, offline, name.
+ *          Populates temp_slots[slot] where slot = id-1.
+ ******************************************************************************/
+static void parse_temp_slots(struct json_object *p_temps_arr,
+                              struct SensorData  *p_data)
+{
+   int                 n      = 0;
+   int                 i      = 0;
+   int                 id     = 0;
+   int                 slot   = 0;
+   int                 age    = 0;
+   struct json_object *p_r    = NULL;
+   struct json_object *p_jid  = NULL;
+   struct json_object *p_jval = NULL;
+
+   n = json_object_array_length(p_temps_arr);
+
+   for (i = 0; i < n; i++)
+   {
+      p_r = json_object_array_get_idx(p_temps_arr, i);
+      if (!json_object_object_get_ex(p_r, "id", &p_jid))
+      {
+         continue;
+      }
+
+      id   = json_object_get_int(p_jid);
+      slot = id - 1;
+
+      if ((0 > slot) || (slot >= MAX_TEMPS))
+      {
+         continue;
+      }
+
+      p_data->temp_slots[slot].active = 1;
+
+      if (json_object_object_get_ex(p_r, "temp", &p_jval))
+      {
+         p_data->temp_slots[slot].temp_decidegc =
+            (int16_t)(json_object_get_int(p_jval) * 10);
+      }
+      if (json_object_object_get_ex(p_r, "batt", &p_jval))
+      {
+         p_data->temp_slots[slot].batt =
+            (int8_t)json_object_get_int(p_jval);
+      }
+      if (json_object_object_get_ex(p_r, "age", &p_jval))
+      {
+         age = json_object_get_int(p_jval);
+         p_data->temp_slots[slot].age =
+            (0 > age) ? AGE_UNKNOWN : (uint16_t)age;
+      }
+      if (json_object_object_get_ex(p_r, "offline", &p_jval))
+      {
+         p_data->temp_slots[slot].offline =
+            (uint8_t)json_object_get_int(p_jval);
+      }
+      if (json_object_object_get_ex(p_r, "name", &p_jval))
+      {
+         const char *p_name = json_object_get_string(p_jval);
+         if (NULL != p_name)
+         {
+            strncpy(p_data->temp_slots[slot].name, p_name,
+                    TEMP_NAME_LEN - 1);
+            p_data->temp_slots[slot].name[TEMP_NAME_LEN - 1] = '\0';
+         }
+      }
+   }
+}
+
+/******************************************************************************
  * \brief Parse room entries from JSON rooms array into SensorData.
  *
  * \param p_rooms_arr - JSON array object for "rooms" key.
@@ -391,6 +464,15 @@ void process_json(const char *p_json_body)
    if (json_object_object_get_ex(p_root, "pirs", &p_obj))
    {
       parse_pir_slots(p_obj, &data);
+   }
+
+   if (json_object_object_get_ex(p_root, "temp_count", &p_obj))
+   {
+      data.temp_count = (uint8_t)json_object_get_int(p_obj);
+   }
+   if (json_object_object_get_ex(p_root, "temps", &p_obj))
+   {
+      parse_temp_slots(p_obj, &data);
    }
 
    if (json_object_object_get_ex(p_root, "rooms", &p_obj))

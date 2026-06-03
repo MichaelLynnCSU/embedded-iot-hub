@@ -38,6 +38,14 @@
  *          green when online and red when offline. Unicode dot glyphs
  *          replaced with ASCII [ON]/[--] — default LVGL font does not
  *          include U+25CF/U+25CB codepoints.
+ *
+ * \note    BLE temp slots in SYSTEM view (2026-06-03):
+ *          SYS_ROW_COUNT increased by MAX_TEMPS.
+ *          create_sys_list() adds one row per temp slot after fixed rows.
+ *          system_list_refresh() renders TEMP1/TEMP2 with decidegc, online
+ *          status, and battery. Inactive slots are hidden.
+ *          ui_reflow_temp() stub promoted to update g_temp_count_slots and
+ *          refresh the system list when slot count changes.
  ******************************************************************************/
 
 #include "ui.h"
@@ -84,7 +92,9 @@
 
 #define TOUCH_DEBOUNCE_MS  150ul
 
-#define SYS_ROW_COUNT      (4u + MAX_PIRS + MAX_REEDS)
+/* Fixed rows: TEMP(aggregate), MOTOR, LIGHT, LOCK = 4
+ * Then one row per BLE temp slot, PIR slot, reed slot.            */
+#define SYS_ROW_COUNT      (4u + MAX_TEMPS + MAX_PIRS + MAX_REEDS)
 
 /************************** STRUCTURE DATA TYPES ******************************/
 
@@ -108,6 +118,9 @@ typedef struct _HOME_STATE_X
    int8_t   pir_slot_batt[MAX_PIRS];
    uint16_t pir_slot_age[MAX_PIRS];
    uint8_t  pir_slot_occupied[MAX_PIRS];
+   int16_t  temp_slot_decidegc[MAX_TEMPS];
+   int8_t   temp_slot_batt[MAX_TEMPS];
+   uint16_t temp_slot_age[MAX_TEMPS];
    uint8_t  reed_state[MAX_REEDS];
    int8_t   reed_batt[MAX_REEDS];
    uint16_t reed_age[MAX_REEDS];
@@ -121,10 +134,11 @@ typedef struct _HOME_STATE_X
 /************************ STATIC (PRIVATE) DATA *****************************/
 
 static HOME_STATE_X g_home = {
-   .pir_slot_batt = {-1, -1, -1, -1, -1},
-   .reed_batt     = {-1, -1, -1, -1, -1, -1},
-   .lock_batt     = -1,
-   .motor_batt    = -1,
+   .pir_slot_batt  = {-1, -1, -1, -1, -1},
+   .reed_batt      = {-1, -1, -1, -1, -1, -1},
+   .lock_batt      = -1,
+   .motor_batt     = -1,
+   .temp_slot_batt = {-1, -1, -1, -1},
 };
 
 static uint32_t g_dev_last_seen[eDEV_COUNT];
@@ -133,8 +147,12 @@ static uint32_t g_reed_last_seen[MAX_REEDS];
 static uint8_t  g_reed_online[MAX_REEDS];
 static uint32_t g_pir_last_seen[MAX_PIRS];
 static uint8_t  g_pir_online[MAX_PIRS];
-static uint8_t  g_reed_count      = 2u;
-static uint8_t  g_pir_count_slots = 0u;
+static uint8_t  g_reed_count       = 2u;
+static uint8_t  g_pir_count_slots  = 0u;
+static uint32_t g_temp_last_seen[MAX_TEMPS];
+static uint8_t  g_temp_online[MAX_TEMPS];
+static uint8_t  g_temp_count_slots = 0u;
+static TILE_X   g_t_temp_slot[MAX_TEMPS];
 
 static lv_disp_draw_buf_t g_draw_buf;
 static lv_color_t         g_buf1[LV_BUF_SIZE];
@@ -356,6 +374,7 @@ static void create_sys_list(lv_obj_t *p_scr)
    lv_obj_set_scroll_dir(g_sys_list, LV_DIR_VER);
    lv_obj_set_scrollbar_mode(g_sys_list, LV_SCROLLBAR_MODE_AUTO);
 
+   /* Fixed rows: aggregate TEMP, MOTOR, LIGHT, LOCK */
    const char *const fixed[4] = { "TEMP", "MOTOR", "LIGHT", "LOCK" };
    for (i = 0u; i < 4u; i++)
    {
@@ -365,6 +384,18 @@ static void create_sys_list(lv_obj_t *p_scr)
       row++;
    }
 
+   /* One row per BLE temp slot — hidden until temp_count arrives */
+   for (i = 0u; i < (uint8_t)MAX_TEMPS; i++)
+   {
+      (void)snprintf(name, sizeof(name), "TEMP %u", (unsigned int)(i + 1u));
+      g_sys_rows[row] = lv_label_create(g_sys_list);
+      lv_label_set_text(g_sys_rows[row], name);
+      lv_obj_set_style_text_color(g_sys_rows[row], lv_color_white(), 0);
+      lv_obj_add_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
+      row++;
+   }
+
+   /* One row per PIR slot */
    for (i = 0u; i < (uint8_t)MAX_PIRS; i++)
    {
       (void)snprintf(name, sizeof(name), "PIR %u", (unsigned int)(i + 1u));
@@ -374,6 +405,7 @@ static void create_sys_list(lv_obj_t *p_scr)
       row++;
    }
 
+   /* One row per reed/door slot */
    for (i = 0u; i < (uint8_t)MAX_REEDS; i++)
    {
       (void)snprintf(name, sizeof(name), "DOOR %u", (unsigned int)(i + 1u));
@@ -508,9 +540,17 @@ static void sys_row_set(uint8_t row, const char *p_buf, uint8_t online)
 /**
  * \brief  Refresh SYSTEM list rows from current state.
  *
- * \details Format per row: "NAME  [ON]/[--]  B:xx%  A:xxs"
+ * \details Row layout:
+ *            [0]        TEMP (aggregate STM32 sensor)
+ *            [1]        MOTOR
+ *            [2]        LIGHT
+ *            [3]        LOCK
+ *            [4..4+MAX_TEMPS-1]               BLE temp slots
+ *            [4+MAX_TEMPS..4+MAX_TEMPS+MAX_PIRS-1]  PIR slots
+ *            [4+MAX_TEMPS+MAX_PIRS..]          Reed/door slots
+ *
  *          Row colour: green = online, red = offline.
- *          Inactive PIR/reed slots are hidden.
+ *          Inactive BLE temp / PIR / reed slots are hidden.
  */
 static void system_list_refresh(void)
 {
@@ -518,28 +558,53 @@ static void system_list_refresh(void)
    uint8_t row = 0u;
    uint8_t i   = 0u;
 
-   /* TEMP */
+   /* Row 0 — aggregate TEMP (STM32 onboard sensor) */
    (void)snprintf(buf, sizeof(buf), "TEMP   %s  %uC %u%%",
                   g_dev_online[eDEV_TEMP] ? "[ON]" : "[--]",
                   g_home.temp, g_home.hum);
    sys_row_set(row++, buf, g_dev_online[eDEV_TEMP]);
 
-   /* MOTOR */
+   /* Row 1 — MOTOR */
    (void)snprintf(buf, sizeof(buf), "MOTOR  %s  B:%d%%",
                   g_dev_online[eDEV_MOTOR] ? "[ON]" : "[--]",
                   g_home.motor_batt);
    sys_row_set(row++, buf, g_dev_online[eDEV_MOTOR]);
 
-   /* LIGHT */
+   /* Row 2 — LIGHT */
    (void)snprintf(buf, sizeof(buf), "LIGHT  %s",
                   g_dev_online[eDEV_LIGHT] ? "[ON]" : "[--]");
    sys_row_set(row++, buf, g_dev_online[eDEV_LIGHT]);
 
-   /* LOCK */
+   /* Row 3 — LOCK */
    (void)snprintf(buf, sizeof(buf), "LOCK   %s  B:%d%%",
                   g_dev_online[eDEV_LOCK] ? "[ON]" : "[--]",
                   g_home.lock_batt);
    sys_row_set(row++, buf, g_dev_online[eDEV_LOCK]);
+
+   /* Rows 4..4+MAX_TEMPS-1 — BLE temp slots */
+   for (i = 0u; i < (uint8_t)MAX_TEMPS; i++)
+   {
+      if (i < g_temp_count_slots)
+      {
+         int16_t dg        = g_home.temp_slot_decidegc[i];
+         int     deg_int   = (int)(dg / 10);
+         int     deg_frac  = (int)(dg % 10);
+         if (deg_frac < 0) { deg_frac = -deg_frac; }
+
+         (void)snprintf(buf, sizeof(buf), "TEMP%-2u %s  %d.%dC  B:%d%%",
+                        (unsigned int)(i + 1u),
+                        g_temp_online[i] ? "[ON]" : "[--]",
+                        deg_int, deg_frac,
+                        (int)g_home.temp_slot_batt[i]);
+         lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
+         sys_row_set(row, buf, g_temp_online[i]);
+      }
+      else
+      {
+         lv_obj_add_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
+      }
+      row++;
+   }
 
    /* PIR slots */
    for (i = 0u; i < (uint8_t)MAX_PIRS; i++)
@@ -678,6 +743,13 @@ void ui_update(void)
       if (i < g_pir_count_slots && 0u == g_pir_online[i]) { all_online = 0u; }
    }
 
+   for (i = 0u; i < (uint8_t)MAX_TEMPS; i++)
+   {
+      g_temp_online[i] = ((g_temp_last_seen[i] > 0ul) &&
+                          ((now - g_temp_last_seen[i]) < HB_TIMEOUT_MS)) ? 1u : 0u;
+      if (i < g_temp_count_slots && 0u == g_temp_online[i]) { all_online = 0u; }
+   }
+
    /* HOME */
    if (g_current_view == eVIEW_HOME)
    {
@@ -808,6 +880,28 @@ void ui_reflow(int n)
    ui_reflow_pir((int)g_pir_count_slots);
 }
 
+/**
+ * \brief  Update active BLE temp slot count and refresh the SYSTEM list.
+ *
+ * \param  n - Number of active temp slots (clamped to MAX_TEMPS).
+ *
+ * \details Previously a no-op stub. Now updates g_temp_count_slots and
+ *          calls system_list_refresh() so the SYS view immediately shows
+ *          or hides rows when the slot count changes.
+ */
+void ui_reflow_temp(int n)
+{
+   if (n < 0)              { n = 0; }
+   if (n > (int)MAX_TEMPS) { n = (int)MAX_TEMPS; }
+
+   g_temp_count_slots = (uint8_t)n;
+
+   if (g_current_view == eVIEW_SYSTEM)
+   {
+      system_list_refresh();
+   }
+}
+
 /* ---- Accessor functions ------------------------------------------------- */
 
 uint8_t ui_get_reed_count(void) { return g_reed_count; }
@@ -885,6 +979,29 @@ void ui_set_reed_batt(uint8_t slot, int8_t batt)
 void ui_set_reed_age(uint8_t slot, uint16_t age)
 {
    if (slot < (uint8_t)MAX_REEDS) { g_home.reed_age[slot] = age; }
+}
+
+void ui_set_temp_count_slots(uint8_t count) { g_temp_count_slots = count; }
+uint8_t ui_get_temp_count_slots(void)       { return g_temp_count_slots; }
+
+void ui_set_temp_slot_decidegc(uint8_t slot, int16_t val)
+{
+   if (slot < (uint8_t)MAX_TEMPS) { g_home.temp_slot_decidegc[slot] = val; }
+}
+
+void ui_set_temp_slot_batt(uint8_t slot, int8_t batt)
+{
+   if (slot < (uint8_t)MAX_TEMPS) { g_home.temp_slot_batt[slot] = batt; }
+}
+
+void ui_set_temp_slot_age(uint8_t slot, uint16_t age)
+{
+   if (slot < (uint8_t)MAX_TEMPS) { g_home.temp_slot_age[slot] = age; }
+}
+
+void ui_stamp_temp_online(uint8_t slot, uint32_t tick)
+{
+   if (slot < (uint8_t)MAX_TEMPS) { g_temp_last_seen[slot] = tick; }
 }
 
 uint8_t ui_get_dev_online(DEVICE_ID_E dev_id)

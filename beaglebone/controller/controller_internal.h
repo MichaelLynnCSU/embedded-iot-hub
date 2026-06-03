@@ -84,6 +84,8 @@
 #define MAX_ROOMS       10   /**< maximum room sensors in SensorData */
 #define MAX_REEDS       6    /**< must match ESP32 tcp_manager.c and ble_scan.c */
 #define MAX_PIRS        5    /**< must match ESP32 tcp_manager.c and sensor_types.h */
+#define MAX_TEMPS       4   /**< must match ESP32 and sensor_types.h */
+#define TEMP_NAME_LEN   32  /**< temp sensor BLE name buffer size */
 #define UART_LINE_LEN   64   /**< UART line buffer size bytes */
 
 /** \brief Ring buffer capacity — must be a power of two for mask wrapping */
@@ -221,6 +223,21 @@ struct __attribute__((packed)) PirSlotData
 };
 
 /**
+ * \brief Temperature sensor slot — packed wire format.
+ * \warning Must match sensor_types.h TempSlotData exactly.
+ */
+struct __attribute__((packed)) TempSlotData
+{
+   int16_t  temp_decidegc; /*!< temperature in tenths of °C      */
+   uint16_t age;           /*!< seconds since last adv           */
+   int8_t   batt;          /*!< battery SOC percent, -1=unknown  */
+   uint8_t  active;        /*!< 1=slot occupied                  */
+   uint8_t  offline;       /*!< age > TEMP_OFFLINE_S             */
+   uint8_t  _pad;          /*!< padding for alignment            */
+   char     name[TEMP_NAME_LEN]; /*!< BLE advertised name        */
+};
+
+/**
  * \brief Sensor data pipe wire format.
  * \warning Must match sensor_types.h SensorData exactly.
  */
@@ -254,6 +271,9 @@ struct SensorData
 
    struct PirSlotData  pir_slots[MAX_PIRS]; /*!< dynamic PIR slot array */
    uint8_t             pir_count;           /*!< number of active PIR slots */
+
+   struct TempSlotData temp_slots[MAX_TEMPS]; /*!< dynamic temp slot array */
+   uint8_t             temp_count;            /*!< number of active temp slots */
 };
 
 /**
@@ -274,11 +294,15 @@ struct LatestData
    int8_t   pir_occupied;
    int8_t   batt_lck;
    int      batt_motor;
+
    struct ReedSlotData reed_slots[MAX_REEDS];
    uint8_t             motor_online;
 
    struct PirSlotData  pir_slots[MAX_PIRS]; /*!< dynamic PIR slot array */
    uint8_t             pir_count;           /*!< number of active PIR slots */
+
+   struct TempSlotData temp_slots[MAX_TEMPS]; /*!< dynamic temp slot array */
+   uint8_t             temp_count;            /*!< number of active temp slots */
 };
 
 /**

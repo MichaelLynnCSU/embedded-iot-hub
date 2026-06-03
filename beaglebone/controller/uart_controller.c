@@ -508,6 +508,34 @@ static void snapshot_pir_slots(uint32_t *p_count,
    pthread_mutex_unlock(&data_mutex);
 }
 
+static void snapshot_temp_slots(int16_t  *p_count,
+                                 int8_t   *p_batt,
+                                 uint16_t *p_age,
+                                 uint8_t  *p_active,
+                                 int      *p_temp_count)
+{
+   int i = 0;
+
+   pthread_mutex_lock(&data_mutex);
+
+   *p_temp_count = 0;
+
+   for (i = 0; i < MAX_TEMPS; i++)
+   {
+      p_count[i]  = latest_data.temp_slots[i].temp_decidegc;
+      p_batt[i]   = latest_data.temp_slots[i].batt;
+      p_age[i]    = latest_data.temp_slots[i].age;
+      p_active[i] = latest_data.temp_slots[i].active;
+
+      if (latest_data.temp_slots[i].active)
+      {
+         *p_temp_count = latest_data.temp_count;
+      }
+   }
+
+   pthread_mutex_unlock(&data_mutex);
+}
+
 /******************************************************************************
  * \brief Build UART push payload and send to STM32.
  ******************************************************************************/
@@ -524,7 +552,13 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                             const int8_t   *p_pb,
                             const uint16_t *p_pa,
                             const uint8_t  *p_pactive,
-                            const int      *p_pocc)
+                            const int      *p_pocc,
+                            int             temp_count,
+                            const int16_t  *p_tc,
+                            const int8_t   *p_tb,
+                            const uint16_t *p_ta,
+                            const uint8_t  *p_tactive)
+
 {
    char msg[UART_MSG_BUF_SIZE] = {0};
    int  pos                    = 0;
@@ -601,6 +635,18 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                       "MTR:%d\n", motor_online);
    }
 
+   pos += snprintf(msg + pos, sizeof(msg) - pos,
+                   "TEMP_COUNT:%d\n", temp_count);
+
+   for (i = 0; i < temp_count; i++)
+   {
+      if (!p_tactive[i]) { continue; }
+
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "TEMP%d:%d,%d,%d\n",
+                      i + 1, p_tc[i], p_tb[i], p_ta[i]);
+   }
+
    uart_push_msg(msg, pos);
 }
 
@@ -649,6 +695,12 @@ void *uart_push_thread(void *p_arg)
    uint16_t p_age[MAX_PIRS];
    uint8_t  p_active[MAX_PIRS];
    int      p_occ[MAX_PIRS];
+
+   int16_t  t_decidegc[MAX_TEMPS];
+   int8_t   t_batt[MAX_TEMPS];
+   uint16_t t_age[MAX_TEMPS];
+   uint8_t  t_active[MAX_TEMPS];
+   int      temp_count = 0;
 
    (void)p_arg;
 
@@ -717,6 +769,9 @@ void *uart_push_thread(void *p_arg)
       pir_count = 0;
       snapshot_pir_slots(p_count, p_batt, p_age, p_active, p_occ, &pir_count);
 
+      temp_count = 0;
+      snapshot_temp_slots(t_decidegc, t_batt, t_age, t_active, &temp_count);
+
       LOG("[PUSH] ages pir=%u lgt=%u lck=%u | batt pir=%d%% lck=%d%% mtr=%d%% "
           "| reeds=%d pirs=%d motor=%d",
           age_pir, age_lgt, age_lck, batt_pir, batt_lck, batt_motor,
@@ -727,7 +782,8 @@ void *uart_push_thread(void *p_arg)
                      batt_pir, batt_lck, batt_motor,
                      reed_count, motor_online,
                      r_state, r_batt, r_age,
-                     pir_count, p_count, p_batt, p_age, p_active, p_occ);
+                     pir_count, p_count, p_batt, p_age, p_active, p_occ,
+                     temp_count, t_decidegc, t_batt, t_age, t_active);
    }
 
    LOG("[PUSH] Push thread exiting");

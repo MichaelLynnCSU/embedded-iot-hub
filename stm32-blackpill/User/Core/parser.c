@@ -57,7 +57,7 @@
 #define DR_DIGIT_OFFSET        2u  /**< Character offset of digit in "DR1"     */
 #define PIR_DIGIT_OFFSET       3u  /**< Character offset of digit in "PIR1"    */
 #define OCC_DIGIT_OFFSET       3u  /**< Character offset of digit in "OCC1"    */
-
+#define TEMP_DIGIT_OFFSET      4u  /**< Character offset of digit in "TEMP1" */
 /************************** STATIC (PRIVATE) FUNCTIONS ************************/
 
 /**
@@ -153,6 +153,28 @@ static void parse_pir_count(const char *p_rest)
       ui_set_pir_count_slots((uint8_t)n);
       ui_reflow_pir(n);
       (void)snprintf(log_buf, sizeof(log_buf), "[UI] Reflow pir_count=%d\r\n", n);
+      log_enqueue(log_buf);
+   }
+}
+
+static void parse_temp_count(const char *p_rest)
+{
+   int     n           = 0;
+   char    log_buf[48] = {0};
+
+   if (0 != parse_int(p_rest, &n))
+   {
+      return;
+   }
+
+   if (n > (int)MAX_TEMPS) { n = (int)MAX_TEMPS; }
+   if (n < 0)              { n = 0; }
+
+   if ((uint8_t)n != ui_get_temp_count_slots())
+   {
+      ui_set_temp_count_slots((uint8_t)n);
+      ui_reflow_temp(n);
+      (void)snprintf(log_buf, sizeof(log_buf), "[UI] Reflow temp_count=%d\r\n", n);
       log_enqueue(log_buf);
    }
 }
@@ -267,6 +289,55 @@ static void parse_pir_slot(int slot, const char *p_rest)
          "[PIR] slot=%d count=%d batt=%d age=%d\r\n",
          slot, count, batt, age);
 
+   log_enqueue(dbg);
+}
+
+static void parse_temp_slot(int slot, const char *p_rest)
+{
+   char     tmp[UART_LINE_LEN] = {0};
+   char    *p_tok              = NULL;
+   int      temp_decidegc      = 0;
+   int      batt               = -1;
+   int      age                = 0xFFFF;
+   uint32_t now                = 0u;
+
+   if ((slot < 0) || (slot >= (int)MAX_TEMPS))
+   {
+      return;
+   }
+
+   if (NULL == p_rest)
+   {
+      return;
+   }
+
+   (void)strncpy(tmp, p_rest, sizeof(tmp) - 1u);
+   tmp[sizeof(tmp) - 1u] = '\0';
+
+   p_tok = strtok(tmp, ",");
+   if (NULL != p_tok) { (void)parse_int(p_tok, &temp_decidegc); }
+
+   p_tok = strtok(NULL, ",");
+   if (NULL != p_tok) { (void)parse_int(p_tok, &batt); }
+
+   p_tok = strtok(NULL, ",");
+   if (NULL != p_tok) { (void)parse_int(p_tok, &age); }
+
+   now = HAL_GetTick();
+
+   ui_set_temp_slot_decidegc((uint8_t)slot, (int16_t)temp_decidegc);
+   ui_set_temp_slot_batt((uint8_t)slot,     (int8_t)batt);
+   ui_set_temp_slot_age((uint8_t)slot,      (uint16_t)age);
+
+   if (age < (int)BLE_AGE_THRESHOLD_S)
+   {
+      ui_stamp_temp_online((uint8_t)slot, now);
+   }
+
+   char dbg[96];
+   snprintf(dbg, sizeof(dbg),
+            "[TEMP] slot=%d decidegc=%d batt=%d age=%d\r\n",
+            slot, temp_decidegc, batt, age);
    log_enqueue(dbg);
 }
 
@@ -489,6 +560,23 @@ void parser_process_line(const char *p_line)
       slot = (int)(p_id[OCC_DIGIT_OFFSET] - '1');
       (void)parse_int(p_rest, &val);
       ui_set_pir_slot_occupied((uint8_t)slot, (uint8_t)val);
+      return;
+   }
+
+   /* TEMP_COUNT:n */
+   if (0 == strcmp(p_id, "TEMP_COUNT"))
+   {
+      parse_temp_count(p_rest);
+      return;
+   }
+
+   /* TEMP<1-4>:decidegc,batt,age */
+   if (('T' == p_id[0]) && ('E' == p_id[1]) && ('M' == p_id[2]) && ('P' == p_id[3]) &&
+       (p_id[TEMP_DIGIT_OFFSET] >= '1') && (p_id[TEMP_DIGIT_OFFSET] <= '4') &&
+       ('\0' == p_id[TEMP_DIGIT_OFFSET + 1u]))
+   {
+      slot = (int)(p_id[TEMP_DIGIT_OFFSET] - '1');
+      parse_temp_slot(slot, p_rest);
       return;
    }
 
