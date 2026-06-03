@@ -1,0 +1,17 @@
+[Unit]
+Description=Person Detection Inference Service
+After=network.target data-controller.service
+Requires=data-controller.service
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/opt/inference/app
+ExecStart=/opt/inference/app/inference-wrapper.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

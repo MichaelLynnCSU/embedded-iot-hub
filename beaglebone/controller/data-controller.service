@@ -1,0 +1,16 @@
+[Unit]
+Description=Data Controller Service
+After=network.target
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/home/debian/controller
+ExecStart=/home/debian/controller/data-controller-wrapper.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

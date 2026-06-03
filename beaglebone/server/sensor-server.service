@@ -1,0 +1,17 @@
+[Unit]
+Description=Sensor HTTP Server
+After=network.target data-controller.service esp01-tcp-server.service
+Requires=data-controller.service esp01-tcp-server.service
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/home/debian/server
+ExecStart=/home/debian/server/sensor-server-wrapper.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

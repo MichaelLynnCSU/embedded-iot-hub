@@ -51,6 +51,7 @@
 #include <errno.h>
 #include <string.h>
 #include "ble_manager.h"
+#include "ble_internal.h"
 #include "ble_pir.h"
 #include "ble_reed.h"
 #include "ble_temp.h"
@@ -249,8 +250,8 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
 
    /* ---- snapshot BLE state after mailboxes drained ---- */
    g_state.age_pir = ble_get_device_age_s(BLE_DEV_PIR);
-   g_state.age_lgt = ble_get_device_age_s(BLE_DEV_LIGHT);
-   g_state.age_lck = ble_get_device_age_s(BLE_DEV_LOCK);
+   g_state.age_lgt = ble_get_device_age_s(DEV_IDX_LIGHT);
+   g_state.age_lck = ble_get_device_age_s(DEV_IDX_LOCK);
 
    int      count      = ble_get_reed_count();
    uint16_t age        = 0xFFFF;
