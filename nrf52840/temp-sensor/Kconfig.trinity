@@ -1,0 +1,31 @@
+# ==============================================================================
+# Kconfig.trinity
+# Source from each Zephyr board's root Kconfig: source "Kconfig.trinity"
+# IDF and STM32 boards do not use this file -- use CMakeLists.txt instead.
+# ==============================================================================
+
+config TRINITY_CHIP_NRF52840
+    bool "Trinity: nRF52840 (Zephyr)"
+    help
+      Selects nRF52840-specific Trinity behaviour in trinity_log_zephyr_nrf.c:
+        - Cortex-M4 fault frame (CFSR/HFSR/MMFAR/BFAR/PC/LR/CYC)
+        - Boot reason from NRF_POWER->RESETREAS (read + cleared by main)
+        - Flash mutex active (NVMC is single-writer, no concurrent access)
+        - Pre-init canary in .noinit via SYS_INIT(PRE_KERNEL_1)
+        - Heap-allocated stat buffer (avoids .noinit BSS overlap)
+        - Bench mode: feeds bootloader WDT channel 0 (cannot be disabled)
+      Boards: reed-sensor, smart-lock, smart-light
+      Set in prj.conf: CONFIG_TRINITY_CHIP_NRF52840=y
+
+config TRINITY_CHIP_ESP32C3
+    bool "Trinity: ESP32-C3 (Zephyr)"
+    help
+      Selects ESP32-C3-specific Trinity behaviour in trinity_log_zephyr_esp.c:
+        - RISC-V fault frame (mepc/ra instead of pc/lr)
+        - No flash mutex (ESP32-C3 flash driver serializes internally)
+        - Pre-init canary in .noinit via SYS_INIT(PRE_KERNEL_1)
+        - Heap-allocated stat buffer (same .noinit overlap protection)
+        - Bench mode: WDT skipped entirely (OpenOCD is safety net)
+      Boards: pir
+      Set in prj.conf: CONFIG_TRINITY_CHIP_ESP32C3=y
+

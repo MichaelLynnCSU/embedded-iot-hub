@@ -1,0 +1,19 @@
+# Application Kconfig — must source Zephyr main Kconfig first
+source "Kconfig.zephyr"
+source "$(APPLICATION_SOURCE_DIR)/Kconfig.trinity"
+
+choice TRINITY_MODE
+    prompt "Output transport"
+    default TRINITY_MODE_FIELD
+config TRINITY_MODE_FIELD
+    bool "Field — UART console + reset"
+config TRINITY_MODE_BENCH
+    bool "Bench — RTT + SWD halt (J-Link)"
+config TRINITY_MODE_USB
+    bool "USB — CDC ACM (/dev/ttyACM0)"
+endchoice
+config TRINITY_MODE_STR
+    string
+    default "BENCH" if TRINITY_MODE_BENCH
+    default "USB"   if TRINITY_MODE_USB
+    default "FIELD"

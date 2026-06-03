@@ -256,8 +256,8 @@ void ble_manager_task(EventGroupHandle_t p_system_eg,
       }
 
       ESP_LOGI(TAG, "[BLE] LIGHT=%s LOCK=%s REEDS=%d",
-         (ble_get_device_age_s(BLE_DEV_LIGHT) < 30) ? "online" : "offline",
-         (ble_get_device_age_s(BLE_DEV_LOCK)  < 30) ? "online" : "offline",
+         (ble_get_device_age_s(DEV_IDX_LIGHT) < 30) ? "online" : "offline",
+         (ble_get_device_age_s(DEV_IDX_LOCK)  < 30) ? "online" : "offline",
           ble_get_reed_count());
 
       /* Log each seen temp slot */
