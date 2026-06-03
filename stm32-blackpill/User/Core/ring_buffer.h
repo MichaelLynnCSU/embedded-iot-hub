@@ -29,7 +29,7 @@
 
 /******************************** CONSTANTS ***********************************/
 
-#define UART_QUEUE_DEPTH  8u    /**< Maximum number of pending UART lines     */
+#define UART_QUEUE_DEPTH  32u    /**< Maximum number of pending UART lines     */
 #define UART_LINE_LEN     128u  /**< Maximum characters per line (incl NUL)   */
 
 /*===========================================================================*

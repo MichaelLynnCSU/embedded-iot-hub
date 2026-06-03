@@ -76,7 +76,7 @@
 #define UART_PUSH_INTERVAL_SEC  5       /**< max wait in sem_timedwait — watchdog ceiling */
 #define UART_RETRY_DELAY_SEC    5       /**< delay before retrying UART open */
 #define UART_PUSH_DELAY_US      100000  /**< delay after write in microseconds */
-#define UART_MSG_BUF_SIZE       512     /**< push message buffer size bytes */
+#define UART_MSG_BUF_SIZE       1024     /**< push message buffer size bytes */
 #define UART_STATE_UNKNOWN      0xFF    /**< sentinel for unknown reed state */
 #define UART_BAUD               B115200 /**< UART baud rate */
 

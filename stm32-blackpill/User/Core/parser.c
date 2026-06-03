@@ -380,6 +380,9 @@ static void parse_single_value(const char *p_id, int val, int batt)
    }
    else if (0 == strcmp(p_id, "MTR"))
    {
+      char dbg[48];
+      snprintf(dbg, sizeof(dbg), "[MTR] val=%d batt=%d\r\n", val, batt);
+      log_enqueue(dbg);
       if (1 == val)
       {
          ui_set_motor(1u);
