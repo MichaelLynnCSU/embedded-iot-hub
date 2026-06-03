@@ -6,23 +6,30 @@
  * \brief BLE subsystem internal interface for ESP32 hub node.
  *
  * \details Private header shared between ble_gattc.c, ble_scan.c,
- *          ble_lock.c, and ble_light.c. Not for use outside the BLE
- *          subsystem.
+ *          ble_lock.c, ble_light.c, ble_reed.c, and ble_pir.c.
+ *          Not for use outside the BLE subsystem.
  *
  *          Module ownership:
  *          - ble_gattc_if, g_gatt_registered : ble_gattc.c
  *          - connect_queue, g_connection_in_progress : ble_manager.c
  *          - lock_mac, light_mac, found flags  : ble_scan.c
+ *          - reed slot table, cooldown table   : ble_reed.c
+ *          - PIR slot table                    : ble_pir.c
  *
  *          Startup sequence (called by ble_manager.c):
- *          1. ble_gattc_init()  — registers GATT callback and app
- *          2. ble_scan_start()  — sets scan params, starts scanning
+ *          1. ble_scan_preinit() — calls ble_reed_preinit(),
+ *                                  ble_pir_preinit(), ble_temp_preinit()
+ *          2. ble_gattc_init()   — registers GATT callback and app
+ *          3. ble_scan_start()   — sets scan params, starts scanning
  *
  * \note    PIR slot table (2026-05-20):
  *          DEV_IDX_PIR2 added for second PIR age tracking.
  *          All subsequent indices incremented by one.
+ *
+ * \note    Module split (2026-06-02):
+ *          PIR and reed slot tables extracted to ble_pir.c and ble_reed.c.
  *          ble_scan_get_pir_slot_info() and ble_scan_get_pir_count()
- *          added as internal scan-module accessors.
+ *          moved to ble_pir.h. Callers include ble_pir.h directly.
  ******************************************************************************/
 
 #ifndef INCLUDE_BLE_INTERNAL_H_
@@ -117,7 +124,7 @@ extern bool                light_found;
 /** Light device address type — owned by ble_scan.c */
 extern esp_ble_addr_type_t light_addr_type;
 
-/*************************** FUNCTION PROTOTYPES ******************************/
+/****************************** FUNCTION PROTOTYPES ***************************/
 
 /** \brief Notify connection scheduler that current connection attempt is done.
  *  \return void */
@@ -186,7 +193,7 @@ void ble_light_handle_event(esp_gattc_cb_event_t event,
  *  \return void */
 void ble_gattc_init(void);
 
-/** \brief Pre-initialize the BLE scan module.
+/** \brief Pre-initialize the BLE scan module and all sub-modules.
  *  \return void */
 void ble_scan_preinit(void);
 
@@ -194,18 +201,7 @@ void ble_scan_preinit(void);
  *  \return void */
 void ble_scan_start(void);
 
-/** \brief Get slot metrics for an active PIR sensor.
- *  \param slot        - Slot index (0-based).
- *  \param p_count_out - Output for cumulative motion count, or NULL.
- *  \param p_batt_out  - Output for battery SOC percent, or NULL.
- *  \return bool - true if slot is active or offline, false if empty or OOB. */
-bool ble_scan_get_pir_slot_info(int       slot,
-                                uint32_t *p_count_out,
-                                int      *p_batt_out,
-                                uint16_t *p_age_out);
-
-/** \brief Get count of seen PIR slots — internal scan module accessor.
- *  \return int - Number of PIR slots seen at least once. */
-int ble_scan_get_pir_count(void);
+/** \brief Update room sensor state by sensor ID. */
+void ble_update_room_sensor(int sensor_id, const char *p_state);
 
 #endif /* INCLUDE_BLE_INTERNAL_H_ */

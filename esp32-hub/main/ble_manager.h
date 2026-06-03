@@ -5,9 +5,11 @@
  *
  * \brief BLE manager public interface for ESP32 hub node.
  *
- * \details Exposes BLE stack lifecycle, device state accessors, command
- *          API, and dynamic reed and PIR sensor discovery. See ble_manager.c,
- *          ble_scan.c, ble_lock.c, and ble_light.c for implementations.
+ * \details Exposes BLE stack lifecycle, device state accessors, and command
+ *          API. Reed and PIR slot APIs are exposed directly via ble_reed.h
+ *          and ble_pir.h — callers include those headers directly.
+ *          See ble_manager.c, ble_scan.c, ble_lock.c, and ble_light.c
+ *          for implementations.
  *
  * \note    PIR slot table (2026-05-20):
  *          ble_get_motion_count(), ble_get_pir_batt(), and the single-device
@@ -15,6 +17,11 @@
  *          ble_get_pir_count() mirroring the reed slot API. BLE_DEV_PIR2 and
  *          updated BLE_DEV_REED1/2/LIGHT/LOCK indices added to match the
  *          expanded BLE_DEV_IDX_E enum in ble_internal.h.
+ *
+ * \note    Wrapper removal (2026-06-02):
+ *          ble_get_pir_slot_info(), ble_get_pir_count(), ble_get_reed_count(),
+ *          ble_get_reed_slot_info(), and ble_expire_reed_slots() removed.
+ *          Callers include ble_pir.h and ble_reed.h directly.
  ******************************************************************************/
 
 #ifndef INCLUDE_BLE_MANAGER_H_
@@ -67,22 +74,9 @@ uint8_t ble_get_lock_state(void);
 int ble_get_lock_batt(void);
 
 /** \brief Get PIR occupancy from shared sliding window.
- *  \return int - 1 if occupied, 0 if empty. */
+ *  \param slot - Zero-based PIR slot index (0..MAX_PIRS-1).
+ *  \return int - 1 if occupied, 0 if empty or out of range. */
 int ble_get_pir_occupied(int slot);
-
-/** \brief Get PIR slot info — mirrors ble_get_reed_slot_info().
- *  \param slot    - 0-based slot index (0=PIR_Motion, 1=PIR_Motion2).
- *  \param p_count - Output motion count, or NULL.
- *  \param p_batt  - Output battery SOC percent, or NULL.
- *  \return bool - true if slot has been seen, false if never seen or OOB. */
- bool ble_get_pir_slot_info(int        slot,
-                            uint32_t *p_count,
-                            int      *p_batt,
-                            uint16_t  *p_age);
-
-/** \brief Get count of seen PIR slots.
- *  \return int - Number of PIR slots seen at least once. */
-int ble_get_pir_count(void);
 
 /** \brief Send relay state command to light node.
  *  \param state - Relay state (0=off, 1=on).
@@ -99,36 +93,5 @@ void ble_send_lock_command(uint8_t state);
  *  \param p_state   - Null-terminated state string to set.
  *  \return void */
 void ble_update_room_sensor(int sensor_id, const char *p_state);
-
-/** \brief Pre-initialize the BLE scan module.
- *  \return void */
-void ble_scan_preinit(void);
-
-/** \brief Start BLE scanning.
- *  \return void */
-void ble_scan_start(void);
-
-/** \brief Get count of active reed sensor slots.
- *  \return int - Number of active reed sensors. */
-int ble_get_reed_count(void);
-
-/** \brief Get info for a reed sensor slot.
- *  \param slot        - Slot index (0-based).
- *  \param p_name_out  - Output buffer for device name (31 chars max), or NULL.
- *  \param p_batt_out  - Output for battery SOC, or NULL.
- *  \param p_age_out   - Output for age in seconds, or NULL.
- *  \param p_state_out - Output for door state, or NULL.
- *  \param p_gen_out   - Output for generation counter, or NULL.
- *  \return bool - true if slot is active, false if empty or out of range. */
-bool ble_get_reed_slot_info(int      slot,
-                             char     *p_name_out,
-                             int      *p_batt_out,
-                             uint16_t *p_age_out,
-                             uint8_t  *p_state_out,
-                             uint16_t *p_gen_out);
-
-/** \brief Expire stale reed sensor slots.
- *  \return void */
-void ble_expire_reed_slots(void);
 
 #endif /* INCLUDE_BLE_MANAGER_H_ */

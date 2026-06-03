@@ -32,6 +32,11 @@
  *          bits it cares about. Return type changed from
  *          EventGroupHandle_t to BUS_SUBSCRIBER_T.
  *          Callers in main.c updated accordingly.
+ *
+ * \note    BLE temp sensor (2026-06-02):
+ *          EVT_BLE_TEMP event bit added. BLE_TEMP_PAYLOAD_T added.
+ *          mb_ble_temp mailbox added to BUS_SUBSCRIBER_T.
+ *          bus_publish_ble_temp() added. EVT_ALL_MASK widened to 0x3FF.
  ******************************************************************************/
 
 #ifndef INCLUDE_VROOM_BUS_H_
@@ -55,7 +60,8 @@
 #define EVT_TCP_CONNECTED    (1 << 6) /**< TCP connection established */
 #define EVT_TCP_DISCONNECTED (1 << 7) /**< TCP connection lost        */
 #define EVT_AWS_CONNECTED    (1 << 8) /**< AWS connection established */
-#define EVT_ALL_MASK         (0x1FF)  /**< mask of all event bits     */
+#define EVT_BLE_TEMP         (1 << 9) /**< BLE temperature sensor event */
+#define EVT_ALL_MASK         (0x3FF)  /**< mask of all event bits     */
 
 /** \brief Maximum number of bus subscribers */
 #define BUS_MAX_SUBSCRIBERS  4  /**< increase if more consumers are added */
@@ -65,8 +71,8 @@
 /** \brief PIR motion sensor bus payload. */
 typedef struct
 {
-   uint8_t  id;     /*!< 1-based PIR slot index  */   // ← add this
-   uint8_t  slot;   /*!< 0-based PIR slot index  */   // ← can remove if redundant
+   uint8_t  id;     /*!< 1-based PIR slot index  */
+   uint8_t  slot;   /*!< 0-based PIR slot index  */
    uint32_t count;  /*!< motion event count      */
    int      batt;   /*!< battery SOC percent     */
 } PIR_PAYLOAD_T;
@@ -99,6 +105,14 @@ typedef struct
    int avg_temp; /*!< average temperature in Celsius */
 } TEMP_PAYLOAD_T;
 
+/** \brief BLE temperature sensor bus payload. */
+typedef struct
+{
+   uint8_t  id;            /*!< 1-based temp slot index           */
+   int16_t  temp_decidegc; /*!< temperature in tenths of °C       */
+   int      batt;          /*!< battery SOC percent               */
+} BLE_TEMP_PAYLOAD_T;
+
 /** \brief Motor controller status bus payload. */
 typedef struct
 {
@@ -116,14 +130,15 @@ typedef struct
  */
 typedef struct
 {
-   EventGroupHandle_t events;   /*!< wakeup signal — doorbell only        */
-   EventBits_t        mask;     /*!< bits this subscriber cares about     */
-   QueueHandle_t      mb_pir;   /*!< private PIR mailbox   (depth 1)      */
-   QueueHandle_t      mb_reed;  /*!< private reed mailbox  (depth 1)      */
-   QueueHandle_t      mb_lock;  /*!< private lock mailbox  (depth 1)      */
-   QueueHandle_t      mb_light; /*!< private light mailbox (depth 1)      */
-   QueueHandle_t      mb_temp;  /*!< private temp mailbox  (depth 1)      */
-   QueueHandle_t      mb_motor; /*!< private motor mailbox (depth 1)      */
+   EventGroupHandle_t events;      /*!< wakeup signal — doorbell only        */
+   EventBits_t        mask;        /*!< bits this subscriber cares about     */
+   QueueHandle_t      mb_pir;      /*!< private PIR mailbox      (depth 1)   */
+   QueueHandle_t      mb_reed;     /*!< private reed mailbox     (depth 1)   */
+   QueueHandle_t      mb_lock;     /*!< private lock mailbox     (depth 1)   */
+   QueueHandle_t      mb_light;    /*!< private light mailbox    (depth 1)   */
+   QueueHandle_t      mb_temp;     /*!< private UART temp mailbox (depth 1)  */
+   QueueHandle_t      mb_motor;    /*!< private motor mailbox    (depth 1)   */
+   QueueHandle_t      mb_ble_temp; /*!< private BLE temp mailbox (depth 1)  */
 } BUS_SUBSCRIBER_T;
 
 /*************************** FUNCTION PROTOTYPES *****************************/
@@ -140,7 +155,7 @@ void bus_init(void);
 BUS_SUBSCRIBER_T bus_register_subscriber(EventBits_t mask);
 
 /** \brief Publish a PIR motion event.
- *  \param slot  -
+ *  \param slot  - 1-based PIR slot index.
  *  \param count - Motion event count.
  *  \param batt  - Battery SOC percent.
  *  \return void */
@@ -178,5 +193,12 @@ void bus_publish_temp(int avg_temp);
  *  \param batt   - Supply voltage in mV, -1 if unknown or offline.
  *  \return void */
 void bus_publish_motor(uint8_t online, int batt);
+
+/** \brief Publish a BLE temperature sensor event.
+ *  \param slot         - 1-based temp slot index.
+ *  \param temp_decidegc - Temperature in tenths of °C (int16_t).
+ *  \param batt         - Battery SOC percent.
+ *  \return void */
+void bus_publish_ble_temp(uint8_t slot, int16_t temp_decidegc, int batt);
 
 #endif /* INCLUDE_VROOM_BUS_H_ */

@@ -309,3 +309,31 @@ void bus_publish_motor(uint8_t online, int batt)
    }
    bus_signal(EVT_MOTOR_STATUS);
 }
+
+/******************************************************************************
+ * \brief Publish a BLE temperature sensor event to the bus.
+ *
+ * \param slot        - 1-based temp slot index.
+ * \param temp_decidegc - Temperature in tenths of degrees C.
+ * \param batt        - Battery SOC percent.
+ *
+ * \return void
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+void bus_publish_ble_temp(uint8_t slot, int16_t temp_decidegc, int batt)
+{
+   BLE_TEMP_PAYLOAD_T p = { .id = slot,
+                             .temp_decidegc = temp_decidegc,
+                             .batt = batt }; /**< BLE temp payload */
+   int i = 0;                                /**< loop index       */
+
+   for (i = 0; i < g_sub_count; i++)
+   {
+      if (0 != (g_subscribers[i].mask & EVT_BLE_TEMP))
+      {
+         (void)xQueueOverwrite(g_subscribers[i].mb_ble_temp, &p);
+      }
+   }
+   bus_signal(EVT_BLE_TEMP);
+}

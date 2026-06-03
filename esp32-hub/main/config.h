@@ -21,6 +21,12 @@
  *          added to support dynamic multi-PIR slot table in ble_scan.c.
  *          Mirrors the reed sensor pattern.
  *
+ * \note    PIR/temp slot timing (2026-06-02):
+ *          PIR_OFFLINE_MS, PIR_REMOVE_MS added — mirror reed thresholds.
+ *          MAX_TEMPS, TEMP_NAME_PREFIX, TEMP_NAME_PREFIX_LEN,
+ *          TEMP_OFFLINE_MS, TEMP_REMOVE_MS added for ble_temp.c slot
+ *          expiry and tcp_manager.c offline flag.
+ *
  * \warning AWS_LAMBDA_URL and network IPs are defined in network_config.h
  *          which is gitignored. Copy network_config.h.template to
  *          network_config.h and fill in values before building.
@@ -111,16 +117,27 @@
 #define PIR_HOLD_SEC          600u  /**< hold occupied seconds after last trigger */
 
 /** \brief PIR sensor slot table */
-#define MAX_PIRS             5u           /**< max concurrent PIR sensors          */
-#define PIR_NAME_PREFIX      "PIR_Motion" /**< PIR device name prefix              */
-#define PIR_NAME_PREFIX_LEN  10u          /**< length of PIR_NAME_PREFIX           */
-#define PIR_OFFLINE_S        300          /**< pir offline threshold seconds  */
+#define MAX_PIRS             5u            /**< max concurrent PIR sensors          */
+#define PIR_NAME_PREFIX      "PIR_Motion"  /**< PIR device name prefix              */
+#define PIR_NAME_PREFIX_LEN  10u           /**< length of PIR_NAME_PREFIX           */
+#define PIR_OFFLINE_S        300           /**< PIR offline threshold seconds       */
+
+/** \brief PIR slot state machine timing */
+#define PIR_OFFLINE_MS       150000u       /**< ACTIVE->OFFLINE threshold ms        */
+#define PIR_REMOVE_MS        3600000u      /**< OFFLINE->EMPTY threshold ms         */
 
 /** \brief Reed sensor slot table configuration */
 #define MAX_REEDS               6u            /**< max concurrent Reed sensors          */
 #define REED_NAME_PREFIX        "ReedSensor"  /**< Reed device name prefix              */
-#define REED_NAME_PREFIX_LEN    10u           /**< length of REED_NAME_PREFIX          */
-#define REED_OFFLINE_S          150           /**< reed offline threshold seconds */
+#define REED_NAME_PREFIX_LEN    10u           /**< length of REED_NAME_PREFIX           */
+#define REED_OFFLINE_S          150           /**< reed offline threshold seconds       */
+
+/** \brief Temperature sensor slot table */
+#define MAX_TEMPS               4u              /**< max concurrent temp sensors          */
+#define TEMP_NAME_PREFIX        "TempSensor"    /**< temp device name prefix              */
+#define TEMP_NAME_PREFIX_LEN    10u             /**< length of TEMP_NAME_PREFIX           */
+#define TEMP_OFFLINE_MS         150000u         /**< ACTIVE->OFFLINE threshold ms         */
+#define TEMP_REMOVE_MS          3600000u        /**< OFFLINE->EMPTY threshold ms          */
 
 /** \brief Global BLE Allocation and Table Sizing */
 #define ADV_NAME_BUF_SIZE       32            /**< Buffer size for parsing BLE names    */

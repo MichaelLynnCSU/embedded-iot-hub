@@ -13,7 +13,7 @@
  *          1. ble_stack_init()   — BT controller + Bluedroid
  *          2. connect_queue      — connection scheduler queue
  *          3. scheduler_task     — connection serialiser task
- *          4. ble_scan_preinit() — scan module pre-init
+ *          4. ble_scan_preinit() — preinits reed, PIR, and temp modules
  *          5. ble_gattc_init()   — GATT client registration
  *          6. ble_scan_start()   — begin scanning
  *
@@ -36,9 +36,6 @@
  *
  * \note    PIR slot table (2026-05-20):
  *          ble_get_motion_count() and ble_get_pir_batt() removed.
- *          ble_get_pir_slot_info() and ble_get_pir_count() added,
- *          forwarding to ble_scan_get_pir_slot_info() and
- *          ble_scan_get_pir_count() in ble_scan.c.
  *          Idle loop log line updated to loop over PIR slots.
  *
  * \note    Per-slot occupancy (2026-05-20):
@@ -46,6 +43,12 @@
  *          to pir_window_get_occupied(slot). tcp_manager.c reads
  *          per-slot occupied into PIR_SLOT_STATE_T.occupied inside
  *          drain_queues() after the PIR BLE sync loop.
+ *
+ * \note    Wrapper removal (2026-06-02):
+ *          ble_get_pir_slot_info() and ble_get_pir_count() wrappers
+ *          removed. Idle loop calls ble_pir_get_count() and
+ *          ble_pir_get_slot_info() directly via ble_pir.h.
+ *          Reed slot API consumed via ble_reed.h directly.
  ******************************************************************************/
 
 #include "config.h"
@@ -57,6 +60,8 @@
 #include "freertos/queue.h"
 #include "ble_manager.h"
 #include "ble_internal.h"
+#include "ble_pir.h"
+#include "ble_reed.h"
 #include "trinity_log.h"
 #include "pir_window.h"
 #include <string.h>
@@ -235,10 +240,10 @@ void ble_manager_task(EventGroupHandle_t p_system_eg,
       trinity_wdt_kick();
 
       /* Log each seen PIR slot — threshold 60s (2x 30s heartbeat) */
-      pir_count = ble_get_pir_count();
+      pir_count = ble_pir_get_count();
       for (i = 0; i < pir_count; i++)
       {
-         if (ble_get_pir_slot_info(i, NULL, NULL, NULL))
+         if (ble_pir_get_slot_info(i, NULL, NULL, NULL))
          {
             pir_age = ble_get_device_age_s((int)(DEV_IDX_PIR + i));
             ESP_LOGI(TAG, "[BLE] PIR slot=%d %s occ=%d",
@@ -258,21 +263,7 @@ void ble_manager_task(EventGroupHandle_t p_system_eg,
 }
 
 /*---------------------------------------------------------------------------*/
-/* PIR slot API — forwards to ble_scan.c internal accessors                  */
-/*---------------------------------------------------------------------------*/
-
-bool ble_get_pir_slot_info(int slot, uint32_t *p_count, int *p_batt, uint16_t *p_age)
-{
-   return ble_scan_get_pir_slot_info(slot, p_count, p_batt, p_age);
-}
-
-int ble_get_pir_count(void)
-{
-   return ble_scan_get_pir_count();
-}
-
-/*---------------------------------------------------------------------------*/
-/* Remaining public accessors                                                 */
+/* Public accessors                                                           */
 /*---------------------------------------------------------------------------*/
 
 uint8_t ble_get_light_state(void)

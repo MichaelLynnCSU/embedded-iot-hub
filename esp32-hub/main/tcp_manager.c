@@ -31,6 +31,10 @@
  *          backward compat (slot 0).
  * \note    ESP32-CAM UDP trigger (2026-05-31): moved to cam_trigger.c;
  *          0->1 transition detection remains here in drain_queues().
+ * \note    TempSensor BLE (2026-06-02): BLE temp sensor slot table wired in.
+ *          Mirrors reed/PIR pattern. JSON "temp" field is whole degrees C
+ *          matching "avg_temp" from UART/blue pill — divide by 10 at
+ *          serialization point only, int16_t kept throughout.
  ******************************************************************************/
 
 #include "config.h"
@@ -47,6 +51,9 @@
 #include <errno.h>
 #include <string.h>
 #include "ble_manager.h"
+#include "ble_pir.h"
+#include "ble_reed.h"
+#include "ble_temp.h"
 #include "uart_manager.h"
 #include "tcp_manager.h"
 #include "aws_manager.h"
@@ -97,6 +104,16 @@ typedef struct
 
 typedef struct
 {
+   int16_t  temp_decidegc;
+   int      batt;
+   uint16_t age;
+   bool     active;
+   uint8_t  offline;
+   uint16_t gen;
+} TEMP_SLOT_STATE_T;
+
+typedef struct
+{
    int               avg_temp;
    uint32_t          motion_count;
    int               pir_batt;
@@ -108,11 +125,13 @@ typedef struct
    int               motor_batt;
    REED_SLOT_STATE_T reed_slots[MAX_REEDS];
    PIR_SLOT_STATE_T  pir_slots[MAX_PIRS];
+   TEMP_SLOT_STATE_T temp_slots[MAX_TEMPS];
    uint16_t          age_pir;
    uint16_t          age_lgt;
    uint16_t          age_lck;
    int               reed_count;
    int               pir_count;
+   int               temp_count;
 } TCP_STATE_T;
 
 static TCP_STATE_T g_state =
@@ -128,21 +147,23 @@ static TCP_STATE_T g_state =
     .age_lck      = 0xFFFF,
     .reed_count   = 0,
     .pir_count    = 0,
+    .temp_count   = 0,
 };
 
 /*----------------------------------------------------------------------------*/
 
 static void drain_queues(BUS_SUBSCRIBER_T sub)
 {
-   PIR_PAYLOAD_T   p_pir;
-   REED_PAYLOAD_T  p_reed;
-   LOCK_PAYLOAD_T  p_lock;
-   LIGHT_PAYLOAD_T p_light;
-   TEMP_PAYLOAD_T  p_temp;
-   MOTOR_PAYLOAD_T p_motor;
-   int             slot        = 0;
-   int             i           = 0;
-   const char     *p_state_str = NULL;
+   PIR_PAYLOAD_T      p_pir;
+   REED_PAYLOAD_T     p_reed;
+   LOCK_PAYLOAD_T     p_lock;
+   LIGHT_PAYLOAD_T    p_light;
+   TEMP_PAYLOAD_T     p_temp;
+   MOTOR_PAYLOAD_T    p_motor;
+   BLE_TEMP_PAYLOAD_T p_ble_temp;
+   int                slot        = 0;
+   int                i           = 0;
+   const char        *p_state_str = NULL;
 
    /* ---- LOCK first: latency sensitive ---- */
    if (pdTRUE == xQueueReceive(sub.mb_lock, &p_lock, 0))
@@ -199,7 +220,7 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
       g_state.light_state = p_light.state;
    }
 
-   /* ---- TEMP ---- */
+   /* ---- TEMP (UART / blue pill) ---- */
    if (pdTRUE == xQueueReceive(sub.mb_temp, &p_temp, 0))
    {
       g_state.avg_temp = p_temp.avg_temp;
@@ -211,6 +232,18 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
       if (p_motor.batt >= 0)
       {
          g_state.motor_batt = p_motor.batt;
+      }
+   }
+
+   /* ---- BLE TEMP ---- */
+   if (pdTRUE == xQueueReceive(sub.mb_ble_temp, &p_ble_temp, 0))
+   {
+      int t_slot = (int)p_ble_temp.id - 1;
+      if ((0 <= t_slot) && (t_slot < MAX_TEMPS))
+      {
+         g_state.temp_slots[t_slot].temp_decidegc = p_ble_temp.temp_decidegc;
+         g_state.temp_slots[t_slot].batt          = p_ble_temp.batt;
+         g_state.temp_slots[t_slot].active        = true;
       }
    }
 
@@ -236,12 +269,12 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
    }
 
    /* Sync and cache PIR array — per-slot occupied and offline */
-   g_state.pir_count = ble_get_pir_count();
+   g_state.pir_count = ble_pir_get_count();
    for (i = 0; (i < g_state.pir_count) && (i < MAX_PIRS); i++)
    {
       age = 0xFFFF;
       int batt_pir = 0;
-      (void)ble_get_pir_slot_info(i, NULL, &batt_pir, &age);
+      (void)ble_pir_get_slot_info(i, NULL, &batt_pir, &age);
       g_state.pir_slots[i].batt     = batt_pir;
       g_state.pir_slots[i].age      = age;
       g_state.pir_slots[i].active   = true;
@@ -259,6 +292,24 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
    /* Legacy flat occupied — slot 0 for backward compat */
    g_state.pir_occupied = (g_state.pir_count > 0) ?
                            g_state.pir_slots[0].occupied : 0;
+
+   /* Sync and cache Temp array */
+   g_state.temp_count = ble_get_temp_count();
+   for (i = 0; (i < g_state.temp_count) && (i < MAX_TEMPS); i++)
+   {
+      int16_t  t_decidegc = 0;
+      int      t_batt     = -1;
+      uint16_t t_age      = 0xFFFF;
+      uint16_t t_gen      = 0;
+      (void)ble_get_temp_slot_info(i, NULL, &t_decidegc, &t_batt,
+                                   &t_age, &t_gen);
+      g_state.temp_slots[i].temp_decidegc = t_decidegc;
+      g_state.temp_slots[i].batt          = t_batt;
+      g_state.temp_slots[i].age           = t_age;
+      g_state.temp_slots[i].active        = true;
+      g_state.temp_slots[i].offline       = (t_age > (TEMP_OFFLINE_MS / 1000)) ? 1 : 0;
+      g_state.temp_slots[i].gen           = t_gen;
+   }
 
    /* ---- Reed debug log ---- */
    for (i = 0; i < MAX_REEDS; i++)
@@ -285,6 +336,21 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
                g_state.pir_slots[i].age,
                g_state.pir_slots[i].offline,
                g_state.pir_slots[i].occupied);
+   }
+
+   /* ---- Temp debug log ---- */
+   for (i = 0; i < g_state.temp_count; i++)
+   {
+      ESP_LOGI(TAG, "[TEMP] slot=%d temp=%d.%d°C batt=%d age=%d offline=%d gen=%d",
+               i + 1,
+               (int)(g_state.temp_slots[i].temp_decidegc / 10),
+               (int)(g_state.temp_slots[i].temp_decidegc < 0 ?
+                     -(g_state.temp_slots[i].temp_decidegc % 10) :
+                       g_state.temp_slots[i].temp_decidegc % 10),
+               g_state.temp_slots[i].batt,
+               g_state.temp_slots[i].age,
+               g_state.temp_slots[i].offline,
+               g_state.temp_slots[i].gen);
    }
 }
 
@@ -320,6 +386,7 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
    cJSON   *p_rooms = NULL;
    cJSON   *p_entry = NULL;
    cJSON   *p_pirs  = NULL;
+   cJSON   *p_temps = NULL;
    char    *p_msg   = NULL;
    char     name[REED_NAME_BUF_SIZE] = {0};
    uint8_t  door_state = 0xFF;
@@ -409,6 +476,37 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
    }
    (void)cJSON_AddNumberToObject(p_root, "pir_count", g_state.pir_count);
 
+   /* temps — "temp" field is whole degrees C, matches avg_temp convention */
+   p_temps = cJSON_CreateArray();
+   if (NULL != p_temps)
+   {
+      for (i = 0; (i < g_state.temp_count) && (i < MAX_TEMPS); i++)
+      {
+         char     t_name[ADV_NAME_BUF_SIZE] = {0};
+         uint16_t t_gen                     = 0;
+         (void)ble_get_temp_slot_info(i, t_name, NULL, NULL, NULL, &t_gen);
+         p_entry = cJSON_CreateObject();
+         if (NULL != p_entry)
+         {
+            (void)cJSON_AddNumberToObject(p_entry, "id",
+                                          i + 1);
+            (void)cJSON_AddNumberToObject(p_entry, "temp",
+                                          g_state.temp_slots[i].temp_decidegc / 10);
+            (void)cJSON_AddNumberToObject(p_entry, "batt",
+                                          g_state.temp_slots[i].batt);
+            (void)cJSON_AddNumberToObject(p_entry, "age",
+                                          g_state.temp_slots[i].age);
+            (void)cJSON_AddNumberToObject(p_entry, "offline",
+                                          g_state.temp_slots[i].offline);
+            (void)cJSON_AddNumberToObject(p_entry, "gen",    t_gen);
+            (void)cJSON_AddStringToObject(p_entry, "name",   t_name);
+            (void)cJSON_AddItemToArray(p_temps, p_entry);
+         }
+      }
+      (void)cJSON_AddItemToObject(p_root, "temps", p_temps);
+   }
+   (void)cJSON_AddNumberToObject(p_root, "temp_count", g_state.temp_count);
+
    p_msg = cJSON_PrintUnformatted(p_root);
    cJSON_Delete(p_root);
    if (NULL == p_msg) { ESP_LOGE(TAG, "cJSON serialize failed (BB)"); return; }
@@ -423,10 +521,11 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
       *p_bb_block_count = 0;
 
       ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u occ=%d lgt=%d lck=%d "
-                    "reeds=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d",
+                    "reeds=%d temps=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d",
                g_state.avg_temp, (unsigned)g_state.motion_count,
                g_state.pir_occupied,
                g_state.light_state, g_state.lock_state, g_state.reed_count,
+               g_state.temp_count,
                (int)g_state.motor_online, g_state.motor_batt,
                g_state.pir_batt, g_state.lock_batt);
 
