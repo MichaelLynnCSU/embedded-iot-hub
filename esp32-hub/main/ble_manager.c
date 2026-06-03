@@ -62,6 +62,7 @@
 #include "ble_internal.h"
 #include "ble_pir.h"
 #include "ble_reed.h"
+#include "ble_temp.h"
 #include "trinity_log.h"
 #include "pir_window.h"
 #include <string.h>
@@ -207,7 +208,8 @@ void ble_manager_init(void)
 void ble_manager_task(EventGroupHandle_t p_system_eg,
                       EventGroupHandle_t p_ble_eg)
 {
-   int      pir_count = 0; /**< number of seen PIR slots */
+   int      pir_count  = 0; /**< number of seen PIR slots */
+   int      temp_count = 0; /**< number of seen temp slots */
    int      i         = 0; /**< loop index               */
    uint16_t pir_age   = 0; /**< PIR slot age in seconds  */
 
@@ -257,6 +259,17 @@ void ble_manager_task(EventGroupHandle_t p_system_eg,
          (ble_get_device_age_s(BLE_DEV_LIGHT) < 30) ? "online" : "offline",
          (ble_get_device_age_s(BLE_DEV_LOCK)  < 30) ? "online" : "offline",
           ble_get_reed_count());
+
+      /* Log each seen temp slot */
+      temp_count = ble_get_temp_count();
+      for (i = 0; i < temp_count; i++)
+      {
+         if (ble_get_temp_slot_info(i, NULL, NULL, NULL, NULL, NULL))
+         {
+            ESP_LOGI(TAG, "[BLE] TEMP slot=%d age=%ds",
+                     i, 0);
+         }
+      }
 
       vTaskDelay(pdMS_TO_TICKS(BLE_IDLE_DELAY_MS));
    }
