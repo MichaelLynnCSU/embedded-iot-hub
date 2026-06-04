@@ -67,7 +67,7 @@
  *          The function is debounced internally; it returns immediately
  *          when no touch is present or debounce is active.
  ******************************************************************************/
-
+#include "SEGGER_RTT.h"
 #include "crash_log.h"
 #include "main.h"
 #include "usb_device.h"
@@ -286,10 +286,9 @@ void SystemClock_Config(void)
 
 int main(void)
 {
+   SEGGER_RTT_Init();
    HAL_Init();
    SystemClock_Config();
-   SEGGER_RTT_Init();
-   SEGGER_RTT_printf(0, "boot\n");
 
    HAL_NVIC_SetPriorityGrouping(NVIC_PRIORITYGROUP_4);
    HAL_NVIC_SetPriority(OTG_FS_IRQn,  5u, 0u);

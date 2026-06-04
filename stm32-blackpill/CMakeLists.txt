@@ -39,10 +39,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "User/Core/ili9341.c"
     "User/Core/xpt2046.c"
 
-    # Segger Logging using J-Link
-    "User/Core/SEGGER_RTT.c"
-    "User/Core/SEGGER_RTT_printf.c"
-
     # Refactored dashboard modules
     "User/Core/log.c"
     "User/Core/parser.c"
@@ -56,10 +52,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "User/Core/trinity_stack_stm32_f4.c"
     "User/Core/trinity_heap_stm32_f4.c"
     "User/Core/fram_driver.c"
+    "Drivers/SEGGER_RTT/SEGGER_RTT.c"
 )
 
 # Add Include Paths
 target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
+    "Drivers/SEGGER_RTT"
     "User/Core"
     "Core/Inc"
     "USB_DEVICE/App"
