@@ -140,3 +140,16 @@ main/wifi_secrets.h
 beaglebone/wifi/secrets/
 beaglebone/inference/app/inference_daemon
 beaglebone/inference/lib/tensorflow/
+
+# ------------------------------------------------------------
+# CI EXCEPTION — the following gitignored files are FORCE-ADDED
+# to the repo for Jenkins CI builds (git add -f).
+# Re-run git add -f if these are ever regenerated:
+#
+#   esp32-hub/tests/unit/stubs/network_config.h  <-- MOCK STUB (fake values only,
+#       real file contains sensitive network config and must never be committed)
+#
+#   esp32c3/idf/motor/managed_components/espressif__cjson/cJSON/cJSON.c
+#   esp32c3/idf/motor/managed_components/espressif__cjson/cJSON/cJSON.h
+#       (IDF managed component, re-add if idf.py regenerates managed_components)
+# ------------------------------------------------------------
