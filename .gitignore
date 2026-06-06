@@ -138,3 +138,5 @@ cloudflared-linux-amd64.deb
 Testing/Temporary/
 main/wifi_secrets.h
 beaglebone/wifi/secrets/
+beaglebone/inference/app/inference_daemon
+beaglebone/inference/lib/tensorflow/
