@@ -50,11 +50,8 @@ typedef struct
 static MOTOR_SM_T g_motor_sm = { MOTOR_IDLE, 0u, 0u };
 
 /*----------------------------------------------------------------------------*/
-
-uint8_t motor_sm_get_state(void)
-{
-   return g_motor_sm.state;
-}
+/* Test seam: no production caller -- used by host unit tests only */
+uint8_t motor_sm_get_state(void) { return g_motor_sm.state; }
 
 /*----------------------------------------------------------------------------*/
 

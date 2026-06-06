@@ -4,7 +4,7 @@
 #include <stddef.h>
 typedef void *  SemaphoreHandle_t;
 typedef uint8_t StaticSemaphore_t;
-#define portMAX_DELAY   0xFFFFFFFF
+/* portMAX_DELAY defined in FreeRTOS.h */
 #define configASSERT(x) (void)(x)
 static inline SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *b)
 { (void)b; return (void*)1; }

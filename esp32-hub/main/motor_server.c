@@ -13,7 +13,6 @@
 #include "cJSON.h"
 #include "trinity_log.h"
 #include "vroom_bus.h"
-#include "pi_controller.h"
 #include "motor_sm.h"
 #include <fcntl.h>
 #include <sys/select.h>

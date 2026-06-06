@@ -103,6 +103,8 @@
 #define DEFAULT_AWS_SETPOINT        25     /**< target temperature degrees C */
 
 /** \brief PWM duty count ceiling sent to C3 motor node */
+#define PWM_OUT_MAX                 100.0f /**< PI output ceiling (percent) */
+#define PWM_OUT_MIN                 0.0f   /**< PI output floor (percent) */
 #define PWM_DUTY_MAX                1023   /**< 10-bit PWM full scale */
 
 /** \brief HTTP response buffer size */
