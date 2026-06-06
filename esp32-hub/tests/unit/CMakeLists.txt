@@ -15,14 +15,14 @@ set(STUB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/stubs)
 # Uses stub getters for aws/uart so pi_controller tests remain deterministic
 add_executable(test_hub
     src/test_hub_main.c
-    ../../main/pir_window.c
-    ../../main/motor_sm.c
-    ../../main/pi_controller.c
-    ../../main/ble_pir.c
-    ../../main/ble_reed.c
-    ../../main/ble_temp.c
-    ../../main/ble_light.c
-    ../../main/ble_lock.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/pir_window.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/motor_sm.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/pi_controller.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/ble_pir.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/ble_reed.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/ble_temp.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/ble_light.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/ble_lock.c
     stubs/stubs.c
     ${unity_SOURCE_DIR}/src/unity.c)
 
@@ -32,7 +32,7 @@ target_include_directories(test_hub PRIVATE
     ${STUB_DIR}/freertos
     ${STUB_DIR}/esp_ble
     ${STUB_DIR}/driver
-    ../../main
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main
     ${unity_SOURCE_DIR}/src)
 
 # ── test_aws ─────────────────────────────────────────────────────────────────
@@ -40,8 +40,8 @@ target_include_directories(test_hub PRIVATE
 # Compiles real aws_manager.c and uart_manager.c; no pi_controller conflict
 add_executable(test_aws
     src/test_aws_main.c
-    ../../main/aws_manager.c
-    ../../main/uart_manager.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/aws_manager.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/uart_manager.c
     stubs/stubs_aws.c
     ${unity_SOURCE_DIR}/src/unity.c)
 
@@ -51,7 +51,7 @@ target_include_directories(test_aws PRIVATE
     ${STUB_DIR}/freertos
     ${STUB_DIR}/esp_ble
     ${STUB_DIR}/driver
-    ../../main
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main
     ${unity_SOURCE_DIR}/src)
 
 enable_testing()
