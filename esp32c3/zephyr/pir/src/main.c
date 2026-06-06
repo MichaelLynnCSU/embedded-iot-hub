@@ -185,11 +185,11 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
-#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
 #include <esp_sleep.h>
+#include "pir_hw.h"
 #include "ble_adv.h"
 #include "max17048.h"
 #include "trinity_log.h"
@@ -197,47 +197,25 @@
 
 LOG_MODULE_REGISTER(pir_main, LOG_LEVEL_INF);
 
-#define PIR_PIN             3
-#define GPIO_NODE           DT_NODELABEL(gpio0)
-
-/** Maximum time to wait for GPIO3 to go LOW before arming sleep.
- *  AM312 hold time is typically 2-3s. The settle loop kicks the WDT
- *  on every 10ms iteration so this value can safely exceed WDT_TIMEOUT_MS.
- *  If motion is genuinely continuous the pin will not settle and we sleep
- *  anyway, waking immediately -- that is correct behaviour. */
-#define PIR_PIN_SETTLE_MS   2500u
+#define PIR_PIN           3
+#define PIR_PIN_SETTLE_MS 2500u
 
 /*----------------------------------------------------------------------------*/
 
 static void enter_deep_sleep(void)
 {
-    /* Wait for GPIO3 to go LOW before arming the level-triggered wake
-     * source. ESP_GPIO_WAKEUP_GPIO_HIGH is level-sensitive: if the pin
-     * is still HIGH at sleep entry the chip wakes instantly. The AM312
-     * holds its output HIGH for a window after firing; this loop lets
-     * that window expire.
-     *
-     * trinity_wdt_kick() is called on every 10ms iteration so the full
-     * 2500ms settle window never trips the 3s watchdog.
-     *
-     * If the pin does not settle within PIR_PIN_SETTLE_MS (e.g. genuine
-     * sustained motion) we proceed to sleep anyway. */
-    const struct device *gpio_settle = DEVICE_DT_GET(GPIO_NODE);
-    if (device_is_ready(gpio_settle))
+    trinity_wdt_kick();
+    int settle_ms = (int)PIR_PIN_SETTLE_MS;
+    while ((pir_hw_read() == 1) && (settle_ms > 0))
     {
+        k_sleep(K_MSEC(10));
+        settle_ms -= 10;
         trinity_wdt_kick();
-        int settle_ms = (int)PIR_PIN_SETTLE_MS;
-        while ((gpio_pin_get(gpio_settle, PIR_PIN) == 1) && (settle_ms > 0))
-        {
-            k_sleep(K_MSEC(10));
-            settle_ms -= 10;
-            trinity_wdt_kick();
-        }
-        if (settle_ms < (int)PIR_PIN_SETTLE_MS)
-        {
-            LOG_INF("GPIO3 settle wait: %dms",
-                    (int)PIR_PIN_SETTLE_MS - settle_ms);
-        }
+    }
+    if (settle_ms < (int)PIR_PIN_SETTLE_MS)
+    {
+        LOG_INF("GPIO3 settle wait: %dms",
+                (int)PIR_PIN_SETTLE_MS - settle_ms);
     }
 
     esp_sleep_enable_timer_wakeup(DEEP_SLEEP_INTERVAL_US);
@@ -276,27 +254,25 @@ int main(void)
     /* --- EMERGENCY I2C DIAGNOSTIC SCAN --- */
     const struct device *const i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
     if (!device_is_ready(i2c_dev)) {
-        LOG_ERR("[I2C SCAN] Peripheral device i2c0 is NOT ready! Pinmux or DTS issue.");
+        LOG_ERR("[I2C SCAN] Peripheral device i2c0 is NOT ready!");
     } else {
         LOG_INF("[I2C SCAN] Starting bus scan on i2c0...");
         uint8_t dummy_rx;
         int found_count = 0;
-
         for (uint8_t addr = 0x01; addr <= 0x7F; addr++) {
             struct i2c_msg msgs[1];
-            msgs[0].buf = &dummy_rx;
-            msgs[0].len = 0;
+            msgs[0].buf   = &dummy_rx;
+            msgs[0].len   = 0;
             msgs[0].flags = I2C_MSG_WRITE | I2C_MSG_STOP;
-
             if (i2c_transfer(i2c_dev, msgs, 1, addr) == 0) {
-                LOG_INF("[I2C SCAN] >>> Found active responder at address: 0x%02X <<<", addr);
+                LOG_INF("[I2C SCAN] >>> Found at 0x%02X <<<", addr);
                 found_count++;
             }
         }
         if (found_count == 0) {
-            LOG_WRN("[I2C SCAN] Scan finished. Zero devices responded on the bus.");
+            LOG_WRN("[I2C SCAN] Zero devices responded.");
         } else {
-            LOG_INF("[I2C SCAN] Scan finished. Found %d device(s).", found_count);
+            LOG_INF("[I2C SCAN] Found %d device(s).", found_count);
         }
     }
     /* --- END DIAGNOSTIC SCAN --- */
@@ -304,26 +280,21 @@ int main(void)
     trinity_nvs_init();
     uint32_t motion_count = trinity_nvs_read_motion_count();
 
-    const struct device *gpio = DEVICE_DT_GET(GPIO_NODE);
-    if (!device_is_ready(gpio))
+    ret = pir_hw_init();
+    if (0 != ret)
     {
         LOG_ERR("GPIO not ready");
         enter_deep_sleep();
         return 0;
     }
-    gpio_pin_configure(gpio, PIR_PIN, GPIO_INPUT);
 
     switch (wake_reason)
     {
         case ESP_SLEEP_WAKEUP_GPIO:
-            /* Debounce: confirm PIN is still HIGH after settle time.
-             * Rules out transient pulls during GPIO peripheral init
-             * that can misfire as a GPIO wake on some timer wakes.
-             * Also catches body capacitance false triggers. */
             k_sleep(K_MSEC(10));
-            if (gpio_pin_get(gpio, PIR_PIN) != 1)
+            if (pir_hw_read() != 1)
             {
-                LOG_WRN("GPIO wake but PIN low -- false trigger, treating as heartbeat");
+                LOG_WRN("GPIO wake but PIN low -- false trigger");
                 occupied = 0;
                 burst_ms = ADV_BURST_TIMER_MS;
                 break;
@@ -387,5 +358,5 @@ int main(void)
 
     enter_deep_sleep(); /* noreturn */
 
-    return 0; /* unreachable */
+    return 0;
 }
