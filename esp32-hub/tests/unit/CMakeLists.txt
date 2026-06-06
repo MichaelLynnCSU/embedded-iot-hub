@@ -14,6 +14,7 @@ add_executable(test_hub
     src/test_hub_main.c
     ../../main/pir_window.c
     ../../main/motor_sm.c
+    ../../main/pi_controller.c
     stubs/stubs.c
     ${unity_SOURCE_DIR}/src/unity.c)
 

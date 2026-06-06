@@ -1,3 +1,5 @@
+#include "pi_controller.h"
+#include "pi_stubs.h"
 #include "motor_sm.h"
 #include "unity.h"
 #include "hub_logic.h"
@@ -605,6 +607,76 @@ void test_motor_sm_timing_constants(void)
     TEST_ASSERT_EQUAL_UINT32(300000u,  (5UL * 60UL * 1000UL));
 }
 
+/******************************************************************************
+ * pi_controller -- output clamping, proportional term, anti-windup
+ ******************************************************************************/
+void test_pi_output_max(void)
+{
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 100.0f, PWM_OUT_MAX);
+}
+
+void test_pi_output_min(void)
+{
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, PWM_OUT_MIN);
+}
+
+void test_pi_at_setpoint_output_zero(void)
+{
+    /* error=0, integral accumulates but kp*0=0, ki*integral grows slowly */
+    g_stub_kp       = 1.0f;
+    g_stub_ki       = 0.0f;
+    g_stub_kd       = 0.0f;
+    g_stub_setpoint = 25;
+    g_stub_avg_temp = 25;
+    float out = run_pi_controller(1000u);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, out);
+}
+
+void test_pi_positive_error_produces_positive_output(void)
+{
+    g_stub_kp       = 1.0f;
+    g_stub_ki       = 0.0f;
+    g_stub_kd       = 0.0f;
+    g_stub_setpoint = 30;
+    g_stub_avg_temp = 25;
+    float out = run_pi_controller(2000u);
+    TEST_ASSERT_GREATER_THAN(0.0f, out);
+}
+
+void test_pi_negative_error_clamps_to_zero(void)
+{
+    g_stub_kp       = 1.0f;
+    g_stub_ki       = 0.0f;
+    g_stub_kd       = 0.0f;
+    g_stub_setpoint = 20;
+    g_stub_avg_temp = 25;
+    float out = run_pi_controller(3000u);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, out);
+}
+
+void test_pi_output_clamps_at_max(void)
+{
+    g_stub_kp       = 100.0f;
+    g_stub_ki       = 0.0f;
+    g_stub_kd       = 0.0f;
+    g_stub_setpoint = 50;
+    g_stub_avg_temp = 25;
+    float out = run_pi_controller(4000u);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, PWM_OUT_MAX, out);
+}
+
+void test_pi_proportional_scales_with_error(void)
+{
+    g_stub_kp       = 2.0f;
+    g_stub_ki       = 0.0f;
+    g_stub_kd       = 0.0f;
+    g_stub_setpoint = 27;
+    g_stub_avg_temp = 25;
+    /* error=2, kp=2, p_term=4, no integral, output=4 */
+    float out = run_pi_controller(5000u);
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 4.0f, out);
+}
+
 /*----------------------------------------------------------------------------*/
 
 int main(void)
@@ -709,6 +781,15 @@ int main(void)
     RUN_TEST(test_motor_sm_cooldown_to_idle_after_cooldown_ms);
     RUN_TEST(test_motor_sm_cooldown_pwm_is_zero);
     RUN_TEST(test_motor_sm_timing_constants);
+
+    /* pi_controller */
+    RUN_TEST(test_pi_output_max);
+    RUN_TEST(test_pi_output_min);
+    RUN_TEST(test_pi_at_setpoint_output_zero);
+    RUN_TEST(test_pi_positive_error_produces_positive_output);
+    RUN_TEST(test_pi_negative_error_clamps_to_zero);
+    RUN_TEST(test_pi_output_clamps_at_max);
+    RUN_TEST(test_pi_proportional_scales_with_error);
 
     return UNITY_END();
 }
