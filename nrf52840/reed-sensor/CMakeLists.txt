@@ -4,6 +4,7 @@ project(reed_sensor)
 
 target_sources(app PRIVATE
     src/main.c
+    src/reed_hw_zephyr.c
     src/ble_adv.c
     src/battery.c
     src/build_info.c

@@ -46,10 +46,10 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/devicetree.h>
 #include <zephyr/logging/log.h>
 #include <nrf.h>
 #include <string.h>
+#include "reed_hw.h"
 #include "ble_adv.h"
 #include "battery.h"
 #include "trinity_log.h"
@@ -57,21 +57,14 @@
 
 LOG_MODULE_REGISTER(reed_main, LOG_LEVEL_INF);
 
-#define LED_NODE    DT_ALIAS(led0)
-#define REED_PORT   DT_NODELABEL(gpio0)
-#define REED_PIN    11
-
 #define BLE_STACK_SIZE   4096
 #define BLE_PRIORITY     5
 #define REED_DEBOUNCE_MS 50
 
-static const struct gpio_dt_spec g_led =
-    GPIO_DT_SPEC_GET(LED_NODE, gpios);
-static const struct device *g_gpio0;
-
 K_SEM_DEFINE(g_reed_changed_sem, 0, 1);
 
 static struct gpio_callback g_reed_cb_data;
+static const struct device *g_gpio0_int;
 
 /*----------------------------------------------------------------------------*/
 
@@ -88,27 +81,23 @@ static void reed_interrupt_handler(const struct device *p_dev,
 
 /*----------------------------------------------------------------------------*/
 
-static int gpio_init(void)
+static int interrupt_init(void)
 {
     int err = 0;
 
-    g_gpio0 = DEVICE_DT_GET(REED_PORT);
+    g_gpio0_int = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+    if (!device_is_ready(g_gpio0_int))
+    {
+        LOG_ERR("GPIO0 not ready for interrupt");
+        return -ENODEV;
+    }
 
-    if (!device_is_ready(g_gpio0))    { LOG_ERR("GPIO0 not ready");  return -ENODEV; }
-    if (!device_is_ready(g_led.port)) { LOG_ERR("LED not ready");    return -ENODEV; }
-
-    err = gpio_pin_configure_dt(&g_led, GPIO_OUTPUT_INACTIVE);
-    if (0 != err) { LOG_ERR("LED configure failed (err=%d)", err); return err; }
-
-    err = gpio_pin_configure(g_gpio0, REED_PIN, GPIO_INPUT | GPIO_PULL_UP);
-    if (0 != err) { LOG_ERR("Reed pin configure failed (err=%d)", err); return err; }
-
-    err = gpio_pin_interrupt_configure(g_gpio0, REED_PIN, GPIO_INT_EDGE_BOTH);
+    err = gpio_pin_interrupt_configure(g_gpio0_int, 11, GPIO_INT_EDGE_BOTH);
     if (0 != err) { LOG_ERR("Reed interrupt configure failed (err=%d)", err); return err; }
 
-    gpio_init_callback(&g_reed_cb_data, reed_interrupt_handler, BIT(REED_PIN));
+    gpio_init_callback(&g_reed_cb_data, reed_interrupt_handler, BIT(11));
 
-    err = gpio_add_callback(g_gpio0, &g_reed_cb_data);
+    err = gpio_add_callback(g_gpio0_int, &g_reed_cb_data);
     if (0 != err) { LOG_ERR("Reed callback add failed (err=%d)", err); return err; }
 
     return 0;
@@ -140,7 +129,7 @@ static void reed_monitor_loop(int last_state)
             batt_tick = 0;
             soc = battery_read_soc();
             ble_adv_set_batt(soc);
-            cur = (uint8_t)gpio_pin_get(g_gpio0, REED_PIN);
+            cur = (uint8_t)reed_hw_read();
             err = k_msgq_put(&g_ble_msgq, &cur, K_NO_WAIT);
             if (0 != err) { LOG_WRN("[BATT] msgq full, drop (err=%d)", err); }
         }
@@ -154,7 +143,7 @@ static void reed_monitor_loop(int last_state)
 
         k_sleep(K_MSEC(REED_DEBOUNCE_MS));
 
-        val = gpio_pin_get(g_gpio0, REED_PIN);
+        val = reed_hw_read();
         if (0 > val)
         {
             LOG_WRN("[REED] Pin read failed (err=%d)", val);
@@ -166,8 +155,7 @@ static void reed_monitor_loop(int last_state)
             trinity_log_event(val ?
                 "EVENT: REED_OPEN\n" : "EVENT: REED_CLOSED\n");
 
-            err = gpio_pin_set_dt(&g_led, !val);
-            if (0 != err) { LOG_WRN("[REED] LED set failed (err=%d)", err); }
+            reed_hw_set_led(!val);
 
             state = (uint8_t)val;
             err = k_msgq_put(&g_ble_msgq, &state, K_NO_WAIT);
@@ -218,15 +206,16 @@ int main(void)
     trinity_wdt_kick();
 #endif
 
-    err = gpio_init();
+    err = reed_hw_init();
+    if (0 != err) { return err; }
+
+    err = interrupt_init();
     if (0 != err) { return err; }
     trinity_wdt_kick();
 
     if (0 != battery_init()) { LOG_WRN("Battery init failed, SOC will read 0"); }
     trinity_wdt_kick();
 
-    /* Read battery before BLE -- VDD stable, radio idle.
-     * bt_enable() surge collapses CR2032 rail and corrupts SAADC. */
     soc = battery_read_soc();
     ble_adv_set_batt(soc);
     LOG_INF("Pre-BLE battery mV: %d", battery_read_mv());
@@ -235,13 +224,12 @@ int main(void)
 
     k_sleep(K_MSEC(100));
 
-    initial = gpio_pin_get(g_gpio0, REED_PIN);
+    initial = reed_hw_read();
     if (0 > initial) { LOG_ERR("Reed initial read failed (err=%d)", initial); return initial; }
 
     LOG_INF("Initial state: %d (%s)", initial, initial ? "OPEN" : "CLOSED");
 
-    err = gpio_pin_set_dt(&g_led, (initial ? 0 : 1));
-    if (0 != err) { LOG_WRN("LED set failed (err=%d)", err); }
+    reed_hw_set_led(initial ? 0 : 1);
 
     init_state = (uint8_t)initial;
     err = k_msgq_put(&g_ble_msgq, &init_state, K_NO_WAIT);

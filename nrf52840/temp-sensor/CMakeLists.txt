@@ -6,6 +6,7 @@ target_sources(app PRIVATE
     src/main.c
     src/ble_adv.c
     src/temp.c
+    src/temp_hw_zephyr.c
     src/battery.c
     src/build_info.c
     src/trinity_wdt.c
