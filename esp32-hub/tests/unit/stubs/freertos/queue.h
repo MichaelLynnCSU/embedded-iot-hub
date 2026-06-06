@@ -1,6 +1,7 @@
 #ifndef STUB_FREERTOS_QUEUE_H
 #define STUB_FREERTOS_QUEUE_H
 #include <stdint.h>
+#include <stddef.h>
 typedef void * QueueHandle_t;
 static inline QueueHandle_t xQueueCreate(uint32_t len, uint32_t size)
 { (void)len;(void)size; return NULL; }

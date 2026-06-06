@@ -1,3 +1,4 @@
+#include "ble_pir.h"
 #include "pi_controller.h"
 #include "pi_stubs.h"
 #include "motor_sm.h"
@@ -677,6 +678,93 @@ void test_pi_proportional_scales_with_error(void)
     TEST_ASSERT_FLOAT_WITHIN(0.1f, 4.0f, out);
 }
 
+/******************************************************************************
+ * ble_pir -- slot table bounds and empty table behaviour
+ ******************************************************************************/
+void test_ble_pir_get_count_empty(void)
+{
+    ble_pir_preinit();
+    TEST_ASSERT_EQUAL_INT(0, ble_pir_get_count());
+}
+
+void test_ble_pir_get_slot_info_oob_negative(void)
+{
+    ble_pir_preinit();
+    TEST_ASSERT_FALSE(ble_pir_get_slot_info(-1, NULL, NULL, NULL));
+}
+
+void test_ble_pir_get_slot_info_oob_max(void)
+{
+    ble_pir_preinit();
+    TEST_ASSERT_FALSE(ble_pir_get_slot_info(MAX_PIRS, NULL, NULL, NULL));
+}
+
+void test_ble_pir_get_slot_info_empty_slot_returns_false(void)
+{
+    ble_pir_preinit();
+    TEST_ASSERT_FALSE(ble_pir_get_slot_info(0, NULL, NULL, NULL));
+}
+
+void test_ble_pir_handle_null_mfg_no_crash(void)
+{
+    ble_pir_preinit();
+    uint8_t mac[6] = {0x01,0x02,0x03,0x04,0x05,0x06};
+    ble_pir_handle(NULL, 8, mac, "PIR_Motion");
+    TEST_ASSERT_EQUAL_INT(0, ble_pir_get_count());
+}
+
+void test_ble_pir_handle_short_mfg_no_crash(void)
+{
+    ble_pir_preinit();
+    uint8_t mac[6] = {0x01,0x02,0x03,0x04,0x05,0x06};
+    uint8_t mfg[3] = {0xFF, 0xFF, 0x00};
+    ble_pir_handle(mfg, 3, mac, "PIR_Motion");
+    TEST_ASSERT_EQUAL_INT(0, ble_pir_get_count());
+}
+
+void test_ble_pir_handle_valid_allocates_slot(void)
+{
+    ble_pir_preinit();
+    uint8_t mac[6] = {0xAA,0xBB,0xCC,0xDD,0xEE,0xFF};
+    uint8_t mfg[8] = {0xFF,0xFF, 0x00,0x00,0x00,0x05, 0x64, 0x01};
+    ble_pir_handle(mfg, 8, mac, "PIR_Motion");
+    TEST_ASSERT_EQUAL_INT(1, ble_pir_get_count());
+}
+
+void test_ble_pir_handle_valid_stores_count_and_batt(void)
+{
+    ble_pir_preinit();
+    uint8_t mac[6] = {0x11,0x22,0x33,0x44,0x55,0x66};
+    uint8_t mfg[8] = {0xFF,0xFF, 0x00,0x00,0x00,0x07, 0x50, 0x00};
+    ble_pir_handle(mfg, 8, mac, "PIR_Motion");
+    uint32_t count = 0;
+    int      batt  = 0;
+    TEST_ASSERT_TRUE(ble_pir_get_slot_info(0, &count, &batt, NULL));
+    TEST_ASSERT_EQUAL_UINT32(7u, count);
+    TEST_ASSERT_EQUAL_INT(80, batt);
+}
+
+void test_ble_pir_handle_same_mac_updates_slot(void)
+{
+    ble_pir_preinit();
+    uint8_t mac[6] = {0xAA,0xBB,0xCC,0xDD,0xEE,0x01};
+    uint8_t mfg1[8] = {0xFF,0xFF, 0x00,0x00,0x00,0x01, 0x64, 0x00};
+    uint8_t mfg2[8] = {0xFF,0xFF, 0x00,0x00,0x00,0x02, 0x50, 0x00};
+    ble_pir_handle(mfg1, 8, mac, "PIR_Motion");
+    ble_pir_handle(mfg2, 8, mac, "PIR_Motion");
+    TEST_ASSERT_EQUAL_INT(1, ble_pir_get_count());
+    uint32_t count = 0;
+    ble_pir_get_slot_info(0, &count, NULL, NULL);
+    TEST_ASSERT_EQUAL_UINT32(2u, count);
+}
+
+void test_ble_pir_expire_no_crash_on_empty_table(void)
+{
+    ble_pir_preinit();
+    ble_expire_pir_slots();
+    TEST_ASSERT_EQUAL_INT(0, ble_pir_get_count());
+}
+
 /*----------------------------------------------------------------------------*/
 
 int main(void)
@@ -790,6 +878,18 @@ int main(void)
     RUN_TEST(test_pi_negative_error_clamps_to_zero);
     RUN_TEST(test_pi_output_clamps_at_max);
     RUN_TEST(test_pi_proportional_scales_with_error);
+
+    /* ble_pir */
+    RUN_TEST(test_ble_pir_get_count_empty);
+    RUN_TEST(test_ble_pir_get_slot_info_oob_negative);
+    RUN_TEST(test_ble_pir_get_slot_info_oob_max);
+    RUN_TEST(test_ble_pir_get_slot_info_empty_slot_returns_false);
+    RUN_TEST(test_ble_pir_handle_null_mfg_no_crash);
+    RUN_TEST(test_ble_pir_handle_short_mfg_no_crash);
+    RUN_TEST(test_ble_pir_handle_valid_allocates_slot);
+    RUN_TEST(test_ble_pir_handle_valid_stores_count_and_batt);
+    RUN_TEST(test_ble_pir_handle_same_mac_updates_slot);
+    RUN_TEST(test_ble_pir_expire_no_crash_on_empty_table);
 
     return UNITY_END();
 }

@@ -15,3 +15,11 @@ float aws_get_ki(void)      { return g_stub_ki; }
 float aws_get_kd(void)      { return g_stub_kd; }
 int   aws_get_setpoint(void){ return g_stub_setpoint; }
 int   uart_get_avg_temp(void){ return g_stub_avg_temp; }
+
+/* ble_internal stubs */
+void stamp_device(int idx) { (void)idx; }
+uint16_t ble_get_device_age_s(int idx) { (void)idx; return 0; }
+
+/* vroom bus stubs */
+void bus_publish_pir(uint8_t slot, uint32_t count, int batt)
+{ (void)slot;(void)count;(void)batt; }
