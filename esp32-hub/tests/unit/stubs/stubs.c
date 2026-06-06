@@ -29,3 +29,7 @@ void bus_publish_reed(uint8_t id, uint8_t state, int batt, const uint8_t *mac)
 { (void)id;(void)state;(void)batt;(void)mac; }
 void ble_update_room_sensor(int id, const char *p_state)
 { (void)id;(void)p_state; }
+
+/* ble_temp stubs */
+void bus_publish_ble_temp(uint8_t slot, int16_t temp, int batt)
+{ (void)slot;(void)temp;(void)batt; }

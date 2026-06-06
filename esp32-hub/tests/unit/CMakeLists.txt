@@ -18,6 +18,7 @@ add_executable(test_hub
     ../../main/ble_pir.c
     ../../main/pir_window.c
     ../../main/ble_reed.c
+    ../../main/ble_temp.c
     stubs/stubs.c
     ${unity_SOURCE_DIR}/src/unity.c)
 
