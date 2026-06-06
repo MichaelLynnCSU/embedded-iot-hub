@@ -10,7 +10,8 @@ FetchContent_Declare(unity
 FetchContent_MakeAvailable(unity)
 
 add_executable(test_hub
-    src/test_hub_main.c)
+    src/test_hub_main.c
+    ../../main/pir_window.c)
 
 target_include_directories(test_hub PRIVATE
     ../../main
