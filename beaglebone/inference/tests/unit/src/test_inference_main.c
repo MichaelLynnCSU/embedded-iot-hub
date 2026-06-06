@@ -303,16 +303,32 @@ int main(void)
     CU_add_test(s_cfg, "max_labels",         test_max_labels);
     CU_add_test(s_cfg, "label_len",          test_label_len);
 
-#ifdef JUNIT_OUTPUT_PATH
-    CU_set_output_filename(JUNIT_OUTPUT_PATH);
-    CU_automated_run_tests();
-    CU_cleanup_registry();
-    return CU_get_number_of_failures() != 0;
-#else
     CU_basic_set_mode(CU_BRM_VERBOSE);
     CU_basic_run_tests();
+
+#ifdef JUNIT_OUTPUT_PATH
+    FILE *f = fopen(JUNIT_OUTPUT_PATH, "w");
+    if (f) {
+        int failures = CU_get_number_of_failures();
+        int tests    = CU_get_number_of_tests_run();
+        fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        fprintf(f, "<testsuite name=\"inference_tests\" tests=\"%d\" failures=\"%d\">\n",
+                tests, failures);
+        CU_pSuite s = CU_get_registry()->pSuite;
+        while (s) {
+            CU_pTest t = s->pTest;
+            while (t) {
+                fprintf(f, "  <testcase name=\"%s.%s\"/>\n", s->pName, t->pName);
+                t = t->pNext;
+            }
+            s = s->pNext;
+        }
+        fprintf(f, "</testsuite>\n");
+        fclose(f);
+    }
+#endif
+
     unsigned int failures = CU_get_number_of_failures();
     CU_cleanup_registry();
     return failures != 0;
-#endif
 }

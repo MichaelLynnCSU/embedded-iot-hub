@@ -105,7 +105,7 @@ pipeline {
             }
             post {
                 always {
-                    junit 'beaglebone/inference/tests/unit/build/junit_inference.xml-Results.xml'
+                    junit 'beaglebone/inference/tests/unit/build/junit_inference.xml'
                     recordCoverage(
                         id: 'bb-inference',
                         name: 'BeagleBone Inference',
