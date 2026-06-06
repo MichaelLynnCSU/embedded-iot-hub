@@ -4,24 +4,18 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include "config.h"
 
 /* ---- Timing constants ---- */
 #define STATS_INTERVAL_MS       60000u
 #define WIFI_POLL_INTERVAL_MS   2000u
-#define TCP_SEND_INTERVAL_MS    1000u
-#define AWS_SEND_INTERVAL_MS    300000u
 #define DRAIN_INTERVAL_MS       2000u
-#define RECONNECT_DELAY_MS      2000u
 #define BB_CONNECT_TIMEOUT_MS   2000u
 #define C3_CONNECT_TIMEOUT_MS   10000u
 #define BLOCK_COUNT_MAX         5
 
 /* ---- Reed slot constants ---- */
-#define MAX_REEDS               6
-#define REED_OFFLINE_MS         (150  * 1000)
-#define REED_REMOVE_MS          (3600 * 1000)
 #define REED_OFFLINE_S          150
-#define COOLDOWN_MS             (10   * 1000)
 
 /* ---- MFG data byte indices ---- */
 #define MFG_PIR_MIN_LEN         6
@@ -52,7 +46,6 @@
 
 /* ---- Reed name prefix ---- */
 #define REED_NAME_PREFIX        "ReedSensor"
-#define REED_NAME_PREFIX_LEN    10
 
 /* ---- TCP state machine ---- */
 #define TCP_STATE_DISCONNECTED  0

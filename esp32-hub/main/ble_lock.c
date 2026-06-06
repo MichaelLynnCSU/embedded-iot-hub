@@ -40,6 +40,7 @@
 #include "trinity_log.h"
 #include "vroom_bus.h"
 #include <string.h>
+#include <stdlib.h>
 
 #define LOCK_CONN_ID_INVALID   0xFFFF  /**< sentinel for no active connection */
 #define LOCK_SERVICE_UUID      0x1234  /**< lock GATT service UUID */

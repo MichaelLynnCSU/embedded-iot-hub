@@ -6,3 +6,5 @@
 typedef uint32_t TickType_t;
 static inline uint32_t xTaskGetTickCount(void) { return 0; }
 #endif
+#include "portmacro.h"
+#define portMAX_DELAY 0xFFFFFFFFUL

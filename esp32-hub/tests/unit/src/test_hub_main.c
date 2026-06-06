@@ -1,4 +1,7 @@
+#include "ble_manager.h"
 #include "ble_temp.h"
+#include "ble_light.h"
+#include "ble_lock.h"
 #include "ble_reed.h"
 #include "ble_pir.h"
 #include "pi_controller.h"
@@ -74,10 +77,6 @@ void test_reed_offline_s(void)
     TEST_ASSERT_EQUAL_INT(150, REED_OFFLINE_S);
 }
 
-void test_cooldown_ms(void)
-{
-    TEST_ASSERT_EQUAL_UINT32(10000u, COOLDOWN_MS);
-}
 
 /******************************************************************************
  * MFG data byte indices
@@ -968,6 +967,64 @@ void test_ble_temp_two_different_macs_fill_two_slots(void)
     TEST_ASSERT_EQUAL_INT(2, ble_get_temp_count());
 }
 
+/******************************************************************************
+ * ble_light -- getter/setter and pending state logic
+ ******************************************************************************/
+void test_ble_light_initial_state_is_zero(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(0, ble_light_get_state());
+}
+
+void test_ble_light_update_adv_stores_state(void)
+{
+    ble_light_update_adv(1);
+    TEST_ASSERT_EQUAL_UINT8(1, ble_light_get_state());
+    ble_light_update_adv(0);
+    TEST_ASSERT_EQUAL_UINT8(0, ble_light_get_state());
+}
+
+void test_ble_light_send_command_not_connected_queues(void)
+{
+    /* Not connected -- must queue without crash */
+    ble_send_light_command(1);
+    /* No assert needed -- just must not crash */
+    ble_send_light_command(0);
+}
+
+/******************************************************************************
+ * ble_lock -- getter/setter and pending state logic
+ ******************************************************************************/
+void test_ble_lock_initial_state_is_zero(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(0, ble_lock_get_state());
+}
+
+void test_ble_lock_initial_batt_is_minus_one(void)
+{
+    TEST_ASSERT_EQUAL_INT(-1, ble_lock_get_batt());
+}
+
+void test_ble_lock_update_adv_stores_state_and_batt(void)
+{
+    ble_lock_update_adv(1, 75);
+    TEST_ASSERT_EQUAL_UINT8(1, ble_lock_get_state());
+    TEST_ASSERT_EQUAL_INT(75, ble_lock_get_batt());
+}
+
+void test_ble_lock_update_adv_state_zero(void)
+{
+    ble_lock_update_adv(0, 50);
+    TEST_ASSERT_EQUAL_UINT8(0, ble_lock_get_state());
+    TEST_ASSERT_EQUAL_INT(50, ble_lock_get_batt());
+}
+
+void test_ble_lock_send_command_not_connected_queues(void)
+{
+    /* Not connected -- must queue without crash */
+    ble_send_lock_command(1);
+    ble_send_lock_command(0);
+}
+
 /*----------------------------------------------------------------------------*/
 
 int main(void)
@@ -985,7 +1042,6 @@ int main(void)
     RUN_TEST(test_reed_offline_ms);
     RUN_TEST(test_reed_remove_ms);
     RUN_TEST(test_reed_offline_s);
-    RUN_TEST(test_cooldown_ms);
     RUN_TEST(test_pir_batt_idx);
     RUN_TEST(test_pir_min_len);
     RUN_TEST(test_reed_state_idx);
@@ -1119,6 +1175,18 @@ int main(void)
     RUN_TEST(test_ble_temp_handle_same_mac_updates_slot);
     RUN_TEST(test_ble_temp_expire_no_crash_on_empty_table);
     RUN_TEST(test_ble_temp_two_different_macs_fill_two_slots);
+
+    /* ble_light */
+    RUN_TEST(test_ble_light_initial_state_is_zero);
+    RUN_TEST(test_ble_light_update_adv_stores_state);
+    RUN_TEST(test_ble_light_send_command_not_connected_queues);
+
+    /* ble_lock */
+    RUN_TEST(test_ble_lock_initial_state_is_zero);
+    RUN_TEST(test_ble_lock_initial_batt_is_minus_one);
+    RUN_TEST(test_ble_lock_update_adv_stores_state_and_batt);
+    RUN_TEST(test_ble_lock_update_adv_state_zero);
+    RUN_TEST(test_ble_lock_send_command_not_connected_queues);
 
     return UNITY_END();
 }

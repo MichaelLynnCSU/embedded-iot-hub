@@ -32,6 +32,7 @@
 #include "ble_internal.h"
 #include "trinity_log.h"
 #include <string.h>
+#include <stdlib.h>
 
 #define LIGHT_CONN_ID_INVALID  0xFFFF /**< sentinel for no active connection */
 #define LIGHT_HB_CHAR_UUID     0xAB02 /**< heartbeat characteristic UUID */
