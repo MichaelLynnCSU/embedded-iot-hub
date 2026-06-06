@@ -23,3 +23,9 @@ uint16_t ble_get_device_age_s(int idx) { (void)idx; return 0; }
 /* vroom bus stubs */
 void bus_publish_pir(uint8_t slot, uint32_t count, int batt)
 { (void)slot;(void)count;(void)batt; }
+
+/* ble_reed stubs */
+void bus_publish_reed(uint8_t id, uint8_t state, int batt, const uint8_t *mac)
+{ (void)id;(void)state;(void)batt;(void)mac; }
+void ble_update_room_sensor(int id, const char *p_state)
+{ (void)id;(void)p_state; }

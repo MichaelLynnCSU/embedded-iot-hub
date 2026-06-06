@@ -1,3 +1,4 @@
+#include "ble_reed.h"
 #include "ble_pir.h"
 #include "pi_controller.h"
 #include "pi_stubs.h"
@@ -765,6 +766,95 @@ void test_ble_pir_expire_no_crash_on_empty_table(void)
     TEST_ASSERT_EQUAL_INT(0, ble_pir_get_count());
 }
 
+/******************************************************************************
+ * ble_reed -- slot table bounds and basic behaviour
+ ******************************************************************************/
+void test_ble_reed_get_count_empty(void)
+{
+    ble_reed_preinit();
+    TEST_ASSERT_EQUAL_INT(0, ble_get_reed_count());
+}
+
+void test_ble_reed_get_slot_info_oob_negative(void)
+{
+    ble_reed_preinit();
+    TEST_ASSERT_FALSE(ble_get_reed_slot_info(-1, NULL, NULL, NULL, NULL, NULL));
+}
+
+void test_ble_reed_get_slot_info_oob_max(void)
+{
+    ble_reed_preinit();
+    TEST_ASSERT_FALSE(ble_get_reed_slot_info(MAX_REEDS, NULL, NULL, NULL, NULL, NULL));
+}
+
+void test_ble_reed_get_slot_info_empty_returns_false(void)
+{
+    ble_reed_preinit();
+    TEST_ASSERT_FALSE(ble_get_reed_slot_info(0, NULL, NULL, NULL, NULL, NULL));
+}
+
+void test_ble_reed_handle_null_mfg_still_allocates(void)
+{
+    ble_reed_preinit();
+    uint8_t mac[6] = {0x01,0x02,0x03,0x04,0x05,0x06};
+    ble_reed_handle(NULL, 0, mac, "ReedSensor1");
+    TEST_ASSERT_EQUAL_INT(1, ble_get_reed_count());
+}
+
+void test_ble_reed_handle_valid_allocates_slot(void)
+{
+    ble_reed_preinit();
+    uint8_t mac[6] = {0xAA,0xBB,0xCC,0xDD,0xEE,0xFF};
+    uint8_t mfg[3] = {0xAB, 0x01, 0x64};
+    ble_reed_handle(mfg, 3, mac, "ReedSensor1");
+    TEST_ASSERT_EQUAL_INT(1, ble_get_reed_count());
+}
+
+void test_ble_reed_handle_valid_stores_state_and_batt(void)
+{
+    ble_reed_preinit();
+    uint8_t mac[6] = {0x11,0x22,0x33,0x44,0x55,0x66};
+    uint8_t mfg[3] = {0xAB, 0x01, 0x50};
+    ble_reed_handle(mfg, 3, mac, "ReedSensor1");
+    uint8_t  state = 0xFF;
+    int      batt  = 0;
+    TEST_ASSERT_TRUE(ble_get_reed_slot_info(0, NULL, &batt, NULL, &state, NULL));
+    TEST_ASSERT_EQUAL_UINT8(0x01, state);
+    TEST_ASSERT_EQUAL_INT(0x50, batt);
+}
+
+void test_ble_reed_handle_same_mac_updates_slot(void)
+{
+    ble_reed_preinit();
+    uint8_t mac[6] = {0xAA,0xBB,0xCC,0xDD,0xEE,0x01};
+    uint8_t mfg1[3] = {0xAB, 0x00, 0x64};
+    uint8_t mfg2[3] = {0xAB, 0x01, 0x50};
+    ble_reed_handle(mfg1, 3, mac, "ReedSensor1");
+    ble_reed_handle(mfg2, 3, mac, "ReedSensor1");
+    TEST_ASSERT_EQUAL_INT(1, ble_get_reed_count());
+    uint8_t state = 0xFF;
+    ble_get_reed_slot_info(0, NULL, NULL, NULL, &state, NULL);
+    TEST_ASSERT_EQUAL_UINT8(0x01, state);
+}
+
+void test_ble_reed_expire_no_crash_on_empty_table(void)
+{
+    ble_reed_preinit();
+    ble_expire_reed_slots();
+    TEST_ASSERT_EQUAL_INT(0, ble_get_reed_count());
+}
+
+void test_ble_reed_two_different_macs_fill_two_slots(void)
+{
+    ble_reed_preinit();
+    uint8_t mac1[6] = {0x01,0x02,0x03,0x04,0x05,0x06};
+    uint8_t mac2[6] = {0x0A,0x0B,0x0C,0x0D,0x0E,0x0F};
+    uint8_t mfg[3]  = {0xAB, 0x00, 0x64};
+    ble_reed_handle(mfg, 3, mac1, "ReedSensor1");
+    ble_reed_handle(mfg, 3, mac2, "ReedSensor2");
+    TEST_ASSERT_EQUAL_INT(2, ble_get_reed_count());
+}
+
 /*----------------------------------------------------------------------------*/
 
 int main(void)
@@ -890,6 +980,18 @@ int main(void)
     RUN_TEST(test_ble_pir_handle_valid_stores_count_and_batt);
     RUN_TEST(test_ble_pir_handle_same_mac_updates_slot);
     RUN_TEST(test_ble_pir_expire_no_crash_on_empty_table);
+
+    /* ble_reed */
+    RUN_TEST(test_ble_reed_get_count_empty);
+    RUN_TEST(test_ble_reed_get_slot_info_oob_negative);
+    RUN_TEST(test_ble_reed_get_slot_info_oob_max);
+    RUN_TEST(test_ble_reed_get_slot_info_empty_returns_false);
+    RUN_TEST(test_ble_reed_handle_null_mfg_still_allocates);
+    RUN_TEST(test_ble_reed_handle_valid_allocates_slot);
+    RUN_TEST(test_ble_reed_handle_valid_stores_state_and_batt);
+    RUN_TEST(test_ble_reed_handle_same_mac_updates_slot);
+    RUN_TEST(test_ble_reed_expire_no_crash_on_empty_table);
+    RUN_TEST(test_ble_reed_two_different_macs_fill_two_slots);
 
     return UNITY_END();
 }
