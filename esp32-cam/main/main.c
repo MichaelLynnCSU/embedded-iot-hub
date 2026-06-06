@@ -42,6 +42,7 @@
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include "wifi_secrets.h"
+#include "cam_logic.h"
 
 static const char *TAG = "CAM";
 
@@ -49,31 +50,11 @@ static const char *TAG = "CAM";
 /* Config                                                                      */
 /*---------------------------------------------------------------------------*/
 
-#define BBB_HOST         "10.0.0.206"
-#define BBB_PORT         9090
-#define UDP_TRIGGER_PORT 9091
-#define RECONNECT_MS     3000
 
 /*---------------------------------------------------------------------------*/
 /* Camera pins (from board silkscreen)                                         */
 /*---------------------------------------------------------------------------*/
 
-#define CAM_PIN_PWDN    -1
-#define CAM_PIN_RESET   -1
-#define CAM_PIN_XCLK     15
-#define CAM_PIN_SIOD     4
-#define CAM_PIN_SIOC     5
-#define CAM_PIN_D7       16
-#define CAM_PIN_D6       17
-#define CAM_PIN_D5       18
-#define CAM_PIN_D4       12
-#define CAM_PIN_D3       10
-#define CAM_PIN_D2       8
-#define CAM_PIN_D1       9
-#define CAM_PIN_D0       11
-#define CAM_PIN_VSYNC    6
-#define CAM_PIN_HREF     7
-#define CAM_PIN_PCLK     13
 
 /*---------------------------------------------------------------------------*/
 /* Globals                                                                     */
@@ -217,10 +198,7 @@ static bool send_jpeg_to_bbb(camera_fb_t *p_fb)
     uint8_t  hdr[4];
     uint32_t len = (uint32_t)p_fb->len;
 
-    hdr[0] = (len >> 24) & 0xFF;
-    hdr[1] = (len >> 16) & 0xFF;
-    hdr[2] = (len >>  8) & 0xFF;
-    hdr[3] = (len      ) & 0xFF;
+    cam_pack_jpeg_header(hdr, len);
 
     if (4 != send(g_tcp_sock, hdr, 4, 0)) { return false; }
 
@@ -257,7 +235,7 @@ static void udp_trigger_task(void *arg)
         if (n > 0)
         {
             buf[n] = '\0';
-            if (0 == strncmp(buf, "CAPTURE", 7))
+            if (cam_is_trigger(buf))
             {
                 ESP_LOGI(TAG, "UDP trigger received");
                 xSemaphoreGive(g_trigger_sem);

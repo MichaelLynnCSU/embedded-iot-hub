@@ -27,7 +27,7 @@ target_compile_options(test_motor PRIVATE -iquote ${STUB_DIR})
 target_include_directories(test_motor PRIVATE
     # Stubs first -- shadow real ESP-IDF / FreeRTOS headers
     ${STUB_DIR}
-    ${STUB_DIR}/drivers
+    ${STUB_DIR}
     ${STUB_DIR}/freertos
     # cJSON header
     ${CMAKE_CURRENT_SOURCE_DIR}/../../managed_components/espressif__cjson/cJSON
