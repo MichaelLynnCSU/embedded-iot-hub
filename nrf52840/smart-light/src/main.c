@@ -25,66 +25,21 @@
  *          RESETREAS read and cleared at very top of main() before any
  *          other code runs. Latched OR-history register -- must be
  *          explicitly cleared to prevent stale bits surviving across boots.
+ *
+ * \note    GPIO seam (2026-05-xx):
+ *          All GPIO access moved to light_hw_zephyr.c behind light_hw.h.
+ *          main.c has no GPIO or devicetree dependency.
+ *          relay_set() is a thin wrapper over light_hw_set() so ble_gatt.c
+ *          calling relay_set() requires no changes.
  ******************************************************************************/
 
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/devicetree.h>
 #include <zephyr/sys/printk.h>
 #include <nrf.h>
+#include "light_hw.h"
 #include "ble_gatt.h"
 #include "trinity_log.h"
 #include "main.h"
-
-#define RELAY_PORT  DT_NODELABEL(gpio0)
-#define LIGHT_NODE  DT_ALIAS(led0)
-
-static const struct gpio_dt_spec g_light = GPIO_DT_SPEC_GET(LIGHT_NODE, gpios);
-static const struct device       *g_relay_dev;
-
-/*----------------------------------------------------------------------------*/
-
-void relay_set(uint8_t state)
-{
-    gpio_pin_set(g_relay_dev, RELAY_PIN, state);
-    gpio_pin_set_dt(&g_light, state);
-}
-
-/*----------------------------------------------------------------------------*/
-
-static int gpio_init(void)
-{
-    g_relay_dev = DEVICE_DT_GET(RELAY_PORT);
-
-    if (!device_is_ready(g_relay_dev))
-    {
-        printk("[GPIO] Relay device not ready\n");
-        return -1;
-    }
-
-    if (gpio_pin_configure(g_relay_dev, RELAY_PIN, GPIO_OUTPUT_INACTIVE))
-    {
-        printk("[GPIO] Relay pin configure failed\n");
-        return -1;
-    }
-
-    if (!device_is_ready(g_light.port))
-    {
-        printk("[GPIO] Light LED not ready\n");
-        return -1;
-    }
-
-    if (gpio_pin_configure_dt(&g_light, GPIO_OUTPUT_INACTIVE))
-    {
-        printk("[GPIO] Light LED configure failed\n");
-        return -1;
-    }
-
-    printk("[GPIO] Light/Relay initialized (OFF)\n");
-    return 0;
-}
-
-/*----------------------------------------------------------------------------*/
 
 int main(void)
 {
@@ -105,7 +60,7 @@ int main(void)
     trinity_log_dump_previous();
 
     g_init_stage = TRINITY_STAGE_GPIO;
-    err = gpio_init();
+    err = light_hw_init();
     if (0 != err) { return err; }
 
     g_init_stage = TRINITY_STAGE_LOG_INIT;
