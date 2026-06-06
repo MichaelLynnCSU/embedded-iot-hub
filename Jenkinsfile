@@ -82,6 +82,41 @@ pipeline {
         }
 
         // ---------------------------------------------
+        // BeagleBone Inference - CUnit (system deps)
+        // ---------------------------------------------
+
+        stage('BeagleBone Inference Tests') {
+            steps {
+                sh '''
+                    cd beaglebone/inference/tests/unit
+                    rm -rf build && mkdir build && cd build
+                    cmake .. -DCMAKE_BUILD_TYPE=Debug \
+                             -DCMAKE_C_FLAGS="--coverage" \
+                             -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+                    make -j$(nproc)
+                    ctest -V
+                    gcovr --xml -o cobertura.xml \
+                        --root ${WORKSPACE} \
+                        --filter "${WORKSPACE}/beaglebone/inference/" \
+                        --exclude ".*/tests/.*" \
+                        --exclude ".*/CMakeFiles/.*" \
+                        .
+                '''
+            }
+            post {
+                always {
+                    junit 'beaglebone/inference/tests/unit/build/junit_inference.xml-Results.xml'
+                    recordCoverage(
+                        id: 'bb-inference',
+                        name: 'BeagleBone Inference',
+                        tools: [[parser: 'COBERTURA', pattern: 'beaglebone/inference/tests/unit/build/cobertura.xml']],
+                        sourceDirectories: [[path: 'beaglebone/inference']]
+                    )
+                }
+            }
+        }
+
+        // ---------------------------------------------
         // ESP32 Hub - Unity via FetchContent
         // ---------------------------------------------
 
@@ -111,6 +146,41 @@ pipeline {
                         name: 'ESP32 Hub',
                         tools: [[parser: 'COBERTURA', pattern: 'esp32-hub/tests/unit/build/cobertura.xml']],
                         sourceDirectories: [[path: 'esp32-hub']]
+                    )
+                }
+            }
+        }
+
+        // ---------------------------------------------
+        // ESP32-CAM - Unity via FetchContent
+        // ---------------------------------------------
+
+        stage('ESP32-CAM Tests') {
+            steps {
+                sh '''
+                    cd esp32-cam/tests/unit
+                    rm -rf build && mkdir build && cd build
+                    cmake .. -DCMAKE_BUILD_TYPE=Debug \
+                             -DCMAKE_C_FLAGS="--coverage" \
+                             -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+                    make -j$(nproc)
+                    ctest -V
+                    gcovr --xml -o cobertura.xml \
+                        --root ${WORKSPACE} \
+                        --filter "${WORKSPACE}/esp32-cam/" \
+                        --exclude ".*/tests/.*" \
+                        --exclude ".*/CMakeFiles/.*" \
+                        --exclude ".*/unity/.*" \
+                        .
+                '''
+            }
+            post {
+                always {
+                    recordCoverage(
+                        id: 'esp32-cam',
+                        name: 'ESP32-CAM',
+                        tools: [[parser: 'COBERTURA', pattern: 'esp32-cam/tests/unit/build/cobertura.xml']],
+                        sourceDirectories: [[path: 'esp32-cam']]
                     )
                 }
             }
@@ -232,10 +302,6 @@ pipeline {
                 }
             }
             steps {
-                // Install both the 32-bit compiler toolchain AND the 32-bit
-                // kernel headers that native_sim needs for <asm/errno.h>.
-                // Without linux-libc-dev:i386 the -m32 build fails even when
-                // gcc-multilib is present.
                 sh '''
                     PKGS_NEEDED=""
                     dpkg -l gcc-multilib   > /dev/null 2>&1 || PKGS_NEEDED="$PKGS_NEEDED gcc-multilib g++-multilib"
