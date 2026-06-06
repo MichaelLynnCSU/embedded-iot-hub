@@ -137,3 +137,16 @@ export ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4
 west update
 west zephyr-export
 ```
+
+## CI Build Notes
+
+### Gitignored files force-added for CI
+Some files are gitignored for local dev but required for Jenkins CI builds.
+They are committed with `git add -f` and must be re-force-added if regenerated:
+
+- `esp32-hub/tests/unit/stubs/network_config.h`
+  Stub with fake values (no real IPs/endpoints). Real file is gitignored.
+
+- `esp32c3/idf/motor/managed_components/espressif__cjson/cJSON/cJSON.c`
+- `esp32c3/idf/motor/managed_components/espressif__cjson/cJSON/cJSON.h`
+  IDF managed component. Re-add if `idf.py` regenerates managed_components.
