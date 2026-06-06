@@ -74,3 +74,6 @@ float aws_get_ki(void)       { return g_stub_ki;       }
 float aws_get_kd(void)       { return g_stub_kd;       }
 int   aws_get_setpoint(void) { return g_stub_setpoint; }
 int   uart_get_avg_temp(void){ return g_stub_avg_temp; }
+
+/* Controllable tick source for slot table time-based tests */
+uint32_t g_stub_tick_ms = 0;

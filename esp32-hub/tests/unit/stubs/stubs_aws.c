@@ -46,3 +46,6 @@ int   g_cjson_setpoint_found = 1;
 int   g_cjson_light_found    = 1;
 int   g_cjson_avg_temp_found = 1;
 void ble_send_light_command(uint8_t s) { (void)s; }
+
+/* Controllable tick source */
+uint32_t g_stub_tick_ms = 0;

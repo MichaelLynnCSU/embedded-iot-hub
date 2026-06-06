@@ -12,7 +12,15 @@
 #include "pir_window.h"
 
 
-void setUp(void) {}
+extern uint32_t g_stub_tick_ms;
+
+void setUp(void)
+{
+    g_stub_tick_ms = 0;
+    ble_pir_preinit();
+    ble_reed_preinit();
+    ble_temp_preinit();
+}
 void tearDown(void) {}
 
 /******************************************************************************
@@ -765,6 +773,30 @@ void test_ble_pir_expire_no_crash_on_empty_table(void)
     ble_expire_pir_slots();
     TEST_ASSERT_EQUAL_INT(0, ble_pir_get_count());
 }
+void test_ble_pir_expire_active_to_offline(void)
+{
+    uint8_t mfg[8] = {0xAB, 0x00, 0,0,0,1, 70, 0};
+    uint8_t mac[6] = {0x11,0x22,0x33,0x44,0x55,0x66};
+    g_stub_tick_ms = 1000u;
+    ble_pir_handle(mfg, 8, mac, "PIR_Motion");
+    g_stub_tick_ms = 1000u + PIR_OFFLINE_MS + 1000u;
+    ble_expire_pir_slots();
+    /* OFFLINE -- slot still visible */
+    TEST_ASSERT_EQUAL_INT(1, ble_pir_get_count());
+}
+
+void test_ble_pir_expire_offline_to_empty(void)
+{
+    uint8_t mfg[8] = {0xAB, 0x00, 0,0,0,1, 70, 0};
+    uint8_t mac[6] = {0x11,0x22,0x33,0x44,0x55,0x66};
+    g_stub_tick_ms = 1000u;
+    ble_pir_handle(mfg, 8, mac, "PIR_Motion");
+    g_stub_tick_ms = 1000u + PIR_REMOVE_MS + 1000u;
+    ble_expire_pir_slots();
+    /* EMPTY -- slot cleared */
+    TEST_ASSERT_EQUAL_INT(0, ble_pir_get_count());
+}
+
 
 /******************************************************************************
  * ble_reed -- slot table bounds and basic behaviour
@@ -843,6 +875,46 @@ void test_ble_reed_expire_no_crash_on_empty_table(void)
     ble_expire_reed_slots();
     TEST_ASSERT_EQUAL_INT(0, ble_get_reed_count());
 }
+void test_ble_reed_expire_active_to_offline(void)
+{
+    uint8_t mfg[3] = {0xAC, 0x00, 70};
+    uint8_t mac[6] = {0x11,0x22,0x33,0x44,0x55,0x66};
+    g_stub_tick_ms = 1000u;
+    ble_reed_handle(mfg, 3, mac, "ReedSensor1");
+    g_stub_tick_ms = 1000u + REED_OFFLINE_MS + 1000u;
+    ble_expire_reed_slots();
+    /* OFFLINE -- slot still visible */
+    TEST_ASSERT_EQUAL_INT(1, ble_get_reed_count());
+}
+
+void test_ble_reed_expire_offline_to_empty(void)
+{
+    uint8_t mfg[3] = {0xAC, 0x00, 70};
+    uint8_t mac[6] = {0x11,0x22,0x33,0x44,0x55,0x66};
+    g_stub_tick_ms = 1000u;
+    ble_reed_handle(mfg, 3, mac, "ReedSensor1");
+    g_stub_tick_ms = 1000u + REED_REMOVE_MS + 1000u;
+    ble_expire_reed_slots();
+    /* EMPTY -- slot cleared */
+    TEST_ASSERT_EQUAL_INT(0, ble_get_reed_count());
+}
+
+void test_ble_reed_recover_offline_to_active(void)
+{
+    uint8_t mfg[3] = {0xAC, 0x00, 70};
+    uint8_t mac[6] = {0x11,0x22,0x33,0x44,0x55,0x66};
+    g_stub_tick_ms = 1000u;
+    ble_reed_handle(mfg, 3, mac, "ReedSensor1");
+    /* Go offline */
+    g_stub_tick_ms = 1000u + REED_OFFLINE_MS + 1000u;
+    ble_expire_reed_slots();
+    TEST_ASSERT_EQUAL_INT(1, ble_get_reed_count());
+    /* Recover -- new adv received */
+    g_stub_tick_ms = 1000u + REED_OFFLINE_MS + 2000u;
+    ble_reed_handle(mfg, 3, mac, "ReedSensor1");
+    TEST_ASSERT_EQUAL_INT(1, ble_get_reed_count());
+}
+
 
 void test_ble_reed_two_different_macs_fill_two_slots(void)
 {
@@ -955,6 +1027,30 @@ void test_ble_temp_expire_no_crash_on_empty_table(void)
     ble_expire_temp_slots();
     TEST_ASSERT_EQUAL_INT(0, ble_get_temp_count());
 }
+void test_ble_temp_expire_active_to_offline(void)
+{
+    uint8_t mfg[4] = {0xAE, 0xFD, 0x00, 60};
+    uint8_t mac[6] = {0x11,0x22,0x33,0x44,0x55,0x66};
+    g_stub_tick_ms = 1000u;
+    ble_temp_handle(mfg, 4, mac, "TempSensor1");
+    g_stub_tick_ms = 1000u + TEMP_OFFLINE_MS + 1000u;
+    ble_expire_temp_slots();
+    /* OFFLINE -- slot still visible */
+    TEST_ASSERT_EQUAL_INT(1, ble_get_temp_count());
+}
+
+void test_ble_temp_expire_offline_to_empty(void)
+{
+    uint8_t mfg[4] = {0xAE, 0xFD, 0x00, 60};
+    uint8_t mac[6] = {0x11,0x22,0x33,0x44,0x55,0x66};
+    g_stub_tick_ms = 1000u;
+    ble_temp_handle(mfg, 4, mac, "TempSensor1");
+    g_stub_tick_ms = 1000u + TEMP_REMOVE_MS + 1000u;
+    ble_expire_temp_slots();
+    /* EMPTY -- slot cleared */
+    TEST_ASSERT_EQUAL_INT(0, ble_get_temp_count());
+}
+
 
 void test_ble_temp_two_different_macs_fill_two_slots(void)
 {
@@ -1188,5 +1284,12 @@ int main(void)
     RUN_TEST(test_ble_lock_update_adv_state_zero);
     RUN_TEST(test_ble_lock_send_command_not_connected_queues);
 
+    RUN_TEST(test_ble_pir_expire_active_to_offline);
+    RUN_TEST(test_ble_pir_expire_offline_to_empty);
+    RUN_TEST(test_ble_reed_expire_active_to_offline);
+    RUN_TEST(test_ble_reed_expire_offline_to_empty);
+    RUN_TEST(test_ble_reed_recover_offline_to_active);
+    RUN_TEST(test_ble_temp_expire_active_to_offline);
+    RUN_TEST(test_ble_temp_expire_offline_to_empty);
     return UNITY_END();
 }
