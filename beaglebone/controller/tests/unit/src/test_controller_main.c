@@ -221,7 +221,7 @@ void test_cmd_unknown_large(void)
  ******************************************************************************/
 void test_device_count(void)
 {
-    CU_ASSERT_EQUAL(DEVICE_COUNT, 6);
+    CU_ASSERT_EQUAL(DEVICE_COUNT, 9);
 }
 
 void test_alert_buf_size(void)
