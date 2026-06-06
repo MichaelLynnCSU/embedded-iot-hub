@@ -3,6 +3,7 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(smart_lock)
 target_sources(app PRIVATE
     src/main.c
+    src/lock_hw_zephyr.c
     src/ble_gatt.c
     src/motor.c
     src/battery.c

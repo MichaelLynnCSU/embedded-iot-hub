@@ -33,11 +33,11 @@
  ******************************************************************************/
 
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/printk.h>
 #include <nrf.h>
+#include "lock_hw.h"
 #include "ble_gatt.h"
 #include "motor.h"
 #include "battery.h"
@@ -46,9 +46,6 @@
 
 LOG_MODULE_REGISTER(smartlock_main, LOG_LEVEL_DBG);
 
-#define LIGHT_NODE  DT_ALIAS(led0)
-
-static const struct gpio_dt_spec g_led = GPIO_DT_SPEC_GET(LIGHT_NODE, gpios);
 static bool     g_nvs_available = false;
 static uint8_t  g_lock_state    = 0;
 
@@ -88,8 +85,8 @@ int main(void)
 
     g_init_stage = TRINITY_STAGE_GPIO;
 
-    if (!device_is_ready(g_led.port)) { LOG_ERR("LED not ready"); return -ENODEV; }
-    gpio_pin_configure_dt(&g_led, GPIO_OUTPUT_INACTIVE);
+    err = lock_hw_init();
+    if (0 != err) { return err; }
 
     err = motor_init();
     if (0 != err) { return err; }
@@ -129,7 +126,7 @@ int main(void)
     }
     trinity_wdt_kick();
 
-    gpio_pin_set_dt(&g_led, g_lock_state ? 1 : 0);
+    lock_hw_set_led(g_lock_state ? 1 : 0);
 
     g_init_stage = TRINITY_STAGE_LOG_INIT;
 
@@ -150,8 +147,6 @@ int main(void)
 
     g_init_stage = TRINITY_STAGE_BT_ENABLE;
 
-    /* Push NVS-loaded state and initial battery into BLE layer before
-     * ble_gatt_init() starts advertising so first advertisement is correct. */
     ble_set_lock_state(g_lock_state);
     ble_set_batt(soc);
 
