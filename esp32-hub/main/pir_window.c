@@ -83,7 +83,7 @@ void pir_window_update(int slot, uint32_t now_ms, int occ)
 
    /* Occupied for duration of hold after last threshold crossing */
    if ((g_pir_last_hold_ms[slot] > 0u) &&
-       ((now_ms - g_pir_last_hold_ms[slot]) <= hold_ms))
+       ((now_ms - g_pir_last_hold_ms[slot]) < hold_ms))
    {
       g_pir_occupied[slot] = 1;
    }
