@@ -1,6 +1,8 @@
+#include "motor_sm.h"
 #include "unity.h"
 #include "hub_logic.h"
 #include "pir_window.h"
+
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -433,6 +435,176 @@ void test_pir_window_slots_independent(void)
     TEST_ASSERT_EQUAL_INT(0, pir_window_get_occupied(1));
 }
 
+/******************************************************************************
+ * config.h constants -- PIR/temp slot table, PI defaults, PWM ceiling
+ ******************************************************************************/
+void test_pir_name_prefix(void)
+{
+    TEST_ASSERT_EQUAL_STRING("PIR_Motion", PIR_NAME_PREFIX);
+}
+
+void test_pir_name_prefix_len(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(10u, PIR_NAME_PREFIX_LEN);
+}
+
+void test_pir_offline_ms(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(150000u, PIR_OFFLINE_MS);
+}
+
+void test_pir_remove_ms(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(3600000u, PIR_REMOVE_MS);
+}
+
+void test_pir_offline_s(void)
+{
+    TEST_ASSERT_EQUAL_INT(300, PIR_OFFLINE_S);
+}
+
+void test_max_temps(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(4u, MAX_TEMPS);
+}
+
+void test_temp_name_prefix(void)
+{
+    TEST_ASSERT_EQUAL_STRING("TempSensor", TEMP_NAME_PREFIX);
+}
+
+void test_temp_name_prefix_len(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(10u, TEMP_NAME_PREFIX_LEN);
+}
+
+void test_temp_offline_ms(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(150000u, TEMP_OFFLINE_MS);
+}
+
+void test_temp_remove_ms(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(3600000u, TEMP_REMOVE_MS);
+}
+
+void test_pwm_duty_max(void)
+{
+    TEST_ASSERT_EQUAL_INT(1023, PWM_DUTY_MAX);
+}
+
+void test_default_aws_kp(void)
+{
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 1.0f, DEFAULT_AWS_KP);
+}
+
+void test_default_aws_ki(void)
+{
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.05f, DEFAULT_AWS_KI);
+}
+
+void test_default_aws_kd(void)
+{
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, DEFAULT_AWS_KD);
+}
+
+void test_default_aws_setpoint(void)
+{
+    TEST_ASSERT_EQUAL_INT(25, DEFAULT_AWS_SETPOINT);
+}
+
+/******************************************************************************
+ * motor_sm -- state machine transitions
+ ******************************************************************************/
+static void motor_sm_force_idle(void)
+{
+    bool c = false, d = false;
+    /* Drive to RUNNING then past full min-run and cooldown to get back to IDLE */
+    uint32_t t = 9000000u; /* far future -- avoids colliding with other tests */
+    run_motor_sm(50.0f, t, &c, &d);
+    run_motor_sm(0.0f,  t + MIN_RUN_MS + 1u, &c, &d);
+    run_motor_sm(0.0f,  t + MIN_RUN_MS + (5UL*60UL*1000UL) + 1u, &c, &d);
+}
+
+void test_motor_sm_initial_state_is_idle(void)
+{
+    motor_sm_force_idle();
+    TEST_ASSERT_EQUAL_UINT8(MOTOR_IDLE, motor_sm_get_state());
+}
+
+void test_motor_sm_idle_zero_pwm_stays_idle(void)
+{
+    motor_sm_force_idle();
+    bool connect = false, disconnect = false;
+    run_motor_sm(0.0f, 100000u, &connect, &disconnect);
+    TEST_ASSERT_EQUAL_UINT8(MOTOR_IDLE, motor_sm_get_state());
+    TEST_ASSERT_FALSE(connect);
+}
+
+void test_motor_sm_idle_positive_pwm_starts_running(void)
+{
+    motor_sm_force_idle();
+    bool connect = false, disconnect = false;
+    float pwm = run_motor_sm(50.0f, 200000u, &connect, &disconnect);
+    TEST_ASSERT_EQUAL_UINT8(MOTOR_RUNNING, motor_sm_get_state());
+    TEST_ASSERT_TRUE(connect);
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 50.0f, pwm);
+}
+
+void test_motor_sm_running_min_run_enforced(void)
+{
+    motor_sm_force_idle();
+    bool connect = false, disconnect = false;
+    uint32_t t = 300000u;
+    run_motor_sm(50.0f, t, &connect, &disconnect);
+    float pwm = run_motor_sm(0.0f, t + 1000u, &connect, &disconnect);
+    TEST_ASSERT_EQUAL_UINT8(MOTOR_RUNNING, motor_sm_get_state());
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, pwm);
+}
+
+void test_motor_sm_running_to_cooldown_after_min_run(void)
+{
+    motor_sm_force_idle();
+    bool connect = false, disconnect = false;
+    uint32_t t = 400000u;
+    run_motor_sm(50.0f, t, &connect, &disconnect);
+    float pwm = run_motor_sm(0.0f, t + MIN_RUN_MS + 1u, &connect, &disconnect);
+    TEST_ASSERT_EQUAL_UINT8(MOTOR_COOLDOWN, motor_sm_get_state());
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, pwm);
+}
+
+void test_motor_sm_cooldown_to_idle_after_cooldown_ms(void)
+{
+    motor_sm_force_idle();
+    bool connect = false, disconnect = false;
+    uint32_t t = 500000u;
+    run_motor_sm(50.0f, t, &connect, &disconnect);
+    run_motor_sm(0.0f,  t + MIN_RUN_MS + 1u, &connect, &disconnect);
+    run_motor_sm(0.0f,  t + MIN_RUN_MS + (5UL*60UL*1000UL) + 1u,
+                 &connect, &disconnect);
+    TEST_ASSERT_EQUAL_UINT8(MOTOR_IDLE, motor_sm_get_state());
+    TEST_ASSERT_TRUE(disconnect);
+}
+
+void test_motor_sm_cooldown_pwm_is_zero(void)
+{
+    motor_sm_force_idle();
+    bool connect = false, disconnect = false;
+    uint32_t t = 600000u;
+    run_motor_sm(50.0f, t, &connect, &disconnect);
+    run_motor_sm(0.0f,  t + MIN_RUN_MS + 1u, &connect, &disconnect);
+    float pwm = run_motor_sm(0.0f, t + MIN_RUN_MS + 2u, &connect, &disconnect);
+    TEST_ASSERT_EQUAL_UINT8(MOTOR_COOLDOWN, motor_sm_get_state());
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, pwm);
+}
+
+void test_motor_sm_timing_constants(void)
+{
+    /* MIN_RUN_MS = 10 min, COOLDOWN_MS = 5 min -- from motor_sm.h */
+    TEST_ASSERT_EQUAL_UINT32(600000u,  MIN_RUN_MS);
+    TEST_ASSERT_EQUAL_UINT32(300000u,  (5UL * 60UL * 1000UL));
+}
+
 /*----------------------------------------------------------------------------*/
 
 int main(void)
@@ -507,6 +679,36 @@ int main(void)
     RUN_TEST(test_pir_window_hold_expires);
     RUN_TEST(test_pir_window_occ_zero_does_not_add_event);
     RUN_TEST(test_pir_window_slots_independent);
+    /* config.h -- PIR slot table */
+    RUN_TEST(test_pir_name_prefix);
+    RUN_TEST(test_pir_name_prefix_len);
+    RUN_TEST(test_pir_offline_ms);
+    RUN_TEST(test_pir_remove_ms);
+    RUN_TEST(test_pir_offline_s);
+
+    /* config.h -- temp slot table */
+    RUN_TEST(test_max_temps);
+    RUN_TEST(test_temp_name_prefix);
+    RUN_TEST(test_temp_name_prefix_len);
+    RUN_TEST(test_temp_offline_ms);
+    RUN_TEST(test_temp_remove_ms);
+
+    /* config.h -- PI defaults and PWM */
+    RUN_TEST(test_pwm_duty_max);
+    RUN_TEST(test_default_aws_kp);
+    RUN_TEST(test_default_aws_ki);
+    RUN_TEST(test_default_aws_kd);
+    RUN_TEST(test_default_aws_setpoint);
+
+    /* motor_sm */
+    RUN_TEST(test_motor_sm_initial_state_is_idle);
+    RUN_TEST(test_motor_sm_idle_zero_pwm_stays_idle);
+    RUN_TEST(test_motor_sm_idle_positive_pwm_starts_running);
+    RUN_TEST(test_motor_sm_running_min_run_enforced);
+    RUN_TEST(test_motor_sm_running_to_cooldown_after_min_run);
+    RUN_TEST(test_motor_sm_cooldown_to_idle_after_cooldown_ms);
+    RUN_TEST(test_motor_sm_cooldown_pwm_is_zero);
+    RUN_TEST(test_motor_sm_timing_constants);
 
     return UNITY_END();
 }
