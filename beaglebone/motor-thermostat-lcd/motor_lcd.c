@@ -188,8 +188,9 @@ int main(void)
          /* Line 1: motor online status and battery */
          if (batt_motor >= 0)
          {
-            snprintf(line1, sizeof(line1), "Mtr:%s B:%d%%",
-                     online ? "ON " : "OFF", batt_motor);
+            int b = (batt_motor > 100) ? 100 : batt_motor;
+            snprintf(line1, sizeof(line1), "Mtr:%s B:%3d%%",
+                     online ? "ON " : "OFF", b);
          }
          else
          {
