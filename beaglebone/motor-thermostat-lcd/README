@@ -1,0 +1,15 @@
+motor-thermostat-lcd
+====================
+HD44780 16x2 LCD showing average temperature and motor status for the
+ESP32C3 motor PID loop.
+
+This is NOT the smart home dashboard.
+The smart home dashboard is the STM32 blackpill running LVGL on an
+ILI9341 TFT display — see stm32-blackpill/User/Core/ui.c.
+
+Data source: POSIX shared memory /sensor_shm (data_controller must be running).
+IPC: pthread_mutex (shm_data->shm_mutex) — NOT the old shm_sem semaphore.
+
+Displays:
+  Line 0: PID Tmp:<avg_temp>C
+  Line 1: Mtr:<ON|OFF> B:<batt>%

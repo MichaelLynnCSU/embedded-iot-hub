@@ -64,7 +64,7 @@
 #include <semaphore.h>
 #include <stdint.h>
 #include <sqlite3.h>
-#include "ipc_lcd/commands.h"
+#include "cmd/commands.h"
 #include "shared_data.h"
 
 /******************************** CONSTANTS ***********************************/
