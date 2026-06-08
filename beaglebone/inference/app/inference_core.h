@@ -21,7 +21,6 @@
 /* Config constants                                                            */
 /*---------------------------------------------------------------------------*/
 
-#define LISTEN_PORT         9090
 #define MAX_JPEG_BYTES      500000
 #define PERSON_LABEL        "person"
 #define CONFIDENCE_THRESH   0.5f

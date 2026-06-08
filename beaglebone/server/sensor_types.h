@@ -92,6 +92,8 @@ struct SensorData
    int      lock_state;   /*!< smart lock state */
    long     timestamp;    /*!< Unix timestamp of reading */
    int      room_count;   /*!< number of valid room entries */
+   uint8_t  doorbell_pressed;    /*!< 1 = press received this frame          */
+   uint8_t  doorbell_device_id;  /*!< 0-3, which doorbell cam                */
 
    struct
    {

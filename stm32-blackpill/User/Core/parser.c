@@ -580,6 +580,34 @@ void parser_process_line(const char *p_line)
       return;
    }
 
+   /* DOORBELL:pressed,device_id */
+   if (0 == strcmp(p_id, "DOORBELL"))
+   {
+      char  tmp[UART_LINE_LEN] = {0};
+      char *p_tok              = NULL;
+      int   pressed            = 0;
+      int   device_id          = 0;
+
+      (void)strncpy(tmp, p_rest, sizeof(tmp) - 1u);
+      tmp[sizeof(tmp) - 1u] = '\0';
+
+      p_tok = strtok(tmp, ",");
+      if (NULL != p_tok) { (void)parse_int(p_tok, &pressed); }
+
+      p_tok = strtok(NULL, ",");
+      if (NULL != p_tok) { (void)parse_int(p_tok, &device_id); }
+
+      if (0 != pressed)
+      {
+         char dbg[48];
+         snprintf(dbg, sizeof(dbg), "[DOORBELL] pressed dev_id=%d\r\n", device_id);
+         log_enqueue(dbg);
+         ui_set_doorbell((uint8_t)pressed, (uint8_t)device_id);
+      }
+
+      return;
+   }
+
    /* STATE:... */
    if (0 == strcmp(p_id, "STATE"))
    {

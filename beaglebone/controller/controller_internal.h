@@ -249,6 +249,8 @@ struct SensorData
    int      lock_state;
    long     timestamp;
    int      room_count;
+   uint8_t  doorbell_pressed;
+   uint8_t  doorbell_device_id;
 
    struct
    {
@@ -303,6 +305,8 @@ struct LatestData
 
    struct TempSlotData temp_slots[MAX_TEMPS]; /*!< dynamic temp slot array */
    uint8_t             temp_count;            /*!< number of active temp slots */
+   uint8_t  doorbell_pressed;    /*!< 1 = press received this frame */
+   uint8_t  doorbell_device_id;  /*!< 0-3, which doorbell cam */
 };
 
 /**

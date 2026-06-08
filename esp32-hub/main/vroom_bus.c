@@ -75,11 +75,13 @@ BUS_SUBSCRIBER_T bus_register_subscriber(EventBits_t mask)
    sub.mb_temp  = xQueueCreate(1, sizeof(TEMP_PAYLOAD_T));
    sub.mb_motor    = xQueueCreate(1, sizeof(MOTOR_PAYLOAD_T));
    sub.mb_ble_temp = xQueueCreate(1, sizeof(BLE_TEMP_PAYLOAD_T));
+   sub.mb_doorbell = xQueueCreate(1, sizeof(DOORBELL_PAYLOAD_T));
 
-   if ((NULL == sub.events)   || (NULL == sub.mb_pir)  ||
-       (NULL == sub.mb_reed)  || (NULL == sub.mb_lock) ||
-       (NULL == sub.mb_light) || (NULL == sub.mb_temp) ||
-       (NULL == sub.mb_motor) || (NULL == sub.mb_ble_temp))
+   if ((NULL == sub.events)      || (NULL == sub.mb_pir)   ||
+       (NULL == sub.mb_reed)     || (NULL == sub.mb_lock)  ||
+       (NULL == sub.mb_light)    || (NULL == sub.mb_temp)  ||
+       (NULL == sub.mb_doorbell) || (NULL == sub.mb_motor) ||
+       (NULL == sub.mb_ble_temp))
    {
       ESP_LOGE(TAG, "Subscriber mailbox alloc failed — check heap");
       return sub;
@@ -337,4 +339,33 @@ void bus_publish_ble_temp(uint8_t slot, int16_t temp_decidegc, int batt)
       }
    }
    bus_signal(EVT_BLE_TEMP);
+}
+
+/******************************************************************************
+ * \brief Publish a doorbell press event to the bus.
+ *
+ * \param device_id    - 0-3, which doorbell cam.
+ * \param event_id     - Correlation key matching TCP JPEG header.
+ * \param timestamp_ms - Cam timestamp at button press.
+ *
+ * \return void
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+void bus_publish_doorbell(uint8_t  device_id,
+                          uint64_t event_id,
+                          uint64_t timestamp_ms)
+{
+   DOORBELL_PAYLOAD_T p = { .device_id    = device_id,
+                             .event_id     = event_id,
+                             .timestamp_ms = timestamp_ms };
+   int i = 0;
+   for (i = 0; i < g_sub_count; i++)
+   {
+      if (0 != (g_subscribers[i].mask & EVT_DOORBELL))
+      {
+         (void)xQueueOverwrite(g_subscribers[i].mb_doorbell, &p);
+      }
+   }
+   bus_signal(EVT_DOORBELL);
 }

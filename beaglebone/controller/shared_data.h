@@ -143,6 +143,9 @@ struct SharedSensorData
    int  command_result;      /*!< result of last command (0=success, -1=fail) */
    int  sequence;            /*!< increments on each shm update */
    long response_time_ms;    /*!< time taken to process last command ms */
+   uint8_t  doorbell_pressed;    /*!< 1 = press received, UI shows alert     */
+   uint8_t  doorbell_device_id;  /*!< 0-3, which doorbell cam                */
+   long     doorbell_timestamp;  /*!< Unix timestamp of last press            */
 };
 
 #endif /* INCLUDE_SHARED_DATA_H_ */

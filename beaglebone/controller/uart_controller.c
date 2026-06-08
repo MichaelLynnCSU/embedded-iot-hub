@@ -67,6 +67,14 @@
  *          so pop never races. This eliminates payload loss from the previous
  *          latest_data overwrite pattern and removes the fixed sleep() poll.
  *          shm_sem replaced by shm_data->shm_mutex throughout.
+ *
+ * \note    Doorbell fix (2026-06-07):
+ *          doorbell_pressed and doorbell_device_id are fields of shm_data
+ *          (shared memory), not latest_data. uart_push_thread() now reads
+ *          them from shm_data under shm_mutex and clears doorbell_pressed
+ *          after reading (one-shot). Previously they were read from
+ *          latest_data which is never populated with doorbell state,
+ *          causing DOORBELL:0,x to be sent every push cycle.
  ******************************************************************************/
 
 #include <termios.h>
@@ -557,7 +565,8 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                             const int16_t  *p_tc,
                             const int8_t   *p_tb,
                             const uint16_t *p_ta,
-                            const uint8_t  *p_tactive)
+                            const uint8_t  *p_tactive,
+                            int doorbell_pressed, int doorbell_device_id)
 
 {
    char msg[UART_MSG_BUF_SIZE] = {0};
@@ -647,6 +656,9 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                       i + 1, p_tc[i], p_tb[i], p_ta[i]);
    }
 
+   pos += snprintf(msg + pos, sizeof(msg) - pos,
+                "DOORBELL:%d,%d\n", doorbell_pressed, doorbell_device_id);
+
    uart_push_msg(msg, pos);
 }
 
@@ -666,25 +678,31 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
  *
  *          shm_data is read under shm_data->shm_mutex (process-shared),
  *          replacing the previous sem_timedwait(shm_sem) pattern.
+ *
+ *          Doorbell state is read from shm_data (not latest_data) and
+ *          cleared one-shot after reading so subsequent pushes send
+ *          DOORBELL:0,x until the next real press event.
  ******************************************************************************/
 void *uart_push_thread(void *p_arg)
 {
-   int      valid        = 0;
-   double   temp         = 0.0;
-   int      motion       = 0;
-   int      lgt          = 0;
-   int      lck          = 0;
-   uint16_t age_pir      = 0;
-   uint16_t age_lgt      = 0;
-   uint16_t age_lck      = 0;
-   int8_t   batt_pir     = -1;
-   int8_t   batt_lck     = -1;
-   int      batt_motor   = -1;
-   int      motor_online = 0;
-   int      reed_count   = 0;
-   int      pir_count    = 0;
-   int      frames_ready = 0; /**< frames drained from ring this wake */
-   UartFrame frame       = {0};
+   int      valid              = 0;
+   double   temp               = 0.0;
+   int      motion             = 0;
+   int      lgt                = 0;
+   int      lck                = 0;
+   uint16_t age_pir            = 0;
+   uint16_t age_lgt            = 0;
+   uint16_t age_lck            = 0;
+   int8_t   batt_pir           = -1;
+   int8_t   batt_lck           = -1;
+   int      batt_motor         = -1;
+   int      motor_online       = 0;
+   int      reed_count         = 0;
+   int      pir_count          = 0;
+   int      frames_ready       = 0; /**< frames drained from ring this wake */
+   int      doorbell_pressed   = 0; /**< snapshot from shm_data — one-shot  */
+   int      doorbell_device_id = 0; /**< snapshot from shm_data             */
+   UartFrame frame             = {0};
 
    uint8_t  r_state[MAX_REEDS];
    int8_t   r_batt[MAX_REEDS];
@@ -738,13 +756,20 @@ void *uart_push_thread(void *p_arg)
       LOG("[PUSH] Woke: %d UART frame(s) in burst", frames_ready);
 
       /* Read shm_data under the process-shared mutex.
-       * Replaces the previous sem_timedwait(shm_sem) pattern. */
+       * Doorbell fields live in shm_data — read and clear one-shot here.
+       * Clearing under the same lock prevents a race with the writer.  */
       pthread_mutex_lock(&shm_data->shm_mutex);
-      valid  = shm_data->data_valid;
-      temp   = shm_data->current_temp;
-      motion = shm_data->current_motion;
-      lgt    = shm_data->current_light;
-      lck    = shm_data->current_lock;
+      valid               = shm_data->data_valid;
+      temp                = shm_data->current_temp;
+      motion              = shm_data->current_motion;
+      lgt                 = shm_data->current_light;
+      lck                 = shm_data->current_lock;
+      doorbell_pressed    = shm_data->doorbell_pressed;
+      doorbell_device_id  = shm_data->doorbell_device_id;
+      if (0 != doorbell_pressed)
+      {
+         shm_data->doorbell_pressed = 0;  /* one-shot — clear after read */
+      }
       pthread_mutex_unlock(&shm_data->shm_mutex);
 
       if (!valid)
@@ -783,7 +808,8 @@ void *uart_push_thread(void *p_arg)
                      reed_count, motor_online,
                      r_state, r_batt, r_age,
                      pir_count, p_count, p_batt, p_age, p_active, p_occ,
-                     temp_count, t_decidegc, t_batt, t_age, t_active);
+                     temp_count, t_decidegc, t_batt, t_age, t_active,
+                     doorbell_pressed, doorbell_device_id);
    }
 
    LOG("[PUSH] Push thread exiting");

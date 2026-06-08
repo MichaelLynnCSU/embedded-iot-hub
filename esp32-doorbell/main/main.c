@@ -9,7 +9,10 @@
  *
  *          Flow:
  *          boot -> wifi up -> wait for GPIO13 button press
- *          button press -> capture JPEG -> connect to BBB:9091 -> send -> close
+ *          button press -> generate event_id
+ *                       -> send UDP event to hub (Lane A, authoritative)
+ *                       -> capture JPEG
+ *                       -> connect to BBB:9091 -> send header+JPEG -> close
  *
  *          TCP connection is opened per-trigger and closed after send.
  *          Button is debounced in software (DEBOUNCE_MS).
@@ -28,9 +31,16 @@
  *          GPIO_PULLUP_DISABLE on GPIO13. Internal ~45kΩ pullup caused LED
  *          to glow dimly when button not pressed. External LED+resistor
  *          circuit provides the pullup instead.
+ *
+ * \note    Dual-lane event architecture (2026-06-07):
+ *          Lane A: UDP event  → hub   (intent, authoritative)
+ *          Lane B: TCP JPEG   → BBB   (payload, best-effort)
+ *          Neither lane depends on the other for correctness.
+ *          event_id ties both lanes together as a join key at the BBB.
  ******************************************************************************/
 
 #include <string.h>
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -38,6 +48,7 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "esp_camera.h"
 #include "lwip/sockets.h"
@@ -51,9 +62,14 @@ static const char *TAG = "DOORBELL";
 /* Globals                                                                     */
 /*---------------------------------------------------------------------------*/
 
-static SemaphoreHandle_t g_trigger_sem = NULL;
-static int               g_tcp_sock    = -1;
-static bool              g_wifi_up     = false;
+static SemaphoreHandle_t g_trigger_sem  = NULL;
+static int               g_tcp_sock     = -1;
+static bool              g_wifi_up      = false;
+
+/* event_id generation state — set once after WiFi up */
+static uint32_t          g_mac_tail     = 0;
+static uint32_t          g_boot_ms      = 0;
+static uint16_t          g_event_seq    = 0;
 
 /*---------------------------------------------------------------------------*/
 /* Camera init                                                                 */
@@ -121,6 +137,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     {
         ip_event_got_ip_t *p_event = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&p_event->ip_info.ip));
+
+        /* Seed event_id state once — MAC stable after WiFi association */
+        uint8_t mac[6] = {0};
+        esp_wifi_get_mac(WIFI_IF_STA, mac);
+        g_mac_tail = ((uint32_t)mac[3] << 16) |
+                     ((uint32_t)mac[4] <<  8) |
+                     ((uint32_t)mac[5]);
+        g_boot_ms  = (uint32_t)(esp_timer_get_time() / 1000ULL);
+
         g_wifi_up = true;
     }
 }
@@ -149,7 +174,47 @@ static void wifi_init(void)
 }
 
 /*---------------------------------------------------------------------------*/
-/* TCP to BBB — non-blocking, drops frame if unreachable                       */
+/* Lane A — UDP event to hub (authoritative, fires before image capture)      */
+/*---------------------------------------------------------------------------*/
+
+static void send_udp_event(uint64_t event_id)
+{
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(HUB_UDP_PORT);
+    inet_pton(AF_INET, HUB_HOST, &addr.sin_addr);
+
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0)
+    {
+        ESP_LOGW(TAG, "UDP event: socket() failed");
+        return;
+    }
+
+    char    buf[160];
+    int     len;
+    uint64_t ts_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+
+    len = snprintf(buf, sizeof(buf),
+        "{\"device_id\":%d,\"device_type\":\"doorbell\","
+        "\"event_type\":\"press\","
+        "\"event_id\":\"%08lx%08lx\","
+        "\"timestamp_ms\":%llu}",
+        DOORBELL_ID,
+        (unsigned long)(event_id >> 32),
+        (unsigned long)(event_id & 0xFFFFFFFFUL),
+        (unsigned long long)ts_ms);
+
+    sendto(sock, buf, len, 0, (struct sockaddr *)&addr, sizeof(addr));
+    close(sock);
+
+    ESP_LOGI(TAG, "UDP event sent event_id=%08lx%08lx",
+             (unsigned long)(event_id >> 32),
+             (unsigned long)(event_id & 0xFFFFFFFFUL));
+}
+
+/*---------------------------------------------------------------------------*/
+/* Lane B — TCP JPEG to BBB (payload, best-effort)                            */
 /*---------------------------------------------------------------------------*/
 
 static bool tcp_connect_once(void)
@@ -176,12 +241,16 @@ static bool tcp_connect_once(void)
     return false;
 }
 
-static bool send_jpeg_to_bbb(camera_fb_t *p_fb)
+static bool send_jpeg_to_bbb(camera_fb_t *p_fb, uint64_t event_id)
 {
-    uint8_t hdr_buf[10];
-    cam_pack_header(hdr_buf, (uint16_t)DOORBELL_ID, (uint32_t)p_fb->len);
+    uint8_t hdr_buf[CAM_HEADER_SIZE];
+    cam_pack_header(hdr_buf, (uint8_t)DOORBELL_ID, event_id,
+                    (uint32_t)p_fb->len);
 
-    if (10 != send(g_tcp_sock, hdr_buf, 10, 0)) { return false; }
+    if (CAM_HEADER_SIZE != send(g_tcp_sock, hdr_buf, CAM_HEADER_SIZE, 0))
+    {
+        return false;
+    }
 
     size_t sent = 0;
     while (sent < p_fb->len)
@@ -191,7 +260,10 @@ static bool send_jpeg_to_bbb(camera_fb_t *p_fb)
         sent += (size_t)n;
     }
 
-    ESP_LOGI(TAG, "Sent JPEG %zu bytes (device_id=%d)", p_fb->len, DOORBELL_ID);
+    ESP_LOGI(TAG, "Sent JPEG %zu bytes event_id=%08lx%08lx",
+             p_fb->len,
+             (unsigned long)(event_id >> 32),
+             (unsigned long)(event_id & 0xFFFFFFFFUL));
     return true;
 }
 
@@ -241,7 +313,18 @@ static void capture_task(void *arg)
         /* Drain bounce */
         while (xSemaphoreTake(g_trigger_sem, 0) == pdTRUE) {}
 
-        ESP_LOGI(TAG, "Doorbell pressed — capturing JPEG");
+        ESP_LOGI(TAG, "Doorbell pressed — generating event");
+
+        /* Generate event_id — join key for both lanes */
+        uint64_t event_id = cam_make_event_id(g_mac_tail, g_boot_ms,
+                                               g_event_seq++);
+
+        /* Lane A — fire UDP event to hub immediately, before image capture.
+         * Hub correctness never depends on image delivery. */
+        send_udp_event(event_id);
+
+        /* Lane B — capture JPEG and push to BBB with event_id in header */
+        ESP_LOGI(TAG, "Capturing JPEG");
 
         camera_fb_t *p_fb = NULL;
         for (int i = 0; i < 5; i++)
@@ -275,9 +358,9 @@ static void capture_task(void *arg)
             continue;
         }
 
-        if (!send_jpeg_to_bbb(p_fb))
+        if (!send_jpeg_to_bbb(p_fb, event_id))
         {
-            ESP_LOGW(TAG, "Send failed");
+            ESP_LOGW(TAG, "JPEG send failed");
         }
 
         esp_camera_fb_return(p_fb);

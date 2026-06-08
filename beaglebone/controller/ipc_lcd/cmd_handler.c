@@ -323,6 +323,8 @@ static void process_sensor_frame(const struct SensorData *p_data)
    latest_data.batt_lck     = p_data->batt_lck;
    latest_data.batt_motor   = p_data->batt_motor;
    latest_data.motor_online = p_data->motor_online;
+   latest_data.doorbell_pressed   = p_data->doorbell_pressed;
+   latest_data.doorbell_device_id = p_data->doorbell_device_id;
 
    process_reed_slots(p_data);
    for (i = 0; i < MAX_PIRS; i++)
@@ -363,6 +365,17 @@ static void process_sensor_frame(const struct SensorData *p_data)
    }
 
    handle_get_latest(&auto_cmd);
+
+   if (p_data->doorbell_pressed)
+   {
+      pthread_mutex_lock(&shm_data->shm_mutex);
+      shm_data->doorbell_pressed   = 1;
+      shm_data->doorbell_device_id = p_data->doorbell_device_id;
+      shm_data->doorbell_timestamp = p_data->timestamp;
+      pthread_mutex_unlock(&shm_data->shm_mutex);
+      LOG("Doorbell press device_id=%d — shm updated", p_data->doorbell_device_id);
+   }
+
    update_shm_rooms(p_data);
 
    db_begin();

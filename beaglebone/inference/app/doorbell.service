@@ -1,0 +1,16 @@
+[Unit]
+Description=Doorbell Ingest and Inference Service
+After=network.target
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/opt/inference/app
+ExecStart=/opt/inference/app/doorbell_daemon
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -36,7 +36,7 @@
  * \note    BLE temp sensor (2026-06-02):
  *          EVT_BLE_TEMP event bit added. BLE_TEMP_PAYLOAD_T added.
  *          mb_ble_temp mailbox added to BUS_SUBSCRIBER_T.
- *          bus_publish_ble_temp() added. EVT_ALL_MASK widened to 0x3FF.
+ *          bus_publish_ble_temp() added. EVT_ALL_MASK widened to 0x7FF.
  ******************************************************************************/
 
 #ifndef INCLUDE_VROOM_BUS_H_
@@ -61,7 +61,8 @@
 #define EVT_TCP_DISCONNECTED (1 << 7) /**< TCP connection lost        */
 #define EVT_AWS_CONNECTED    (1 << 8) /**< AWS connection established */
 #define EVT_BLE_TEMP         (1 << 9) /**< BLE temperature sensor event */
-#define EVT_ALL_MASK         (0x3FF)  /**< mask of all event bits     */
+#define EVT_DOORBELL         (1 << 10) /**< doorbell press event      */
+#define EVT_ALL_MASK         (0x7FF)   /**< widen from 0x3FF          */
 
 /** \brief Maximum number of bus subscribers */
 #define BUS_MAX_SUBSCRIBERS  4  /**< increase if more consumers are added */
@@ -113,6 +114,14 @@ typedef struct
    int      batt;          /*!< battery SOC percent               */
 } BLE_TEMP_PAYLOAD_T;
 
+/** \brief Doorbell press bus payload. */
+typedef struct
+{
+   uint8_t  device_id;   /*!< 0-3, which doorbell cam     */
+   uint64_t event_id;    /*!< correlation key for BBB     */
+   uint64_t timestamp_ms;/*!< cam timestamp at press      */
+} DOORBELL_PAYLOAD_T;
+
 /** \brief Motor controller status bus payload. */
 typedef struct
 {
@@ -139,6 +148,7 @@ typedef struct
    QueueHandle_t      mb_temp;     /*!< private UART temp mailbox (depth 1)  */
    QueueHandle_t      mb_motor;    /*!< private motor mailbox    (depth 1)   */
    QueueHandle_t      mb_ble_temp; /*!< private BLE temp mailbox (depth 1)  */
+   QueueHandle_t      mb_doorbell; /*!< private doorbell mailbox (depth 1) */
 } BUS_SUBSCRIBER_T;
 
 /*************************** FUNCTION PROTOTYPES *****************************/
@@ -200,5 +210,14 @@ void bus_publish_motor(uint8_t online, int batt);
  *  \param batt         - Battery SOC percent.
  *  \return void */
 void bus_publish_ble_temp(uint8_t slot, int16_t temp_decidegc, int batt);
+
+/** \brief Publish a doorbell press event.
+ *  \param device_id   - 0-3, which doorbell cam.
+ *  \param event_id    - Correlation key matching TCP JPEG header.
+ *  \param timestamp_ms - Cam timestamp at button press.
+ *  \return void */
+void bus_publish_doorbell(uint8_t  device_id,
+                          uint64_t event_id,
+                          uint64_t timestamp_ms);
 
 #endif /* INCLUDE_VROOM_BUS_H_ */

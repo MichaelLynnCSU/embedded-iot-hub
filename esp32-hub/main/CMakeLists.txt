@@ -24,6 +24,7 @@ idf_component_register(
         "trinity_stats_idf.c"
         "trinity_panic_idf.c"
         "motor_server.c"
+        "doorbell_listener.c"
         "cam_trigger.c"
     INCLUDE_DIRS "."
     REQUIRES

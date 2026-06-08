@@ -435,6 +435,14 @@ void process_json(const char *p_json_body)
    {
       data.pir_occupied = (int8_t)json_object_get_int(p_obj);
    }
+   if (json_object_object_get_ex(p_root, "doorbell_pressed", &p_obj))
+   {
+      data.doorbell_pressed = (uint8_t)json_object_get_int(p_obj);
+   }
+   if (json_object_object_get_ex(p_root, "doorbell_device_id", &p_obj))
+   {
+      data.doorbell_device_id = (uint8_t)json_object_get_int(p_obj);
+   }
 
    if (json_object_object_get_ex(p_root, "batt_lck", &p_obj))
    {
@@ -487,9 +495,10 @@ void process_json(const char *p_json_body)
 
    /* ---- Summary log ---- */
    log_msg("Parsed avg_temp=%.2f motion=%u light=%d lock=%d "
-           "pirs=%d pir_occ=%d motor_online=%d",
+           "pirs=%d pir_occ=%d motor_online=%d doorbell=%d dev=%d",
            data.avg_temp, data.motion_count,
            data.light_state, data.lock_state,
+           data.doorbell_pressed, data.doorbell_device_id,
            data.pir_count, data.pir_occupied,
            data.motor_online);
 

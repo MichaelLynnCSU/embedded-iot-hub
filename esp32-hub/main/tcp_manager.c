@@ -119,6 +119,8 @@ typedef struct
    uint32_t          motion_count;
    int               pir_batt;
    int               pir_occupied;
+   uint8_t           doorbell_pressed;  /* 1 = new press, cleared after send */
+   uint8_t           doorbell_device_id;
    uint8_t           light_state;
    uint8_t           lock_state;
    int               lock_batt;
@@ -141,6 +143,8 @@ static TCP_STATE_T g_state =
     .pir_batt     = -1,
     .motion_count = 0,
     .pir_occupied = 0,
+    .doorbell_pressed   = 0,
+    .doorbell_device_id = 0,
     .lock_batt    = -1,
     .motor_batt   = -1,
     .age_pir      = 0xFFFF,
@@ -246,6 +250,14 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
          g_state.temp_slots[t_slot].batt          = p_ble_temp.batt;
          g_state.temp_slots[t_slot].active        = true;
       }
+   }
+
+   /* ---- DOORBELL ---- */
+   DOORBELL_PAYLOAD_T p_doorbell;
+   if (pdTRUE == xQueueReceive(sub.mb_doorbell, &p_doorbell, 0))
+   {
+      g_state.doorbell_pressed   = 1;
+      g_state.doorbell_device_id = p_doorbell.device_id;
    }
 
    /* ---- snapshot BLE state after mailboxes drained ---- */
@@ -409,6 +421,8 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
    (void)cJSON_AddNumberToObject(p_root, "age_lck",      g_state.age_lck);
    (void)cJSON_AddNumberToObject(p_root, "batt_pir",     g_state.pir_batt);
    (void)cJSON_AddNumberToObject(p_root, "pir_occupied", g_state.pir_occupied);
+   (void)cJSON_AddNumberToObject(p_root, "doorbell_pressed",   g_state.doorbell_pressed);
+   (void)cJSON_AddNumberToObject(p_root, "doorbell_device_id", g_state.doorbell_device_id);
    (void)cJSON_AddNumberToObject(p_root, "batt_lck",     g_state.lock_batt);
    (void)cJSON_AddNumberToObject(p_root, "batt_motor",   g_state.motor_batt);
    (void)cJSON_AddNumberToObject(p_root, "motor_online", g_state.motor_online);
@@ -522,13 +536,13 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
       *p_bb_block_count = 0;
 
       ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u occ=%d lgt=%d lck=%d "
-                    "reeds=%d temps=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d",
+                    "reeds=%d temps=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d" "doorbell=%d",
                g_state.avg_temp, (unsigned)g_state.motion_count,
                g_state.pir_occupied,
                g_state.light_state, g_state.lock_state, g_state.reed_count,
                g_state.temp_count,
                (int)g_state.motor_online, g_state.motor_batt,
-               g_state.pir_batt, g_state.lock_batt);
+               g_state.pir_batt, g_state.lock_batt, g_state.doorbell_pressed);
 
       for (i = 0; i < g_state.pir_count; i++)
       {
@@ -541,6 +555,8 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
                   g_state.pir_slots[i].occupied);
       }
    }
+   /* Clear doorbell pulse — one-shot, reset after each send */
+   g_state.doorbell_pressed = 0;
    cJSON_free(p_msg);
 }
 

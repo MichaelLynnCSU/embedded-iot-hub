@@ -129,6 +129,8 @@ typedef struct _HOME_STATE_X
    int8_t   lock_batt;
    uint8_t  motor;
    int      motor_batt;
+   uint8_t  doorbell;
+   uint8_t  doorbell_device_id;
 } HOME_STATE_X;
 
 /************************ STATIC (PRIVATE) DATA *****************************/
@@ -139,6 +141,8 @@ static HOME_STATE_X g_home = {
    .lock_batt      = -1,
    .motor_batt     = -1,
    .temp_slot_batt = {-1, -1, -1, -1},
+   .doorbell           = 0,
+   .doorbell_device_id = 0,
 };
 
 static uint32_t g_dev_last_seen[eDEV_COUNT];
@@ -753,26 +757,42 @@ void ui_update(void)
    /* HOME */
    if (g_current_view == eVIEW_HOME)
    {
-      uint8_t alert = 0u;
+      uint8_t alert    = 0u;
+      uint8_t doorbell = g_home.doorbell;  /* snapshot — one-shot */
 
-      for (i = 0u; i < g_pir_count_slots && i < (uint8_t)MAX_PIRS; i++)
+      /* Doorbell takes priority — show above PIR/reed alerts */
+      if (0u != doorbell)
       {
-         if (0u != g_home.pir_slot_occupied[i]) { alert = 1u; break; }
-      }
-      for (i = 0u; i < g_reed_count && i < (uint8_t)MAX_REEDS; i++)
-      {
-         if (0u != g_home.reed_state[i]) { alert = 1u; break; }
-      }
-
-      if (0u != alert)
-      {
-         lv_label_set_text(g_home_status_lbl, "! ALERT !");
-         lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0xFF4444u), 0);
+         char db_buf[32];
+         snprintf(db_buf, sizeof(db_buf), "DOORBELL %d",
+                  g_home.doorbell_device_id);
+         lv_label_set_text(g_home_status_lbl, db_buf);
+         lv_obj_set_style_text_color(g_home_status_lbl,
+                                     lv_color_hex(0xFFCC00u), 0);
+         g_home.doorbell = 0u;  /* clear after display — one-shot */
       }
       else
       {
-         lv_label_set_text(g_home_status_lbl, "HOME SECURE");
-         lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0x00FF66u), 0);
+         for (i = 0u; i < g_pir_count_slots && i < (uint8_t)MAX_PIRS; i++)
+         {
+            if (0u != g_home.pir_slot_occupied[i]) { alert = 1u; break; }
+         }
+         for (i = 0u; i < g_reed_count && i < (uint8_t)MAX_REEDS; i++)
+         {
+            if (0u != g_home.reed_state[i]) { alert = 1u; break; }
+         }
+         if (0u != alert)
+         {
+            lv_label_set_text(g_home_status_lbl, "! ALERT !");
+            lv_obj_set_style_text_color(g_home_status_lbl,
+                                        lv_color_hex(0xFF4444u), 0);
+         }
+         else
+         {
+            lv_label_set_text(g_home_status_lbl, "HOME SECURE");
+            lv_obj_set_style_text_color(g_home_status_lbl,
+                                        lv_color_hex(0x00FF66u), 0);
+         }
       }
 
       (void)snprintf(buf, sizeof(buf), "%uC  %u%%", g_home.temp, g_home.hum);
@@ -945,6 +965,11 @@ void ui_set_lock(uint8_t val)            { g_home.lock         = val; }
 void ui_set_lock_batt(int8_t val)        { g_home.lock_batt    = val; }
 void ui_set_motor(uint8_t val)           { g_home.motor        = val; }
 void ui_set_motor_batt(int val)          { g_home.motor_batt   = val; }
+void ui_set_doorbell(uint8_t pressed, uint8_t device_id)
+{
+   g_home.doorbell           = pressed;
+   g_home.doorbell_device_id = device_id;
+}
 
 void ui_set_pir_slot_count(uint8_t slot, uint32_t val)
 {

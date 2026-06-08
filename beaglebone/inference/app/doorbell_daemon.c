@@ -1,0 +1,325 @@
+/******************************************************************************
+ * \file doorbell_daemon.c
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ *
+ * \brief BeagleBone doorbell ingest daemon.
+ *
+ * \details TCP server on port 9091. Accepts connections from ESP32 doorbell
+ *          cams (up to MAX_DOORBELL_CAMS=4). Each connection sends a 20-byte
+ *          cam_header_t followed by a JPEG payload. Runs inference via the
+ *          shared inference_worker and saves results to /data/doorbell.
+ *
+ *          Wire protocol (port 9091):
+ *          [magic:4][version:1][device_id:1][reserved:2][event_id:8][jpeg_size:4]
+ *          followed immediately by jpeg_size bytes of JPEG payload.
+ *
+ *          Lane B — image payload path. Independent of Lane A (UDP event
+ *          to hub). event_id from header is the join key; it matches the
+ *          UDP envelope sent by the cam before this TCP connection.
+ *
+ *          Saved filename format:
+ *          /data/doorbell/<timestamp>_<person|noperson>_dev<N>_<event_id>_<conf>.jpg
+ *
+ * \note    One accept loop, one client at a time per-connection.
+ *          Doorbell is low-frequency (human-initiated), so a single-threaded
+ *          accept loop is sufficient. Extend to per-connection threads if
+ *          simultaneous multi-cam doorbell events become a requirement.
+ ******************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <errno.h>
+#include <time.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include "inference_worker.h"
+#include "inference_core.h"
+
+/******************************** CONFIG **************************************/
+#define MODEL_PATH        "/opt/inference/models/detect.tflite"
+#define LABEL_PATH        "/opt/inference/models/labelmap.txt"
+#define DOORBELL_DIR      "/data/doorbell"
+#define LOG_PATH          "/var/log/doorbell_daemon.log"
+#define LISTEN_PORT       9091
+#define CAM_MAGIC         0xCAFEBABEu
+#define CAM_HEADER_SIZE   20
+#define CAM_HEADER_VER    1
+#define MAX_DOORBELL_CAMS 4
+#define MAX_JPEG_BYTES    500000
+
+/******************************** GLOBALS *************************************/
+static volatile int  g_running   = 1;   /**< main loop run flag    */
+static FILE         *g_log       = NULL; /**< log file handle       */
+static int           g_server_fd = -1;  /**< TCP listen socket     */
+
+/******************************** LOGGING *************************************/
+static void log_msg(const char *fmt, ...)
+{
+   va_list   ap;
+   time_t    now = time(NULL);
+   char      ts[32];
+   struct tm tm_buf;
+
+   localtime_r(&now, &tm_buf);
+   strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
+
+   if (NULL != g_log)
+   {
+      fprintf(g_log, "[%s] ", ts);
+      va_start(ap, fmt);
+      vfprintf(g_log, fmt, ap);
+      va_end(ap);
+      fprintf(g_log, "\n");
+      fflush(g_log);
+   }
+
+   fprintf(stderr, "[%s] ", ts);
+   va_start(ap, fmt);
+   vfprintf(stderr, fmt, ap);
+   va_end(ap);
+   fprintf(stderr, "\n");
+}
+
+/******************************** SIGNAL **************************************/
+static void sig_handler(int sig)
+{
+   (void)sig;
+   g_running = 0;
+}
+
+/******************************** HEADER UNPACK *******************************/
+
+/**
+ * \brief Unpacked cam_header_t fields.
+ */
+typedef struct
+{
+   uint32_t magic;      /**< must equal CAM_MAGIC     */
+   uint8_t  version;    /**< header format version    */
+   uint8_t  device_id;  /**< doorbell cam ID (0-3)    */
+   uint64_t event_id;   /**< correlation key for hub  */
+   uint32_t jpeg_size;  /**< JPEG payload bytes       */
+} doorbell_header_t;
+
+/**
+ * \brief Unpack a 20-byte wire header into doorbell_header_t.
+ *
+ * \param buf  CAM_HEADER_SIZE byte input buffer.
+ * \param out  Output struct.
+ */
+static void unpack_header(const uint8_t *buf, doorbell_header_t *out)
+{
+   out->magic     = ((uint32_t)buf[0]  << 24) | ((uint32_t)buf[1]  << 16) |
+                    ((uint32_t)buf[2]  <<  8) | ((uint32_t)buf[3]);
+   out->version   = buf[4];
+   out->device_id = buf[5];
+   /* buf[6], buf[7] = reserved */
+   out->event_id  = ((uint64_t)buf[8]  << 56) | ((uint64_t)buf[9]  << 48) |
+                    ((uint64_t)buf[10] << 40) | ((uint64_t)buf[11] << 32) |
+                    ((uint64_t)buf[12] << 24) | ((uint64_t)buf[13] << 16) |
+                    ((uint64_t)buf[14] <<  8) | ((uint64_t)buf[15]);
+   out->jpeg_size = ((uint32_t)buf[16] << 24) | ((uint32_t)buf[17] << 16) |
+                    ((uint32_t)buf[18] <<  8) | ((uint32_t)buf[19]);
+}
+
+/******************************** TCP SERVER **********************************/
+static void tcp_server_init(void)
+{
+   struct sockaddr_in addr = {0};
+   int                opt  = 1;
+
+   addr.sin_family      = AF_INET;
+   addr.sin_port        = htons(LISTEN_PORT);
+   addr.sin_addr.s_addr = INADDR_ANY;
+
+   g_server_fd = socket(AF_INET, SOCK_STREAM, 0);
+   setsockopt(g_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+   bind(g_server_fd, (struct sockaddr *)&addr, sizeof(addr));
+   listen(g_server_fd, MAX_DOORBELL_CAMS);
+   log_msg("TCP server listening on port %d", LISTEN_PORT);
+}
+
+/******************************** CONNECTION HANDLER **************************/
+
+/**
+ * \brief Handle a single doorbell cam connection.
+ *
+ * \details Reads all complete header+JPEG frames from fd until connection
+ *          closes or an error occurs. Each frame runs inference and saves
+ *          to DOORBELL_DIR.
+ *
+ * \param client_fd  Accepted client socket fd.
+ * \param client_ip  Client IP string for logging.
+ */
+static void handle_connection(int client_fd, const char *client_ip)
+{
+   uint8_t            hdr_buf[CAM_HEADER_SIZE]; /**< raw header bytes       */
+   doorbell_header_t  hdr;                      /**< unpacked header        */
+   uint8_t           *jpeg     = NULL;          /**< JPEG payload buffer    */
+   ssize_t            n        = 0;             /**< recv return value      */
+   size_t             received = 0;             /**< bytes received so far  */
+   int                detected = 0;             /**< person detected flag   */
+   float              conf     = 0.0f;          /**< detection confidence   */
+   char               tag[48];                  /**< filename tag string    */
+   char               event_str[32];            /**< event_id hex string    */
+
+   /* keepalive */
+   int keepalive = 1, keepidle = 30, keepintvl = 5, keepcnt = 3;
+   setsockopt(client_fd, SOL_SOCKET,  SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+   setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE,  &keepidle,  sizeof(keepidle));
+   setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+   setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT,   &keepcnt,   sizeof(keepcnt));
+
+   log_msg("Connection from %s", client_ip);
+
+   /* Drain all frames until connection closes */
+   while (g_running)
+   {
+      /* Read 20-byte header */
+      n = recv(client_fd, hdr_buf, CAM_HEADER_SIZE, MSG_WAITALL);
+      if (n != CAM_HEADER_SIZE)
+      {
+         if (0 == n)
+            log_msg("Client %s disconnected", client_ip);
+         else
+            log_msg("Header recv error from %s: %s", client_ip, strerror(errno));
+         break;
+      }
+
+      unpack_header(hdr_buf, &hdr);
+
+      /* Validate magic */
+      if (hdr.magic != CAM_MAGIC)
+      {
+         log_msg("Bad magic 0x%08X from %s — dropping connection",
+                 hdr.magic, client_ip);
+         break;
+      }
+
+      /* Validate device_id */
+      if (hdr.device_id >= MAX_DOORBELL_CAMS)
+      {
+         log_msg("device_id %d out of range from %s — dropping",
+                 hdr.device_id, client_ip);
+         break;
+      }
+
+      /* Validate jpeg_size */
+      if (0 == hdr.jpeg_size || hdr.jpeg_size > MAX_JPEG_BYTES)
+      {
+         log_msg("Bad jpeg_size %u from %s — dropping",
+                 hdr.jpeg_size, client_ip);
+         break;
+      }
+
+      log_msg("Header: device_id=%d event_id=%08lx%08lx jpeg_size=%u",
+              hdr.device_id,
+              (unsigned long)(hdr.event_id >> 32),
+              (unsigned long)(hdr.event_id & 0xFFFFFFFFUL),
+              hdr.jpeg_size);
+
+      /* Receive JPEG payload */
+      jpeg = malloc(hdr.jpeg_size);
+      if (NULL == jpeg)
+      {
+         log_msg("ERROR: malloc %u bytes", hdr.jpeg_size);
+         break;
+      }
+
+      received = 0;
+      while (received < hdr.jpeg_size)
+      {
+         n = recv(client_fd, jpeg + received,
+                  hdr.jpeg_size - received, 0);
+         if (n <= 0)
+         {
+            log_msg("JPEG recv truncated from %s", client_ip);
+            free(jpeg);
+            jpeg = NULL;
+            break;
+         }
+         received += (size_t)n;
+      }
+
+      if (NULL == jpeg) { break; }
+
+      log_msg("Received JPEG %zu bytes device_id=%d", received, hdr.device_id);
+
+      /* Run inference via shared worker */
+      detected = 0;
+      conf     = 0.0f;
+      inference_worker_run(jpeg, received, &detected, &conf);
+      log_msg("Result: person=%d confidence=%.2f device_id=%d",
+              detected, conf, hdr.device_id);
+
+      /* Build tag: dev<N>_<event_id_hex> */
+      snprintf(event_str, sizeof(event_str), "%08lx%08lx",
+               (unsigned long)(hdr.event_id >> 32),
+               (unsigned long)(hdr.event_id & 0xFFFFFFFFUL));
+      snprintf(tag, sizeof(tag), "dev%d_%s", hdr.device_id, event_str);
+
+      /* Save to /data/doorbell */
+      inference_worker_save(jpeg, received, DOORBELL_DIR,
+                            detected, conf, tag);
+
+      free(jpeg);
+      jpeg = NULL;
+   }
+
+   if (NULL != jpeg) { free(jpeg); }
+   close(client_fd);
+}
+
+/******************************** MAIN ****************************************/
+int main(void)
+{
+   struct sockaddr_in client_addr;           /**< accepted client address  */
+   socklen_t          client_len;            /**< client address length    */
+   int                client_fd  = -1;      /**< accepted client fd       */
+   char               client_ip[INET_ADDRSTRLEN]; /**< client IP string   */
+
+   signal(SIGINT,  sig_handler);
+   signal(SIGTERM, sig_handler);
+
+   g_log = fopen(LOG_PATH, "a");
+   log_msg("doorbell_daemon starting on port %d", LISTEN_PORT);
+
+   if (inference_worker_init(MODEL_PATH, LABEL_PATH) < 0)
+   {
+      log_msg("ERROR: inference_worker_init failed");
+      return 1;
+   }
+
+   tcp_server_init();
+
+   while (g_running)
+   {
+      client_len = sizeof(client_addr);
+      client_fd  = accept(g_server_fd,
+                          (struct sockaddr *)&client_addr,
+                          &client_len);
+      if (client_fd < 0)
+      {
+         if (g_running) { log_msg("accept() error: %s", strerror(errno)); }
+         continue;
+      }
+
+      inet_ntop(AF_INET, &client_addr.sin_addr,
+                client_ip, sizeof(client_ip));
+
+      handle_connection(client_fd, client_ip);
+   }
+
+   log_msg("doorbell_daemon shutting down");
+   if (g_server_fd >= 0) { close(g_server_fd); }
+   inference_worker_shutdown();
+   if (NULL != g_log) { fclose(g_log); }
+   return 0;
+}

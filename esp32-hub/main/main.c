@@ -32,6 +32,7 @@
 #include "nvs_flash.h"
 #include "driver/uart.h"
 #include "config.h"
+#include "doorbell_listener.h"
 #include "ble_manager.h"
 #include "wifi_manager.h"
 #include "tcp_manager.h"
@@ -162,6 +163,9 @@ static void create_tasks(void)
                                STACK_SIZE_AWS_SEND, &g_aws_params, 1,
                                &g_aws_task_handle))
    { trinity_log_event("EVENT: TASK_FAIL | AWS\n"); }
+
+   vTaskDelay(pdMS_TO_TICKS(TASK_CREATION_DELAY_MS));
+   doorbell_listener_start(g_wifi_eg);
 
    ESP_LOGI(TAG, "All tasks created");
    ESP_LOGI(TAG, "Free heap after task creation: %lu bytes",

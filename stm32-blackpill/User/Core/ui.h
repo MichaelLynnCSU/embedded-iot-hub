@@ -129,6 +129,7 @@ void ui_set_lock(uint8_t val);
 void ui_set_lock_batt(int8_t val);
 void ui_set_motor(uint8_t val);
 void ui_set_motor_batt(int val);
+void ui_set_doorbell(uint8_t pressed, uint8_t device_id);
 
 uint8_t ui_get_dev_online(DEVICE_ID_E dev_id);
 
