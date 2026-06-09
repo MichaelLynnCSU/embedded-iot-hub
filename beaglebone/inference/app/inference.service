@@ -1,12 +1,10 @@
 [Unit]
 Description=Person Detection Inference Service
 After=network.target data-controller.service
-Requires=data-controller.service
 
 [Service]
 Type=simple
-User=debian
-WorkingDirectory=/opt/inference/app
+Environment=LD_LIBRARY_PATH=/opt/inference/lib
 ExecStart=/opt/inference/app/inference_daemon
 Restart=always
 RestartSec=10

@@ -20,6 +20,14 @@
  *          (UART_PUSH_INTERVAL_SEC) as a watchdog push if no frames
  *          arrive — preserving the existing heartbeat behavior.
  *
+ *          uart_update_frame — synchronous outbound push called from
+ *          sensor_frame_dispatch() on every TCP ingress frame. Builds
+ *          the full STM32 protocol payload directly from the frozen
+ *          snapshot. Replaces the async semaphore-wake model for the
+ *          TCP ingress path. uart_push_thread remains for UART-ingress
+ *          frames (PIR/LGT/LCK) which do not go through
+ *          sensor_frame_dispatch().
+ *
  *          UART frame format (inbound from STM32):
  *          <ID>:<value>[,<batt>]\n
  *          Valid IDs: PIR, LGT, LCK
@@ -35,6 +43,9 @@
  *          LGT:state\n
  *          LCK:state[,batt]\n
  *          MTR:online[,batt]\n
+ *          TEMP_COUNT:n\n
+ *          TEMP<n>:decidegc,batt,age\n (one per active temp slot)
+ *          DOORBELL:pressed,device_id\n
  *
  *          Lock state machine (LOCK_STATE_E from controller_logic.h):
  *          Inbound LCK frames drive logic_lock_transition(). Commands
@@ -53,7 +64,7 @@
  * \note    Per-slot OCC frames (2026-05-20):
  *          Single OCC:n global frame replaced by OCC<n>:n per-slot frames.
  *          snapshot_pir_slots() gains p_occ[] array from
- *          latest_data.pir_slots[i].occupied. build_and_push() emits
+ *          pir_slots[i].occupied. build_and_push() emits
  *          OCC1:n..OCC<pir_count>:n after the PIR<n> lines.
  *          STM32 parser.c handles OCC<1-4> mirroring PIR<1-4> pattern.
  *
@@ -70,21 +81,57 @@
  *
  * \note    Doorbell fix (2026-06-07):
  *          doorbell_pressed and doorbell_device_id are fields of shm_data
- *          (shared memory), not latest_data. uart_push_thread() now reads
- *          them from shm_data under shm_mutex and clears doorbell_pressed
- *          after reading (one-shot). Previously they were read from
- *          latest_data which is never populated with doorbell state,
- *          causing DOORBELL:0,x to be sent every push cycle.
+ *          (shared memory), not latest_data. uart_push_thread() and
+ *          uart_update_frame() both read doorbell state from shm_data under
+ *          shm_mutex and clear doorbell_pressed after reading (one-shot).
+ *          Previously they were read from latest_data which is never
+ *          populated with doorbell state, causing DOORBELL:0,x to be sent
+ *          every push cycle.
+ *
+ * \note    State registry migration (2026-06-09):
+ *          latest_data and data_mutex are now private to state_registry.c.
+ *          All direct accesses in this file have been removed:
+ *
+ *          uart_process_lock() — previously wrote latest_data.lock_state
+ *          and latest_data.batt_lck under data_mutex. Now calls
+ *          uart_stage_lock() which delegates to state_registry internally.
+ *          g_lock_mutex (private to this file) guards g_lock_state.
+ *          The two mutexes are never held simultaneously — no ABBA risk.
+ *
+ *          uart_parse_line() — previously wrote latest_data.motion_count,
+ *          latest_data.valid, and latest_data.light_state under data_mutex.
+ *          Now calls uart_stage_pir() / uart_stage_light() which delegate
+ *          to state_registry internally.
+ *
+ *          snapshot_reed_slots(), snapshot_pir_slots(), snapshot_temp_slots()
+ *          — all three deleted. uart_push_thread() and uart_parse_line() now
+ *          call get_snapshot() once to obtain an atomic struct copy, then
+ *          read directly from the snapshot local. All previous data_mutex
+ *          lock/unlock pairs in this file are gone.
+ *
+ *          uart_sync_lock_state() — previously locked data_mutex to write
+ *          g_lock_state. Now locks g_lock_mutex instead, which is the
+ *          correct owner for g_lock_state after the registry split.
+ *
+ *          uart_update_frame() — synchronous outbound push. Builds full
+ *          STM32 protocol payload from frozen snapshot via get_snapshot().
+ *          uart_write_string/uart_printf removed — uart_push_msg() is the
+ *          only send primitive in this file.
+ *
+ *          Net result: zero references to latest_data or data_mutex remain
+ *          in this translation unit.
  ******************************************************************************/
 
 #include <termios.h>
 #include "controller_internal.h"
 #include "controller_logic.h"
+#include "cmd/uart_staging.h"
+#include "cmd/state_registry.h"
 
 #define UART_PUSH_INTERVAL_SEC  5       /**< max wait in sem_timedwait — watchdog ceiling */
 #define UART_RETRY_DELAY_SEC    5       /**< delay before retrying UART open */
 #define UART_PUSH_DELAY_US      100000  /**< delay after write in microseconds */
-#define UART_MSG_BUF_SIZE       1024     /**< push message buffer size bytes */
+#define UART_MSG_BUF_SIZE       1024    /**< push message buffer size bytes */
 #define UART_STATE_UNKNOWN      0xFF    /**< sentinel for unknown reed state */
 #define UART_BAUD               B115200 /**< UART baud rate */
 
@@ -92,8 +139,14 @@ static int             g_uart_fd          = -1;  /**< UART file descriptor */
 static pthread_mutex_t g_uart_write_mutex =
    PTHREAD_MUTEX_INITIALIZER;                     /**< UART write mutex */
 
-/** \brief Lock state machine — owned here, protected by data_mutex */
-static LOCK_STATE_E g_lock_state = LOCK_STATE_LOCKED;
+/**
+ * \brief Lock state machine — owned here, protected by g_lock_mutex.
+ *        state_registry owns all other sensor state. g_lock_state is
+ *        separate because it drives the lock transition logic before
+ *        the resolved state is written back to the registry.
+ */
+static LOCK_STATE_E    g_lock_state = LOCK_STATE_LOCKED;
+static pthread_mutex_t g_lock_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /******************************************************************************
  * \brief Push one UartFrame onto the ring buffer.
@@ -118,7 +171,7 @@ static LOCK_STATE_E g_lock_state = LOCK_STATE_LOCKED;
  ******************************************************************************/
 void uart_ring_push(const UartFrame *p_frame)
 {
-   unsigned next_head = 0; /**< candidate new head index */
+   unsigned next_head = 0;
 
    pthread_mutex_lock(&g_uart_ring.mutex);
 
@@ -126,7 +179,6 @@ void uart_ring_push(const UartFrame *p_frame)
 
    if (next_head == g_uart_ring.tail)
    {
-      /* Ring full — advance tail to drop the oldest frame */
       LOG_WRN("[RING] Ring full — dropping oldest UART frame");
       g_uart_ring.tail = (g_uart_ring.tail + 1) & (UART_RING_SIZE - 1);
    }
@@ -155,7 +207,6 @@ int uart_ring_pop(UartFrame *p_frame)
 {
    if (g_uart_ring.tail == g_uart_ring.head)
    {
-      /* Should never happen — sem count and ring depth are always in sync */
       LOG_WRN("[RING] Pop called on empty ring — semaphore mismatch");
       return 0;
    }
@@ -168,6 +219,12 @@ int uart_ring_pop(UartFrame *p_frame)
 
 /******************************************************************************
  * \brief Open UART device at 115200 8N1.
+ *
+ * \param p_dev - Device path string (e.g. /dev/ttyS1).
+ *
+ * \return int - File descriptor on success, -1 on failure.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static int uart_open(const char *p_dev)
 {
@@ -218,6 +275,19 @@ static int uart_open(const char *p_dev)
 
 /******************************************************************************
  * \brief Process an inbound LCK frame through the lock state machine.
+ *
+ * \param val  - Parsed lock value from inbound UART frame.
+ * \param batt - Battery SOC percent, or -1 if absent.
+ *
+ * \return void
+ *
+ * \details g_lock_state is guarded by g_lock_mutex (private to this file).
+ *          After resolving the new lock state the result is written into
+ *          the registry via uart_stage_lock(), which acquires state_mutex
+ *          internally. The two mutexes are never held simultaneously,
+ *          eliminating any ABBA deadlock risk.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void uart_process_lock(int val, int batt)
 {
@@ -225,7 +295,7 @@ static void uart_process_lock(int val, int batt)
    LOCK_STATE_E    new_state = LOCK_STATE_LOCKED;
    const char     *p_ev      = NULL;
 
-   pthread_mutex_lock(&data_mutex);
+   pthread_mutex_lock(&g_lock_mutex);
 
    old_state = g_lock_state;
    new_state = logic_lock_transition(old_state, val);
@@ -237,15 +307,17 @@ static void uart_process_lock(int val, int batt)
          LOG("[LCK] Command rejected — motor moving (%s)",
              logic_lock_state_label(old_state));
       }
-      pthread_mutex_unlock(&data_mutex);
+      pthread_mutex_unlock(&g_lock_mutex);
       return;
    }
 
-   g_lock_state            = new_state;
-   latest_data.lock_state  = (int)new_state;
-   latest_data.batt_lck    = (int8_t)batt;
+   g_lock_state = new_state;
+   pthread_mutex_unlock(&g_lock_mutex);
 
-   pthread_mutex_unlock(&data_mutex);
+   /* Write resolved lock state into registry.
+    * uart_stage_lock() acquires state_mutex internally — must be called
+    * after g_lock_mutex is released to avoid holding both simultaneously. */
+   uart_stage_lock((int)new_state, batt);
 
    p_ev = logic_lock_event_str(old_state, new_state);
 
@@ -263,10 +335,20 @@ static void uart_process_lock(int val, int batt)
 /******************************************************************************
  * \brief Parse and process one inbound UART frame from STM32.
  *
- * \details After updating latest_data, pushes a UartFrame onto g_uart_ring
- *          and calls sem_post(&g_uart_frame_sem). The semaphore count
- *          therefore equals the number of frames in the ring buffer at all
- *          times, which is the invariant uart_push_thread relies on.
+ * \param p_line - Null-terminated line string read from UART device.
+ *
+ * \return void
+ *
+ * \details Parses <ID>:<value>[,<batt>] format. Stamps heartbeat, saves
+ *          to DB, routes to the appropriate staging function, pushes onto
+ *          g_uart_ring, signals g_uart_frame_sem, then pushes the updated
+ *          snapshot to shm via handle_get_latest().
+ *
+ *          All registry writes go through uart_stage_pir(),
+ *          uart_stage_light(), or uart_stage_lock() — no direct
+ *          state_registry calls here.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void uart_parse_line(const char *p_line)
 {
@@ -278,8 +360,8 @@ static void uart_parse_line(const char *p_line)
    int         val      = 0;
    int         batt     = -1;
    DEV_ID_E    idx      = (DEV_ID_E)-1;
-   UartFrame   frame    = {0};              /**< frame pushed to ring buffer */
-   struct CommandMsg auto_cmd = {.cmd = CMD_GET_LATEST};
+   UartFrame   frame    = {0};
+   struct LatestData snap;
 
    (void)strncpy(buf, p_line, sizeof(buf) - 1);
 
@@ -329,38 +411,43 @@ static void uart_parse_line(const char *p_line)
    {
       uart_process_lock(val, batt);
    }
-   else
+   else if (DEV_PIR == idx)
    {
-      pthread_mutex_lock(&data_mutex);
-
-      if (DEV_PIR == idx)
-      {
-         latest_data.motion_count = val;
-         latest_data.valid        = 1;
-      }
-      else if (DEV_LIGHT == idx)
-      {
-         latest_data.light_state = val;
-      }
-
-      pthread_mutex_unlock(&data_mutex);
+      uart_stage_pir(val);
+   }
+   else if (DEV_LIGHT == idx)
+   {
+      uart_stage_light(val);
    }
 
-   /* Push frame onto ring buffer then signal the consumer.
+   /* Push frame onto ring buffer then signal uart_push_thread.
     * Order is mandatory: push before post so the frame is visible
-    * to uart_push_thread the moment it wakes from sem_timedwait.
-    * Semaphore value after post == number of frames in the ring. */
+    * the moment uart_push_thread wakes from sem_timedwait.           */
    frame.idx  = idx;
    frame.val  = val;
    frame.batt = batt;
    uart_ring_push(&frame);
    sem_post(&g_uart_frame_sem);
 
-   handle_get_latest(&auto_cmd);
+   /* Push updated snapshot to shm immediately after staging so the
+    * LCD display sees UART-ingress updates without waiting for the
+    * next TCP frame cycle.                                           */
+   get_snapshot(&snap);
+   handle_get_latest(&snap);
 }
 
 /******************************************************************************
  * \brief Thread — reads line-framed UART data from STM32.
+ *
+ * \param p_arg - Unused thread argument.
+ *
+ * \return void*
+ *
+ * \details Owns g_uart_fd lifecycle. Reopens the device automatically
+ *          on read error or EOF. Character-by-character accumulation
+ *          into line[] with overflow protection.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void *uart_reader_thread(void *p_arg)
 {
@@ -431,6 +518,13 @@ void *uart_reader_thread(void *p_arg)
 
 /******************************************************************************
  * \brief Write a message to UART with mutex protection.
+ *
+ * \param p_msg - Pointer to message buffer.
+ * \param len   - Length in bytes to write.
+ *
+ * \return void
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void uart_push_msg(const char *p_msg, int len)
 {
@@ -453,99 +547,13 @@ static void uart_push_msg(const char *p_msg, int len)
 }
 
 /******************************************************************************
- * \brief Snapshot reed slot state from latest_data under data_mutex.
- ******************************************************************************/
-static void snapshot_reed_slots(uint8_t  *p_r_state,
-                                 int8_t   *p_r_batt,
-                                 uint16_t *p_r_age,
-                                 int      *p_reed_count)
-{
-   int i = 0;
-
-   pthread_mutex_lock(&data_mutex);
-
-   for (i = 0; i < MAX_REEDS; i++)
-   {
-      if (latest_data.reed_slots[i].active)
-      {
-         p_r_state[i]  = latest_data.reed_slots[i].state;
-         *p_reed_count = i + 1;
-      }
-      else
-      {
-         p_r_state[i] = UART_STATE_UNKNOWN;
-      }
-
-      p_r_batt[i] = latest_data.reed_slots[i].batt;
-      p_r_age[i]  = latest_data.reed_slots[i].age;
-   }
-
-   pthread_mutex_unlock(&data_mutex);
-}
-
-/******************************************************************************
- * \brief Snapshot PIR slot state from latest_data under data_mutex.
- ******************************************************************************/
-static void snapshot_pir_slots(uint32_t *p_count,
-                                int8_t   *p_batt,
-                                uint16_t *p_age,
-                                uint8_t  *p_active,
-                                int      *p_occ,
-                                int      *p_pir_count)
-{
-   int i = 0;
-
-   pthread_mutex_lock(&data_mutex);
-
-   *p_pir_count = 0;
-
-   for (i = 0; i < MAX_PIRS; i++)
-   {
-      p_count[i]  = latest_data.pir_slots[i].count;
-      p_batt[i]   = latest_data.pir_slots[i].batt;
-      p_age[i]    = latest_data.pir_slots[i].age;
-      p_active[i] = latest_data.pir_slots[i].active;
-      p_occ[i]    = latest_data.pir_slots[i].occupied;
-
-      if (latest_data.pir_slots[i].active)
-      {
-         *p_pir_count = latest_data.pir_count;
-      }
-   }
-
-   pthread_mutex_unlock(&data_mutex);
-}
-
-static void snapshot_temp_slots(int16_t  *p_count,
-                                 int8_t   *p_batt,
-                                 uint16_t *p_age,
-                                 uint8_t  *p_active,
-                                 int      *p_temp_count)
-{
-   int i = 0;
-
-   pthread_mutex_lock(&data_mutex);
-
-   *p_temp_count = 0;
-
-   for (i = 0; i < MAX_TEMPS; i++)
-   {
-      p_count[i]  = latest_data.temp_slots[i].temp_decidegc;
-      p_batt[i]   = latest_data.temp_slots[i].batt;
-      p_age[i]    = latest_data.temp_slots[i].age;
-      p_active[i] = latest_data.temp_slots[i].active;
-
-      if (latest_data.temp_slots[i].active)
-      {
-         *p_temp_count = latest_data.temp_count;
-      }
-   }
-
-   pthread_mutex_unlock(&data_mutex);
-}
-
-/******************************************************************************
- * \brief Build UART push payload and send to STM32.
+ * \brief Build UART push payload from explicit slot arrays and send to STM32.
+ *
+ * \details Called by uart_push_thread() only. Takes pre-extracted slot
+ *          arrays rather than a snapshot struct so the thread can apply
+ *          its own doorbell read/clear logic before calling here.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void build_and_push(double temp, int motion, int lgt, int lck,
                             uint16_t age_pir, uint16_t age_lgt,
@@ -567,7 +575,6 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                             const uint16_t *p_ta,
                             const uint8_t  *p_tactive,
                             int doorbell_pressed, int doorbell_device_id)
-
 {
    char msg[UART_MSG_BUF_SIZE] = {0};
    int  pos                    = 0;
@@ -595,7 +602,6 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
    for (i = 0; i < pir_count; i++)
    {
       if (!p_pactive[i]) { continue; }
-
       pos += snprintf(msg + pos, sizeof(msg) - pos,
                       "PIR%d:%u,%d,%d\n",
                       i + 1, (unsigned)p_pc[i], p_pb[i], p_pa[i]);
@@ -604,7 +610,6 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
    for (i = 0; i < pir_count; i++)
    {
       if (!p_pactive[i]) { continue; }
-
       pos += snprintf(msg + pos, sizeof(msg) - pos,
                       "OCC%d:%d\n", i + 1, p_pocc[i]);
    }
@@ -615,7 +620,6 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
    for (i = 0; i < reed_count; i++)
    {
       if (UART_STATE_UNKNOWN == p_r_state[i]) { continue; }
-
       pos += snprintf(msg + pos, sizeof(msg) - pos,
                       "DR%d:%d,%d,%d\n",
                       i + 1, p_r_state[i], p_r_batt[i], p_r_age[i]);
@@ -650,14 +654,13 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
    for (i = 0; i < temp_count; i++)
    {
       if (!p_tactive[i]) { continue; }
-
       pos += snprintf(msg + pos, sizeof(msg) - pos,
                       "TEMP%d:%d,%d,%d\n",
                       i + 1, p_tc[i], p_tb[i], p_ta[i]);
    }
 
    pos += snprintf(msg + pos, sizeof(msg) - pos,
-                "DOORBELL:%d,%d\n", doorbell_pressed, doorbell_device_id);
+                   "DOORBELL:%d,%d\n", doorbell_pressed, doorbell_device_id);
 
    uart_push_msg(msg, pos);
 }
@@ -665,26 +668,29 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
 /******************************************************************************
  * \brief Thread — sends sensor state to STM32, driven by g_uart_frame_sem.
  *
- * \details Replaces the previous sleep(UART_PUSH_INTERVAL_SEC) polling loop.
- *          sem_timedwait blocks with zero CPU until uart_parse_line() posts
- *          a new frame onto g_uart_ring, or until UART_PUSH_INTERVAL_SEC
- *          elapses as a watchdog ceiling (preserves existing heartbeat
- *          push behavior when UART is quiet).
+ * \param p_arg - Unused thread argument.
  *
- *          After waking, pops all pending frames from g_uart_ring to drain
- *          any burst that arrived while the previous push was executing.
- *          The pop count is logged for burst visibility. latest_data is
- *          then snapshotted for the consolidated push to STM32.
+ * \return void*
  *
- *          shm_data is read under shm_data->shm_mutex (process-shared),
- *          replacing the previous sem_timedwait(shm_sem) pattern.
+ * \details Blocks on g_uart_frame_sem with UART_PUSH_INTERVAL_SEC watchdog
+ *          ceiling. Wakes immediately when uart_parse_line() posts a frame,
+ *          drains all pending frames from g_uart_ring, then builds and sends
+ *          the full STM32 protocol payload from a single get_snapshot() call.
  *
- *          Doorbell state is read from shm_data (not latest_data) and
- *          cleared one-shot after reading so subsequent pushes send
- *          DOORBELL:0,x until the next real press event.
+ *          Handles UART-ingress frames (PIR/LGT/LCK) only. TCP-ingress
+ *          frames are handled synchronously by uart_update_frame() called
+ *          from sensor_frame_dispatch().
+ *
+ *          Doorbell state is read from shm_data under shm_mutex and cleared
+ *          one-shot so subsequent pushes send DOORBELL:0,x until the next
+ *          real press event.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void *uart_push_thread(void *p_arg)
 {
+   struct LatestData snap        = {0};
+
    int      valid              = 0;
    double   temp               = 0.0;
    int      motion             = 0;
@@ -699,9 +705,11 @@ void *uart_push_thread(void *p_arg)
    int      motor_online       = 0;
    int      reed_count         = 0;
    int      pir_count          = 0;
-   int      frames_ready       = 0; /**< frames drained from ring this wake */
-   int      doorbell_pressed   = 0; /**< snapshot from shm_data — one-shot  */
-   int      doorbell_device_id = 0; /**< snapshot from shm_data             */
+   int      temp_count         = 0;
+   int      frames_ready       = 0;
+   int      doorbell_pressed   = 0;
+   int      doorbell_device_id = 0;
+   int      i                  = 0;
    UartFrame frame             = {0};
 
    uint8_t  r_state[MAX_REEDS];
@@ -718,7 +726,6 @@ void *uart_push_thread(void *p_arg)
    int8_t   t_batt[MAX_TEMPS];
    uint16_t t_age[MAX_TEMPS];
    uint8_t  t_active[MAX_TEMPS];
-   int      temp_count = 0;
 
    (void)p_arg;
 
@@ -727,9 +734,6 @@ void *uart_push_thread(void *p_arg)
 
    while (running)
    {
-      /* Block until uart_parse_line() signals a new frame, or the
-       * watchdog ceiling expires. UART_PUSH_INTERVAL_SEC preserves
-       * the original worst-case push cadence for quiet periods.      */
       {
          struct timespec deadline;
          clock_gettime(CLOCK_REALTIME, &deadline);
@@ -741,23 +745,16 @@ void *uart_push_thread(void *p_arg)
 
       if (0 > g_uart_fd) { continue; }
 
-      /* Drain all frames that arrived since the last push.
-       * Each successful pop decrements the semaphore count by one
-       * (already decremented by sem_timedwait for the first frame).
-       * frames_ready tells us the burst depth — logged for visibility. */
       frames_ready = 0;
       if (uart_ring_pop(&frame)) { frames_ready = 1; }
       while (sem_trywait(&g_uart_frame_sem) == 0)
       {
-         uart_ring_pop(&frame); /* keep frame = newest in burst */
+         uart_ring_pop(&frame);
          frames_ready++;
       }
 
       LOG("[PUSH] Woke: %d UART frame(s) in burst", frames_ready);
 
-      /* Read shm_data under the process-shared mutex.
-       * Doorbell fields live in shm_data — read and clear one-shot here.
-       * Clearing under the same lock prevents a race with the writer.  */
       pthread_mutex_lock(&shm_data->shm_mutex);
       valid               = shm_data->data_valid;
       temp                = shm_data->current_temp;
@@ -766,10 +763,7 @@ void *uart_push_thread(void *p_arg)
       lck                 = shm_data->current_lock;
       doorbell_pressed    = shm_data->doorbell_pressed;
       doorbell_device_id  = shm_data->doorbell_device_id;
-      if (0 != doorbell_pressed)
-      {
-         shm_data->doorbell_pressed = 0;  /* one-shot — clear after read */
-      }
+      if (0 != doorbell_pressed) { shm_data->doorbell_pressed = 0; }
       pthread_mutex_unlock(&shm_data->shm_mutex);
 
       if (!valid)
@@ -778,29 +772,57 @@ void *uart_push_thread(void *p_arg)
          continue;
       }
 
-      pthread_mutex_lock(&data_mutex);
-      age_pir      = latest_data.age_pir;
-      age_lgt      = latest_data.age_lgt;
-      age_lck      = latest_data.age_lck;
-      batt_pir     = latest_data.batt_pir;
-      batt_lck     = latest_data.batt_lck;
-      motor_online = latest_data.motor_online;
-      batt_motor   = latest_data.batt_motor;
-      pthread_mutex_unlock(&data_mutex);
+      get_snapshot(&snap);
+
+      age_pir      = snap.age_pir;
+      age_lgt      = snap.age_lgt;
+      age_lck      = snap.age_lck;
+      batt_pir     = snap.batt_pir;
+      batt_lck     = snap.batt_lck;
+      motor_online = snap.motor_online;
+      batt_motor   = snap.batt_motor;
 
       reed_count = 0;
-      snapshot_reed_slots(r_state, r_batt, r_age, &reed_count);
+      for (i = 0; i < MAX_REEDS; i++)
+      {
+         if (snap.reed_slots[i].active)
+         {
+            r_state[i] = snap.reed_slots[i].state;
+            reed_count = i + 1;
+         }
+         else
+         {
+            r_state[i] = UART_STATE_UNKNOWN;
+         }
+         r_batt[i] = snap.reed_slots[i].batt;
+         r_age[i]  = snap.reed_slots[i].age;
+      }
 
       pir_count = 0;
-      snapshot_pir_slots(p_count, p_batt, p_age, p_active, p_occ, &pir_count);
+      for (i = 0; i < MAX_PIRS; i++)
+      {
+         p_count[i]  = snap.pir_slots[i].count;
+         p_batt[i]   = snap.pir_slots[i].batt;
+         p_age[i]    = snap.pir_slots[i].age;
+         p_active[i] = snap.pir_slots[i].active;
+         p_occ[i]    = snap.pir_slots[i].occupied;
+         if (snap.pir_slots[i].active) { pir_count = snap.pir_count; }
+      }
 
       temp_count = 0;
-      snapshot_temp_slots(t_decidegc, t_batt, t_age, t_active, &temp_count);
+      for (i = 0; i < MAX_TEMPS; i++)
+      {
+         t_decidegc[i] = snap.temp_slots[i].temp_decidegc;
+         t_batt[i]     = snap.temp_slots[i].batt;
+         t_age[i]      = snap.temp_slots[i].age;
+         t_active[i]   = snap.temp_slots[i].active;
+         if (snap.temp_slots[i].active) { temp_count = snap.temp_count; }
+      }
 
       LOG("[PUSH] ages pir=%u lgt=%u lck=%u | batt pir=%d%% lck=%d%% mtr=%d%% "
-          "| reeds=%d pirs=%d motor=%d",
+          "| reeds=%d pirs=%d temps=%d motor=%d",
           age_pir, age_lgt, age_lck, batt_pir, batt_lck, batt_motor,
-          reed_count, pir_count, motor_online);
+          reed_count, pir_count, temp_count, motor_online);
 
       build_and_push(temp, motion, lgt, lck,
                      age_pir, age_lgt, age_lck,
@@ -818,10 +840,176 @@ void *uart_push_thread(void *p_arg)
 
 /******************************************************************************
  * \brief Sync TCP lock state into the UART lock state machine.
+ *
+ * \param state - New lock state value to set.
+ *
+ * \return void
+ *
+ * \details Guards g_lock_state with g_lock_mutex. state_registry owns all
+ *          other sensor state — g_lock_state is separate because it drives
+ *          the lock transition logic before the resolved state is written
+ *          back to the registry via uart_stage_lock().
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void uart_sync_lock_state(int state)
 {
-   pthread_mutex_lock(&data_mutex);
+   pthread_mutex_lock(&g_lock_mutex);
    g_lock_state = (LOCK_STATE_E)state;
-   pthread_mutex_unlock(&data_mutex);
+   pthread_mutex_unlock(&g_lock_mutex);
+}
+
+/******************************************************************************
+ * \brief Synchronous outbound push to STM32 from TCP ingress path.
+ *
+ * \param p_snapshot  - Frozen read model from get_snapshot(). Not modified.
+ * \param p_raw_frame - Raw wire frame from sensor pipe. Reserved for future
+ *                      room event push — currently unused beyond the param.
+ *
+ * \return void
+ *
+ * \details Called from sensor_frame_dispatch() on every TCP ingress frame
+ *          after update_snapshot() and get_snapshot() complete. Builds the
+ *          full STM32 protocol payload from the frozen snapshot and sends
+ *          it via uart_push_msg(). Doorbell state is read from shm_data
+ *          under shm_mutex and cleared one-shot.
+ *
+ *          uart_push_msg() is the only send primitive — uart_write_string
+ *          and uart_printf do not exist in this codebase.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+void uart_update_frame(const struct LatestData *p_snapshot,
+                       const struct SensorData *p_raw_frame)
+{
+   char msg[UART_MSG_BUF_SIZE] = {0};
+   int  pos                    = 0;
+   int  i                      = 0;
+   int  reed_count             = 0;
+   int  doorbell_pressed       = 0;
+   int  doorbell_device_id     = 0;
+
+   (void)p_raw_frame; /* reserved for future room event push */
+
+   if (!p_snapshot->valid) { return; }
+
+   if (0 > g_uart_fd) { return; }
+
+   /* Compute reed_count from snapshot */
+   for (i = 0; i < MAX_REEDS; i++)
+   {
+      if (p_snapshot->reed_slots[i].active) { reed_count = i + 1; }
+   }
+
+   pos += snprintf(msg + pos, sizeof(msg) - pos,
+                   "STATE:%d,%d,%d,%d,%d,%d,%d,%d\n",
+                   (int)p_snapshot->avg_temp,
+                   p_snapshot->motion_count,
+                   p_snapshot->light_state,
+                   p_snapshot->lock_state,
+                   p_snapshot->age_pir,
+                   p_snapshot->age_lgt,
+                   p_snapshot->age_lck,
+                   reed_count);
+
+   if (p_snapshot->batt_pir >= 0)
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "PIR:%d,%d\n",
+                      p_snapshot->motion_count, p_snapshot->batt_pir);
+   }
+   else
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "PIR:%d\n", p_snapshot->motion_count);
+   }
+
+   pos += snprintf(msg + pos, sizeof(msg) - pos,
+                   "PIR_COUNT:%d\n", p_snapshot->pir_count);
+
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      if (!p_snapshot->pir_slots[i].active) { continue; }
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "PIR%d:%u,%d,%d\n",
+                      i + 1,
+                      (unsigned)p_snapshot->pir_slots[i].count,
+                      p_snapshot->pir_slots[i].batt,
+                      p_snapshot->pir_slots[i].age);
+   }
+
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      if (!p_snapshot->pir_slots[i].active) { continue; }
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "OCC%d:%d\n", i + 1,
+                      p_snapshot->pir_slots[i].occupied);
+   }
+
+   pos += snprintf(msg + pos, sizeof(msg) - pos,
+                   "REED_COUNT:%d\n", reed_count);
+
+   for (i = 0; i < MAX_REEDS; i++)
+   {
+      if (!p_snapshot->reed_slots[i].active) { continue; }
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "DR%d:%d,%d,%d\n",
+                      i + 1,
+                      p_snapshot->reed_slots[i].state,
+                      p_snapshot->reed_slots[i].batt,
+                      p_snapshot->reed_slots[i].age);
+   }
+
+   pos += snprintf(msg + pos, sizeof(msg) - pos,
+                   "LGT:%d\n", p_snapshot->light_state);
+
+   if (p_snapshot->batt_lck >= 0)
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "LCK:%d,%d\n",
+                      p_snapshot->lock_state, p_snapshot->batt_lck);
+   }
+   else
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "LCK:%d\n", p_snapshot->lock_state);
+   }
+
+   if (p_snapshot->batt_motor > 0)
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "MTR:%d,%d\n",
+                      p_snapshot->motor_online, p_snapshot->batt_motor);
+   }
+   else
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "MTR:%d\n", p_snapshot->motor_online);
+   }
+
+   pos += snprintf(msg + pos, sizeof(msg) - pos,
+                   "TEMP_COUNT:%d\n", p_snapshot->temp_count);
+
+   for (i = 0; i < MAX_TEMPS; i++)
+   {
+      if (!p_snapshot->temp_slots[i].active) { continue; }
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "TEMP%d:%d,%d,%d\n",
+                      i + 1,
+                      p_snapshot->temp_slots[i].temp_decidegc,
+                      p_snapshot->temp_slots[i].batt,
+                      p_snapshot->temp_slots[i].age);
+   }
+
+   /* Read doorbell from shm one-shot — clear after reading */
+   pthread_mutex_lock(&shm_data->shm_mutex);
+   doorbell_pressed   = shm_data->doorbell_pressed;
+   doorbell_device_id = shm_data->doorbell_device_id;
+   if (doorbell_pressed) { shm_data->doorbell_pressed = 0; }
+   pthread_mutex_unlock(&shm_data->shm_mutex);
+
+   pos += snprintf(msg + pos, sizeof(msg) - pos,
+                   "DOORBELL:%d,%d\n", doorbell_pressed, doorbell_device_id);
+
+   uart_push_msg(msg, pos);
 }

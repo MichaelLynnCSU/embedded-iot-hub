@@ -121,8 +121,8 @@ int main(void)
       return 1;
    }
 
-   shm_data = mmap(NULL, sizeof(struct SharedSensorData),
-                   PROT_READ, MAP_SHARED, shm_fd, 0);
+   shm_data = mmap(NULL, 3384,
+                   PROT_READ|PROT_WRITE, MAP_SHARED, shm_fd, 0);
 
    if (MAP_FAILED == shm_data)
    {
@@ -213,7 +213,7 @@ int main(void)
    }
 
    /* Unreachable — service is killed by systemd */
-   munmap(shm_data, sizeof(struct SharedSensorData));
+   munmap(shm_data, 3384);
    close(shm_fd);
    if (log_fp) { fclose(log_fp); }
 

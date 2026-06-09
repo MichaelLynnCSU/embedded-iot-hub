@@ -1,0 +1,128 @@
+/******************************************************************************
+ * \file shm_updater.c
+ * \brief Shared memory projection — consumes frozen snapshot, writes shm.
+ ******************************************************************************/
+
+#include "shm_updater.h"
+
+static void update_shm_rooms(const struct SensorData *p_data)
+{
+   int i = 0;
+
+   pthread_mutex_lock(&shm_data->shm_mutex);
+   shm_data->room_count = p_data->room_count;
+
+   for (i = 0; (i < p_data->room_count) && (i < MAX_ROOMS); i++)
+   {
+      shm_data->rooms[i].sensor_id = p_data->rooms[i].sensor_id;
+      (void)strncpy(shm_data->rooms[i].room_name,
+                    p_data->rooms[i].room_name,
+                    ROOM_NAME_SZ - 1);
+      (void)strncpy(shm_data->rooms[i].state,
+                    p_data->rooms[i].state,
+                    ROOM_STATE_SZ - 1);
+      (void)strncpy(shm_data->rooms[i].location,
+                    p_data->rooms[i].location,
+                    ROOM_LOC_SZ - 1);
+   }
+
+   pthread_mutex_unlock(&shm_data->shm_mutex);
+}
+
+void handle_get_latest(const struct LatestData *p_snapshot)
+{
+   pthread_mutex_lock(&shm_data->shm_mutex);
+
+   shm_data->current_temp      = p_snapshot->avg_temp;
+   shm_data->current_motion    = p_snapshot->motion_count;
+   shm_data->current_light     = p_snapshot->light_state;
+   shm_data->current_lock      = p_snapshot->lock_state;
+   shm_data->batt_motor        = p_snapshot->batt_motor;
+   shm_data->current_timestamp = p_snapshot->timestamp;
+   shm_data->data_valid        = p_snapshot->valid;
+   shm_data->sequence++;
+
+   if (p_snapshot->doorbell_pressed)
+   {
+      shm_data->doorbell_pressed   = 1;
+      shm_data->doorbell_device_id = p_snapshot->doorbell_device_id;
+      shm_data->doorbell_timestamp = p_snapshot->timestamp;
+      LOG("Doorbell press device_id=%d — shm updated",
+          p_snapshot->doorbell_device_id);
+   }
+
+   shm_data->last_command   = CMD_GET_LATEST;
+   shm_data->command_result = 0;
+
+   pthread_mutex_unlock(&shm_data->shm_mutex);
+
+   LOG("CMD_GET_LATEST: %.1fC %d motions",
+       shm_data->current_temp,
+       shm_data->current_motion);
+}
+
+void handle_get_device_status(struct CommandMsg *p_cmd)
+{
+   (void)p_cmd;
+
+   pthread_mutex_lock(&shm_data->shm_mutex);
+   heartbeat_snapshot_online(shm_data->device_online, DEV_COUNT);
+   shm_data->last_command   = CMD_GET_DEVICE_STATUS;
+   shm_data->command_result = 0;
+   shm_data->sequence++;
+   pthread_mutex_unlock(&shm_data->shm_mutex);
+
+   LOG("CMD_GET_DEVICE_STATUS served");
+}
+
+void handle_get_room_status(struct CommandMsg *p_cmd)
+{
+   struct RoomStatus rooms[ROOM_BUF_SIZE];
+   int               count = 0;
+   int               i     = 0;
+
+   (void)p_cmd;
+   (void)memset(rooms, 0, sizeof(rooms));
+
+   count = db_query_rooms(rooms, ROOM_BUF_SIZE);
+
+   pthread_mutex_lock(&shm_data->shm_mutex);
+
+   if (0 > count)
+   {
+      shm_data->command_result = -1;
+   }
+   else
+   {
+      for (i = 0; i < count; i++)
+      {
+         shm_data->rooms[i].sensor_id = rooms[i].sensor_id;
+         shm_data->rooms[i].timestamp = rooms[i].timestamp;
+         (void)strncpy(shm_data->rooms[i].room_name,
+                       rooms[i].room_name,
+                       ROOM_NAME_SZ - 1);
+         (void)strncpy(shm_data->rooms[i].state,
+                       rooms[i].state,
+                       ROOM_STATE_SZ - 1);
+         (void)strncpy(shm_data->rooms[i].location,
+                       rooms[i].location,
+                       ROOM_LOC_SZ - 1);
+      }
+
+      shm_data->room_count     = count;
+      shm_data->last_command   = CMD_GET_ROOM_STATUS;
+      shm_data->command_result = 0;
+      shm_data->sequence++;
+   }
+
+   pthread_mutex_unlock(&shm_data->shm_mutex);
+
+   LOG("CMD_GET_ROOM_STATUS complete (%d rooms)", count);
+}
+
+void shm_update_frame(const struct LatestData *p_snapshot,
+                      const struct SensorData *p_data)
+{
+   handle_get_latest(p_snapshot);
+   update_shm_rooms(p_data);
+}
