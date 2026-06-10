@@ -171,7 +171,6 @@ static uint8_t  g_pir_count_slots  = 0u;
 static uint32_t g_temp_last_seen[MAX_TEMPS];
 static uint8_t  g_temp_online[MAX_TEMPS];
 static uint8_t  g_temp_count_slots = 0u;
-static TILE_X   g_t_temp_slot[MAX_TEMPS];
 
 /* Doorbell per-cam online tracking — mirrors PIR/temp pattern */
 static uint32_t g_doorbell_last_seen[MAX_DOORBELL_CAMS];
@@ -191,7 +190,6 @@ static TILE_X g_t_lock;
 
 /* ---- View state --------------------------------------------------------- */
 static UI_VIEW_E  g_current_view  = eVIEW_HOME;
-static uint32_t   g_last_touch_ms = 0ul;
 
 /* ---- Nav bar ------------------------------------------------------------ */
 static lv_obj_t  *g_nav_bar            = NULL;
@@ -209,6 +207,7 @@ static lv_obj_t  *g_sys_rows[SYS_ROW_COUNT];
 static const char *const k_nav_labels[eVIEW_COUNT] = { "HOME", "SEC", "SYS" };
 
 /************************ STATIC (PRIVATE) FUNCTIONS **************************/
+static void nav_btn_event_cb(lv_event_t *p_e);
 
 static void lvgl_flush_cb(lv_disp_drv_t *p_drv,
                           const lv_area_t *p_area,
@@ -324,6 +323,10 @@ static void nav_highlight(UI_VIEW_E view)
 
 static void create_nav_bar(lv_obj_t *p_scr)
 {
+   static const UI_VIEW_E k_views[eVIEW_COUNT] =
+      { eVIEW_HOME, eVIEW_SECURITY, eVIEW_SYSTEM };
+
+   lv_obj_t *p_btn = NULL;
    lv_obj_t *p_lbl = NULL;
    uint8_t   i     = 0u;
 
@@ -340,12 +343,22 @@ static void create_nav_bar(lv_obj_t *p_scr)
 
    for (i = 0u; i < (uint8_t)eVIEW_COUNT; i++)
    {
-      p_lbl = lv_label_create(g_nav_bar);
+      p_btn = lv_btn_create(g_nav_bar);
+      lv_obj_set_pos(p_btn, (int)((uint32_t)i * NAV_ZONE_W), 0);
+      lv_obj_set_size(p_btn, (int)NAV_ZONE_W, (int)NAV_HEIGHT);
+      lv_obj_set_style_bg_opa(p_btn, LV_OPA_TRANSP, 0);
+      lv_obj_set_style_shadow_width(p_btn, 0, 0);
+      lv_obj_set_style_border_width(p_btn, 0, 0);
+      lv_obj_set_style_pad_all(p_btn, 0, 0);
+      lv_obj_set_style_radius(p_btn, 0, 0);
+      lv_obj_clear_flag(p_btn, LV_OBJ_FLAG_PRESS_LOCK);
+      lv_obj_add_event_cb(p_btn, nav_btn_event_cb, LV_EVENT_CLICKED,
+                          (void *)&k_views[i]);
+
+      p_lbl = lv_label_create(p_btn);
       lv_label_set_text(p_lbl, k_nav_labels[i]);
       lv_obj_set_style_text_color(p_lbl, lv_color_hex(C_NAV_IDLE), 0);
-      lv_obj_set_pos(p_lbl,
-                     (int)((uint32_t)i * NAV_ZONE_W + NAV_ZONE_W / 2u - 10u),
-                     (int)(NAV_HEIGHT / 2u - 8u));
+      lv_obj_align(p_lbl, LV_ALIGN_CENTER, 0, 0);
       g_nav_lbl[i] = p_lbl;
    }
 
@@ -378,6 +391,18 @@ static void create_home_labels(lv_obj_t *p_scr)
    lv_obj_align(g_home_net_lbl, LV_ALIGN_TOP_MID, 0, y);
 }
 
+static void sys_row_create(lv_obj_t *p_parent, lv_obj_t **pp_row,
+                            const char *p_text, uint8_t hidden)
+{
+   *pp_row = lv_label_create(p_parent);
+   lv_label_set_text(*pp_row, p_text);
+   lv_obj_set_style_text_color(*pp_row, lv_color_white(), 0);
+   lv_obj_set_width(*pp_row, (lv_coord_t)FULL_TILE_WIDTH);
+   lv_label_set_long_mode(*pp_row, LV_LABEL_LONG_CLIP);
+   lv_obj_clear_flag(*pp_row, LV_OBJ_FLAG_SCROLLABLE);
+   if (0u != hidden) { lv_obj_add_flag(*pp_row, LV_OBJ_FLAG_HIDDEN); }
+}
+
 static void create_sys_list(lv_obj_t *p_scr)
 {
    char    name[16];
@@ -393,17 +418,22 @@ static void create_sys_list(lv_obj_t *p_scr)
    lv_obj_set_style_border_width(g_sys_list, 0, 0);
    lv_obj_set_style_pad_all(g_sys_list, 0, 0);
    lv_obj_set_style_pad_row(g_sys_list, 6, 0);
-   lv_obj_set_flex_flow(g_sys_list, LV_FLEX_FLOW_COLUMN);
+
+   lv_obj_add_flag(g_sys_list,   LV_OBJ_FLAG_SCROLLABLE);
+   lv_obj_clear_flag(g_sys_list, LV_OBJ_FLAG_SCROLL_CHAIN);
    lv_obj_set_scroll_dir(g_sys_list, LV_DIR_VER);
-   lv_obj_set_scrollbar_mode(g_sys_list, LV_SCROLLBAR_MODE_AUTO);
+   lv_obj_set_scrollbar_mode(g_sys_list, LV_SCROLLBAR_MODE_ACTIVE);
+   lv_obj_set_scroll_snap_y(g_sys_list, LV_SCROLL_SNAP_NONE);
+   lv_obj_set_flex_flow(g_sys_list, LV_FLEX_FLOW_COLUMN);
+   lv_obj_set_flex_align(g_sys_list, LV_FLEX_ALIGN_START,
+                                      LV_FLEX_ALIGN_START,
+                                      LV_FLEX_ALIGN_START);
 
    /* Fixed rows: aggregate TEMP, MOTOR, LIGHT, LOCK */
    const char *const fixed[4] = { "TEMP", "MOTOR", "LIGHT", "LOCK" };
    for (i = 0u; i < 4u; i++)
    {
-      g_sys_rows[row] = lv_label_create(g_sys_list);
-      lv_label_set_text(g_sys_rows[row], fixed[i]);
-      lv_obj_set_style_text_color(g_sys_rows[row], lv_color_white(), 0);
+      sys_row_create(g_sys_list, &g_sys_rows[row], fixed[i], 0u);
       row++;
    }
 
@@ -411,10 +441,7 @@ static void create_sys_list(lv_obj_t *p_scr)
    for (i = 0u; i < (uint8_t)MAX_TEMPS; i++)
    {
       (void)snprintf(name, sizeof(name), "TEMP %u", (unsigned int)(i + 1u));
-      g_sys_rows[row] = lv_label_create(g_sys_list);
-      lv_label_set_text(g_sys_rows[row], name);
-      lv_obj_set_style_text_color(g_sys_rows[row], lv_color_white(), 0);
-      lv_obj_add_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
+      sys_row_create(g_sys_list, &g_sys_rows[row], name, 1u);
       row++;
    }
 
@@ -422,9 +449,7 @@ static void create_sys_list(lv_obj_t *p_scr)
    for (i = 0u; i < (uint8_t)MAX_PIRS; i++)
    {
       (void)snprintf(name, sizeof(name), "PIR %u", (unsigned int)(i + 1u));
-      g_sys_rows[row] = lv_label_create(g_sys_list);
-      lv_label_set_text(g_sys_rows[row], name);
-      lv_obj_set_style_text_color(g_sys_rows[row], lv_color_white(), 0);
+      sys_row_create(g_sys_list, &g_sys_rows[row], name, 0u);
       row++;
    }
 
@@ -432,9 +457,7 @@ static void create_sys_list(lv_obj_t *p_scr)
    for (i = 0u; i < (uint8_t)MAX_REEDS; i++)
    {
       (void)snprintf(name, sizeof(name), "DOOR %u", (unsigned int)(i + 1u));
-      g_sys_rows[row] = lv_label_create(g_sys_list);
-      lv_label_set_text(g_sys_rows[row], name);
-      lv_obj_set_style_text_color(g_sys_rows[row], lv_color_white(), 0);
+      sys_row_create(g_sys_list, &g_sys_rows[row], name, 0u);
       row++;
    }
 
@@ -442,10 +465,7 @@ static void create_sys_list(lv_obj_t *p_scr)
    for (i = 0u; i < (uint8_t)MAX_DOORBELL_CAMS; i++)
    {
       (void)snprintf(name, sizeof(name), "CAM %u", (unsigned int)i);
-      g_sys_rows[row] = lv_label_create(g_sys_list);
-      lv_label_set_text(g_sys_rows[row], name);
-      lv_obj_set_style_text_color(g_sys_rows[row], lv_color_white(), 0);
-      lv_obj_add_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
+      sys_row_create(g_sys_list, &g_sys_rows[row], name, 1u);
       row++;
    }
 
@@ -695,6 +715,29 @@ static void system_list_refresh(void)
    }
 }
 
+static void touch_read_cb(lv_indev_drv_t *p_drv, lv_indev_data_t *p_data)
+{
+   (void)p_drv;
+   if (XPT2046_IsTouched())
+   {
+      TouchPoint_t tp  = XPT2046_GetTouch();
+      p_data->point.x  = (lv_coord_t)tp.x;
+      p_data->point.y  = (lv_coord_t)tp.y;
+      p_data->state    = LV_INDEV_STATE_PRESSED;
+   }
+   else
+   {
+      p_data->state = LV_INDEV_STATE_RELEASED;
+   }
+}
+
+static void nav_btn_event_cb(lv_event_t *p_e)
+{
+   const UI_VIEW_E *p_view = (const UI_VIEW_E *)lv_event_get_user_data(p_e);
+   if (NULL != p_view) { ui_set_view(*p_view); }
+}
+
+
 /************************** PUBLIC FUNCTIONS ***********************************/
 
 void ui_tick(void)
@@ -717,6 +760,14 @@ void ui_create(void)
    disp_drv.flush_cb = lvgl_flush_cb;
    disp_drv.draw_buf = &g_draw_buf;
    (void)lv_disp_drv_register(&disp_drv);
+
+   (void)lv_disp_drv_register(&disp_drv);
+
+   static lv_indev_drv_t indev_drv;
+   lv_indev_drv_init(&indev_drv);
+   indev_drv.type    = LV_INDEV_TYPE_POINTER;
+   indev_drv.read_cb = touch_read_cb;
+   (void)lv_indev_drv_register(&indev_drv);
 
    init_status_styles();
 
@@ -912,22 +963,9 @@ UI_VIEW_E ui_get_view(void)
 
 void ui_poll_touch(void)
 {
-   TouchPoint_t tp  = {0u, 0u};
-   uint32_t     now = 0ul;
-
-   if (!XPT2046_IsTouched()) { return; }
-
-   now = HAL_GetTick();
-   if ((now - g_last_touch_ms) < TOUCH_DEBOUNCE_MS) { return; }
-   g_last_touch_ms = now;
-
-   tp = XPT2046_GetTouch();
-
-   if (tp.y < (uint16_t)(DISP_VER_RES - NAV_HEIGHT)) { return; }
-
-   if      (tp.x < (uint16_t)NAV_ZONE_W)        { ui_set_view(eVIEW_HOME);     }
-   else if (tp.x < (uint16_t)(NAV_ZONE_W * 2u)) { ui_set_view(eVIEW_SECURITY); }
-   else                                           { ui_set_view(eVIEW_SYSTEM);   }
+   /* No-op: touch is now owned by the registered lv_indev driver.
+    * LVGL calls touch_read_cb() from lv_task_handler() each tick.
+    * Nav taps are dispatched via nav_btn_event_cb(). */
 }
 
 void ui_reflow_pir(int n_pir)
