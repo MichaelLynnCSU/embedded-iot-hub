@@ -26,7 +26,7 @@ idf_component_register(
         "motor_server.c"
         "doorbell_listener.c"
         "cam_trigger.c"
-    INCLUDE_DIRS "."
+    INCLUDE_DIRS "." "include"
     REQUIRES
         bt
         nvs_flash
