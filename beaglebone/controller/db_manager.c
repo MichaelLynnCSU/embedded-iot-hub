@@ -31,7 +31,15 @@
  *          All functions are no-ops if db is NULL (open failed at init).
  ******************************************************************************/
 
-#include "controller_internal.h"
+#include <sqlite3.h>
+#include <string.h>
+#include <time.h>
+#include "config.h"
+#include "sensor_types.h"
+#include "shared_data.h"
+#include "log.h"
+#include "globals.h"
+#include "db_manager.h"
 
 #define ROOM_QUERY_LIMIT  10   /**< maximum rooms returned by db_query_rooms */
 

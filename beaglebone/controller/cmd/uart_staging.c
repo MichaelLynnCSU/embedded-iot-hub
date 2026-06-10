@@ -1,3 +1,6 @@
+#include "log.h"
+#include "db_manager.h"
+#include <stdio.h>
 /******************************************************************************
  * \file uart_staging.c
  * \brief UART protocol transitions — partial state updaters and reed logic.

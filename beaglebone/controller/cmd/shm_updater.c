@@ -1,6 +1,19 @@
+#include "log.h"
+#include "heartbeat.h"
+#include "db_manager.h"
+#include <string.h>
+#include <stdio.h>
 /******************************************************************************
  * \file shm_updater.c
  * \brief Shared memory projection — consumes frozen snapshot, writes shm.
+ *
+ * \note    Doorbell liveness (2026-06-09):
+ *          shm_update_frame() now projects p_data->doorbell_slots[] into
+ *          shm_data->doorbell_age_s[] and shm_data->doorbell_online[].
+ *          Runs under shm_mutex after update_shm_rooms() returns.
+ *          p_data is used directly (not via snapshot) because doorbell
+ *          liveness is not part of LatestData — it lives only in the
+ *          raw SensorData wire frame.
  ******************************************************************************/
 
 #include "shm_updater.h"
@@ -17,13 +30,28 @@ static void update_shm_rooms(const struct SensorData *p_data)
       shm_data->rooms[i].sensor_id = p_data->rooms[i].sensor_id;
       (void)strncpy(shm_data->rooms[i].room_name,
                     p_data->rooms[i].room_name,
-                    ROOM_NAME_SZ - 1);
+                    ROOM_NAME_SIZE - 1);
       (void)strncpy(shm_data->rooms[i].state,
                     p_data->rooms[i].state,
-                    ROOM_STATE_SZ - 1);
+                    ROOM_STATE_SIZE - 1);
       (void)strncpy(shm_data->rooms[i].location,
                     p_data->rooms[i].location,
-                    ROOM_LOC_SZ - 1);
+                    ROOM_LOC_SIZE - 1);
+   }
+
+   pthread_mutex_unlock(&shm_data->shm_mutex);
+}
+
+static void update_shm_doorbell_liveness(const struct SensorData *p_data)
+{
+   int i = 0;
+
+   pthread_mutex_lock(&shm_data->shm_mutex);
+
+   for (i = 0; i < MAX_DOORBELL_CAMS; i++)
+   {
+      shm_data->doorbell_age_s[i]  = p_data->doorbell_slots[i].age_s;
+      shm_data->doorbell_online[i] = p_data->doorbell_slots[i].online;
    }
 
    pthread_mutex_unlock(&shm_data->shm_mutex);
@@ -100,13 +128,13 @@ void handle_get_room_status(struct CommandMsg *p_cmd)
          shm_data->rooms[i].timestamp = rooms[i].timestamp;
          (void)strncpy(shm_data->rooms[i].room_name,
                        rooms[i].room_name,
-                       ROOM_NAME_SZ - 1);
+                       ROOM_NAME_SIZE - 1);
          (void)strncpy(shm_data->rooms[i].state,
                        rooms[i].state,
-                       ROOM_STATE_SZ - 1);
+                       ROOM_STATE_SIZE - 1);
          (void)strncpy(shm_data->rooms[i].location,
                        rooms[i].location,
-                       ROOM_LOC_SZ - 1);
+                       ROOM_LOC_SIZE - 1);
       }
 
       shm_data->room_count     = count;
@@ -125,4 +153,5 @@ void shm_update_frame(const struct LatestData *p_snapshot,
 {
    handle_get_latest(p_snapshot);
    update_shm_rooms(p_data);
+   update_shm_doorbell_liveness(p_data);
 }

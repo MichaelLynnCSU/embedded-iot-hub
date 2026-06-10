@@ -21,6 +21,7 @@
  *          heuristics required.
  ******************************************************************************/
 
+#include "config.h"
 #include "doorbell_listener.h"
 #include "vroom_bus.h"
 #include "trinity_log.h"
@@ -41,7 +42,35 @@ static const char *TAG = "DOORBELL_RX";
 #define DOORBELL_RX_BUF_SIZE   256   /**< max UDP payload we accept          */
 #define DOORBELL_TASK_STACK   4096   /**< task stack in bytes                */
 #define DOORBELL_TASK_PRIO       5   /**< same priority as cam_trigger path  */
-#define MAX_DOORBELL_CAMS        4   /**< matches cam firmware MAX_DOORBELL_CAMS */
+
+static uint32_t g_doorbell_last_seen_ms[MAX_DOORBELL_CAMS] = {0};
+
+static void doorbell_stamp(uint8_t device_id)
+{
+    g_doorbell_last_seen_ms[device_id] = xTaskGetTickCount() * portTICK_PERIOD_MS;
+}
+
+uint16_t doorbell_get_age_s(uint8_t device_id)
+{
+    uint32_t now = 0;
+
+    if (device_id >= MAX_DOORBELL_CAMS)          { return 0xFFFF; }
+    if (0 == g_doorbell_last_seen_ms[device_id]) { return 0xFFFF; }
+
+    now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    return (uint16_t)((now - g_doorbell_last_seen_ms[device_id]) / 1000);
+}
+
+bool doorbell_is_alive(uint8_t device_id)
+{
+    uint32_t now = 0;
+
+    if (device_id >= MAX_DOORBELL_CAMS)          { return false; }
+    if (0 == g_doorbell_last_seen_ms[device_id]) { return false; }
+
+    now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    return (now - g_doorbell_last_seen_ms[device_id]) < DOORBELL_HEARTBEAT_MS;
+}
 
 /*---------------------------------------------------------------------------*/
 /* JSON field parsers — no cJSON dependency, fields are small and fixed      */
@@ -151,34 +180,41 @@ static void doorbell_listener_task(void *p_arg)
       if (n <= 0) { continue; }
       rx_buf[n] = '\0';
 
-      /* Reject anything that is not a press event */
-      if (NULL == strstr(rx_buf, "\"event_type\":\"press\""))
+      if (NULL != strstr(rx_buf, "\"event_type\":\"press\""))
+      {
+         device_id = (uint8_t)parse_uint_field(rx_buf, "device_id");
+         event_id  = parse_hex_field(rx_buf,            "event_id");
+         ts_ms     = parse_u64_field(rx_buf,            "timestamp_ms");
+
+         if (device_id >= MAX_DOORBELL_CAMS) { continue; }
+
+         doorbell_stamp(device_id);
+
+         ESP_LOGI(TAG, ">>> DOORBELL press device_id=%d event_id=%08lx%08lx",
+                  device_id,
+                  (unsigned long)(event_id >> 32),
+                  (unsigned long)(event_id & 0xFFFFFFFFUL));
+
+         snprintf(log_buf, sizeof(log_buf),
+                  "EVENT: DOORBELL_PRESS device_id=%d\n", device_id);
+         trinity_log_event(log_buf);
+         bus_publish_doorbell(device_id, event_id, ts_ms);
+      }
+      else if (NULL != strstr(rx_buf, "\"event_type\":\"heartbeat\""))
+      {
+         device_id = (uint8_t)parse_uint_field(rx_buf, "device_id");
+
+         if (device_id >= MAX_DOORBELL_CAMS) { continue; }
+
+         doorbell_stamp(device_id);
+
+         ESP_LOGI(TAG, "HEARTBEAT device_id=%d age_s=%d",
+                  device_id, doorbell_get_age_s(device_id));
+      }
+      else
       {
          ESP_LOGW(TAG, "Unknown event_type — ignoring");
-         continue;
       }
-
-      device_id = (uint8_t)parse_uint_field(rx_buf, "device_id");
-      event_id  = parse_hex_field(rx_buf,            "event_id");
-      ts_ms     = parse_u64_field(rx_buf,            "timestamp_ms");
-
-      if (device_id >= MAX_DOORBELL_CAMS)
-      {
-         ESP_LOGW(TAG, "device_id %d out of range — ignoring", device_id);
-         continue;
-      }
-
-      ESP_LOGI(TAG, ">>> DOORBELL press device_id=%d event_id=%08lx%08lx",
-               device_id,
-               (unsigned long)(event_id >> 32),
-               (unsigned long)(event_id & 0xFFFFFFFFUL));
-
-      snprintf(log_buf, sizeof(log_buf),
-               "EVENT: DOORBELL_PRESS device_id=%d\n", device_id);
-      trinity_log_event(log_buf);
-
-      /* Lane A — publish to bus immediately, independent of image delivery */
-      bus_publish_doorbell(device_id, event_id, ts_ms);
    }
 }
 

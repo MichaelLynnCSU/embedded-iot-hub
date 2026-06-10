@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <time.h>
+#include "cmd/commands.h"
 
 /* controller_logic.h is included after controller_internal.h —
  * all sizing constants, DEV_ID_E, and command values are defined there. */

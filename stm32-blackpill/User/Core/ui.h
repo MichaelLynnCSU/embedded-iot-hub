@@ -17,6 +17,12 @@
  *          ui_set_view() / ui_get_view() / ui_poll_touch() exposed.
  *          CONTENT_TOP / CONTENT_BOT / CONTENT_H macros encode the
  *          pixel budget between header and nav bar.
+ *
+ * \note    Doorbell liveness (2026-06-09):
+ *          MAX_DOORBELL_CAMS added.
+ *          ui_set_doorbell_slot_age(), ui_set_doorbell_slot_online(),
+ *          ui_stamp_doorbell_online() added — mirror temp slot pattern.
+ *          SYSTEM view shows DB0..DB3 rows with online/offline status.
  ******************************************************************************/
 
 #ifndef INCLUDE_UI_H_
@@ -28,9 +34,10 @@
 
 /******************************** CONSTANTS ***********************************/
 
-#define MAX_REEDS          6u    /**< Maximum number of reed sensors supported */
-#define MAX_PIRS           5u    /**< Maximum number of per-slot PIR sensors   */
-#define MAX_TEMPS          4u    /**< Maximum number of BLE temp sensors       */
+#define MAX_REEDS          6u    /**< Maximum number of reed sensors supported  */
+#define MAX_PIRS           5u    /**< Maximum number of per-slot PIR sensors    */
+#define MAX_TEMPS          4u    /**< Maximum number of BLE temp sensors        */
+#define MAX_DOORBELL_CAMS  4u    /**< Maximum number of doorbell cameras        */
 
 #define HB_TIMEOUT_MS  30000ul  /**< ms before a device is considered offline  */
 #define TILE_GAP           4u   /**< Pixel gap between adjacent tiles          */
@@ -98,6 +105,7 @@ void    ui_set_pir_count_slots(uint8_t count);
 void ui_stamp_dev_online(DEVICE_ID_E dev_id, uint32_t tick);
 void ui_stamp_reed_online(uint8_t slot, uint32_t tick);
 void ui_stamp_pir_online(uint8_t slot, uint32_t tick);
+void ui_stamp_doorbell_online(uint8_t slot, uint32_t tick);
 
 /* ---- Sensor state setters ---- */
 void ui_set_temp(uint8_t val);
@@ -112,13 +120,17 @@ void ui_set_pir_slot_age(uint8_t slot, uint16_t age);
 void ui_set_pir_slot_occupied(uint8_t slot, uint8_t val);
 
 /* ---- Temp slot setters ---- */
-void ui_set_temp_count_slots(uint8_t count);
+void    ui_set_temp_count_slots(uint8_t count);
 uint8_t ui_get_temp_count_slots(void);
-void ui_set_temp_slot_decidegc(uint8_t slot, int16_t val);
-void ui_set_temp_slot_batt(uint8_t slot, int8_t batt);
-void ui_set_temp_slot_age(uint8_t slot, uint16_t age);
-void ui_stamp_temp_online(uint8_t slot, uint32_t tick);
-void ui_reflow_temp(int n);
+void    ui_set_temp_slot_decidegc(uint8_t slot, int16_t val);
+void    ui_set_temp_slot_batt(uint8_t slot, int8_t batt);
+void    ui_set_temp_slot_age(uint8_t slot, uint16_t age);
+void    ui_stamp_temp_online(uint8_t slot, uint32_t tick);
+void    ui_reflow_temp(int n);
+
+/* ---- Doorbell slot setters ---- */
+void ui_set_doorbell_slot_age(uint8_t slot, uint16_t age_s);
+void ui_set_doorbell_slot_online(uint8_t slot, uint8_t online);
 
 void ui_set_reed_state(uint8_t slot, uint8_t state);
 void ui_set_reed_batt(uint8_t slot, int8_t batt);

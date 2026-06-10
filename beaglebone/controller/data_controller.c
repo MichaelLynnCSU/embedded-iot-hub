@@ -39,7 +39,27 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <signal.h>
-#include "controller_internal.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <time.h>
+#include "config.h"
+#include "sensor_types.h"
+#include "shared_data.h"
+#include "log.h"
+#include "globals.h"
+#include "heartbeat.h"
+#include "db_manager.h"
+#include "uart_controller.h"
+#include "cmd/cmd_handler.h"
+#include "cmd/pipe_reader.h"
 
 FILE                    *log_fp    = NULL; /**< log file handle */
 pthread_mutex_t          log_mutex = PTHREAD_MUTEX_INITIALIZER; /**< log serialiser */

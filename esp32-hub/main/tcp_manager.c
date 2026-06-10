@@ -65,6 +65,7 @@
 #include "pir_window.h"
 #include "motor_server.h"
 #include "cam_trigger.h"
+#include "doorbell_listener.h"
 
 #define BB_CONNECT_TIMEOUT_MS   2000
 #define BLOCK_COUNT_MAX         5
@@ -121,6 +122,7 @@ typedef struct
    int               pir_occupied;
    uint8_t           doorbell_pressed;  /* 1 = new press, cleared after send */
    uint8_t           doorbell_device_id;
+   uint16_t          doorbell_age_s[MAX_DOORBELL_CAMS];  /* age per cam, 0xFFFF = never seen */
    uint8_t           light_state;
    uint8_t           lock_state;
    int               lock_batt;
@@ -324,6 +326,21 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
       g_state.temp_slots[i].gen           = t_gen;
    }
 
+   /* Snapshot doorbell liveness — mirrors ble_get_device_age_s pattern */
+   for (i = 0; i < MAX_DOORBELL_CAMS; i++)
+   {
+      g_state.doorbell_age_s[i] = doorbell_get_age_s((uint8_t)i);
+   }
+
+   /* ---- Doorbell debug log ---- */
+   for (i = 0; i < MAX_DOORBELL_CAMS; i++)
+   {
+      ESP_LOGI(TAG, "[DOORBELL] id=%d age_s=%d online=%d",
+               i,
+               g_state.doorbell_age_s[i],
+               doorbell_is_alive((uint8_t)i) ? 1 : 0);
+   }
+
    /* ---- Reed debug log ---- */
    for (i = 0; i < MAX_REEDS; i++)
    {
@@ -522,6 +539,23 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
    }
    (void)cJSON_AddNumberToObject(p_root, "temp_count", g_state.temp_count);
 
+   cJSON *p_doorbells = cJSON_CreateArray();
+   if (NULL != p_doorbells)
+   {
+      for (i = 0; i < MAX_DOORBELL_CAMS; i++)
+      {
+          p_entry = cJSON_CreateObject();
+          if (NULL != p_entry)
+            {
+               (void)cJSON_AddNumberToObject(p_entry, "id",      i);
+               (void)cJSON_AddNumberToObject(p_entry, "age_s",   g_state.doorbell_age_s[i]);
+               (void)cJSON_AddNumberToObject(p_entry, "online",  doorbell_is_alive((uint8_t)i) ? 1 : 0);
+               (void)cJSON_AddItemToArray(p_doorbells, p_entry);
+            }
+      }
+    (void)cJSON_AddItemToObject(p_root, "doorbells", p_doorbells);
+}
+
    p_msg = cJSON_PrintUnformatted(p_root);
    cJSON_Delete(p_root);
    if (NULL == p_msg) { ESP_LOGE(TAG, "cJSON serialize failed (BB)"); return; }
@@ -536,13 +570,15 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
       *p_bb_block_count = 0;
 
       ESP_LOGI(TAG, "[BEAGLEBONE] tmp=%d pir=%u occ=%d lgt=%d lck=%d "
-                    "reeds=%d temps=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d" "doorbell=%d",
+                    "reeds=%d temps=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d" 
+                    " doorbell=%d db_id=%d",
                g_state.avg_temp, (unsigned)g_state.motion_count,
                g_state.pir_occupied,
                g_state.light_state, g_state.lock_state, g_state.reed_count,
                g_state.temp_count,
                (int)g_state.motor_online, g_state.motor_batt,
-               g_state.pir_batt, g_state.lock_batt, g_state.doorbell_pressed);
+               g_state.pir_batt, g_state.lock_batt,
+               g_state.doorbell_pressed, g_state.doorbell_device_id);
 
       for (i = 0; i < g_state.pir_count; i++)
       {

@@ -1,3 +1,4 @@
+#include "db_manager.h"
 /******************************************************************************
  * \file db_persist.c
  * \brief DB persistence facade — persists raw ingress frame, not read model.

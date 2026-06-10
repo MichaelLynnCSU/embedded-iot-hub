@@ -3,113 +3,41 @@
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  * \date 01-01-2025
  *
- * \brief Command handler and sensor data receiver for BeagleBone controller.
+ * \brief Command pipe handler for BeagleBone controller.
  *
- * \details Processes commands from pipes and routes unified sensor frames 
- * down decoupled subsystem pipelines. Two threads run concurrently:
+ * \details Owns the command named pipe lifecycle and dispatches inbound
+ *          CommandMsg structs to process_command().
  *
- * receive_data_thread — reads SensorData structs from sensor_pipe
- * and pushes the frames down the stage, shm, and DB pipelines.
+ *          Single responsibility: command IPC transport only.
+ *          Sensor pipe read moved to pipe_reader.c.
+ *          Sensor frame fanout moved to sensor_dispatch.c.
  *
- * command_handler_thread — reads CommandMsg structs from
- * command_pipe and dispatches to process_command().
+ *          Pipe layout:
+ *            /tmp/sensor_pipe   — inbound sensor frames  (pipe_reader.c)
+ *            /tmp/command_pipe  — inbound commands       (this file)
  ******************************************************************************/
 
 #include <sys/stat.h>
-#include "../controller_internal.h"
+#include <unistd.h>
+#include <fcntl.h>
+#include "config.h"
+#include "globals.h"
+#include "log.h"
+#include "commands.h"
 
 #define PIPE_REOPEN_DELAY_S  1  /**< seconds to wait before reopening pipe */
 
 /******************************************************************************
- * \brief Receive and process one complete sensor data frame.
- ******************************************************************************/
-static void sensor_frame_dispatch(const struct SensorData *p_data)
-{
-    if (p_data->motor_online)
-    {
-       heartbeat_stamp(DEV_MOTOR);
-       LOG("Motor online — heartbeat stamped");
-    }
-
-    // Allocate the frozen read-model copy on the stack
-    struct LatestData snapshot;
-
-    // Mutate canonical state (Formerly uart_stage_frame)
-    update_snapshot(p_data);
-
-    // Read the frozen state model cleanly
-    get_snapshot(&snapshot);
-
-    // Pass BOTH the historical snapshot and the raw wire data
-    shm_update_frame(&snapshot, p_data);
-    db_persist_frame(p_data);
-    uart_update_frame(&snapshot, p_data); // Changed from uart_stage_frame
-
-    LOG("Sensor: temp=%.1f motion=%d occ=%d lgt=%d lck=%d mtr=%d "
-        "ages pir=%d lgt=%d lck=%d "
-        "batt pir=%d%% lck=%d%% motor=%d%% pirs=%d",
-        p_data->avg_temp,
-        p_data->motion_count,
-        p_data->pir_occupied,
-        p_data->light_state,
-        p_data->lock_state,
-        p_data->motor_online,
-        p_data->age_pir,
-        p_data->age_lgt,
-        p_data->age_lck,
-        p_data->batt_pir,
-        p_data->batt_lck,
-        p_data->batt_motor,
-        p_data->pir_count);
-}
-
-/******************************************************************************
- * \brief Thread — reads SensorData structs from sensor_pipe.
- ******************************************************************************/
-void *receive_data_thread(void *p_arg)
-{
-   int               pipe_fd = -1;
-   ssize_t           bytes   = 0;
-   struct SensorData data;
-
-   (void)p_arg;
-
-   pipe_fd = open(SENSOR_PIPE, O_RDONLY);
-   if (0 > pipe_fd)
-   {
-      LOG("Failed to open sensor pipe");
-      return NULL;
-   }
-
-   LOG("Listening for sensor data");
-
-   while (running)
-   {
-      bytes = read(pipe_fd, &data, sizeof(data));
-
-      if (bytes == (ssize_t)sizeof(data))
-      {
-         sensor_frame_dispatch(&data);
-      }
-      else if (0 == bytes)
-      {
-         LOG("Sensor pipe closed, reopening");
-         close(pipe_fd);
-         sleep(PIPE_REOPEN_DELAY_S);
-         pipe_fd = open(SENSOR_PIPE, O_RDONLY);
-      }
-      else
-      {
-         /* partial read — ignore */
-      }
-   }
-
-   close(pipe_fd);
-   return NULL;
-}
-
-/******************************************************************************
  * \brief Thread — reads CommandMsg structs from command_pipe.
+ *
+ * \param p_arg - Unused thread argument.
+ *
+ * \return void*
+ *
+ * \details Creates the command pipe on first run (unlink + mkfifo so a
+ *          stale pipe from a previous run is always replaced). Blocks on
+ *          read(). Dispatches each valid CommandMsg to process_command().
+ *          Reopens on EOF after PIPE_REOPEN_DELAY_S.
  ******************************************************************************/
 void *command_handler_thread(void *p_arg)
 {

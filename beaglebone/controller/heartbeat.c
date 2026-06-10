@@ -21,7 +21,16 @@
  *          No logic changes — critical section boundary unchanged.
  ******************************************************************************/
 
-#include "controller_internal.h"
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
+#include "config.h"
+#include "sensor_types.h"
+#include "shared_data.h"
+#include "log.h"
+#include "globals.h"
+#include "heartbeat.h"
+#include "db_manager.h"
 
 #define HB_POLL_SEC  1  /**< heartbeat monitor poll interval seconds */
 

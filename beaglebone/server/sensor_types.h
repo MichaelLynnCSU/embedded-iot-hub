@@ -12,6 +12,11 @@
  * \warning SensorData and ReedSlotData must be byte-for-byte identical
  *          with controller_internal.h. Both files must be updated
  *          together if the layout changes.
+ *
+ * \note    Doorbell liveness (2026-06-09):
+ *          DoorbellSlotData added — per-cam age_s and online flag.
+ *          doorbell_slots[MAX_DOORBELL_CAMS] and doorbell_count added
+ *          to SensorData tail. Must match controller_internal.h exactly.
  ******************************************************************************/
 
 #ifndef SENSOR_TYPES_H
@@ -19,11 +24,13 @@
 
 #include <stdint.h>
 
-#define MAX_TEMPS      4   /**< must match ESP32 and controller */
-#define TEMP_NAME_LEN  32  /**< temp sensor BLE name buffer size */
-#define MAX_ROOMS      10  /**< max room sensors per frame */
-#define MAX_REEDS      6   /**< must match ESP32 and controller */
-#define MAX_PIRS       5   /**< must match ESP32 and controller */
+#define MAX_TEMPS          4   /**< must match ESP32 and controller */
+#define TEMP_NAME_LEN      32  /**< temp sensor BLE name buffer size */
+#define MAX_ROOMS          10  /**< max room sensors per frame */
+#define MAX_REEDS          6   /**< must match ESP32 and controller */
+#define MAX_PIRS           5   /**< must match ESP32 and controller */
+#define MAX_DOORBELL_CAMS  4   /**< must match ESP32 and controller */
+
 #define REED_NAME_LEN  16  /**< reed BLE name buffer size */
 #define ROOM_NAME_LEN  32  /**< room name buffer size */
 #define ROOM_STATE_LEN 16  /**< room state buffer size */
@@ -31,6 +38,18 @@
 
 #define AGE_MAX     0xFFFEu /**< maximum reportable age */
 #define AGE_UNKNOWN 0xFFFFu /**< age sentinel: never seen */
+
+/**
+ * \brief Doorbell camera slot -- packed wire format.
+ *
+ * \warning Must match controller_internal.h DoorbellSlotData exactly.
+ */
+struct __attribute__((packed)) DoorbellSlotData
+{
+   uint16_t age_s;   /*!< seconds since last heartbeat/press, 0xFFFF=never */
+   uint8_t  online;  /*!< 1=alive within threshold, 0=stale or never seen  */
+   uint8_t  _pad;    /*!< alignment padding                                 */
+};
 
 /**
  * \brief Reed sensor slot -- packed wire format.
@@ -119,6 +138,9 @@ struct SensorData
 
    struct TempSlotData temp_slots[MAX_TEMPS]; /*!< dynamic temp slot array */
    uint8_t             temp_count;            /*!< number of active temp slots */
+
+   struct DoorbellSlotData doorbell_slots[MAX_DOORBELL_CAMS]; /*!< per-cam liveness */
+   uint8_t                 doorbell_count;                    /*!< always MAX_DOORBELL_CAMS */
 };
 
 #endif /* SENSOR_TYPES_H */

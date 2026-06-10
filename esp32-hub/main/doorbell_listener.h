@@ -25,5 +25,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 void doorbell_listener_start(EventGroupHandle_t wifi_eg);
+uint16_t doorbell_get_age_s(uint8_t device_id);
+bool     doorbell_is_alive(uint8_t device_id);
 
 #endif /* DOORBELL_LISTENER_H */

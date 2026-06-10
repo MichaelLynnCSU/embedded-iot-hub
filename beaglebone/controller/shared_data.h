@@ -24,6 +24,14 @@
  *          shm_mutex must be initialized with PTHREAD_PROCESS_SHARED
  *          before any other process maps the region (done in
  *          data_controller.c:init_shared_memory()).
+ *
+ * \note    Doorbell liveness (2026-06-09):
+ *          doorbell_age_s[MAX_DOORBELL_CAMS] and doorbell_online[MAX_DOORBELL_CAMS]
+ *          added after doorbell_timestamp. Per-cam liveness projected from
+ *          SensorData.doorbell_slots[] by shm_updater.c:shm_update_frame().
+ *          Any consumer that mmaps SharedSensorData gets per-cam status
+ *          without additional IPC. Recompile both controller and LCD after
+ *          this change.
  ******************************************************************************/
 
 #ifndef INCLUDE_SHARED_DATA_H_
@@ -43,6 +51,7 @@
 #define ROOM_NAME_SZ      32  /**< room name string buffer size */
 #define ROOM_STATE_SZ     16  /**< room state string buffer size */
 #define ROOM_LOC_SZ       32  /**< room location string buffer size */
+#define MAX_DOORBELL_CAMS 4   /**< number of doorbell camera slots */
 
 /** \brief Alert severity levels */
 #define ALERT_SEVERITY_LOW    1  /**< low severity alert */
@@ -143,9 +152,15 @@ struct SharedSensorData
    int  command_result;      /*!< result of last command (0=success, -1=fail) */
    int  sequence;            /*!< increments on each shm update */
    long response_time_ms;    /*!< time taken to process last command ms */
+
+   /* Doorbell press event — one-shot, cleared after each consumer reads */
    uint8_t  doorbell_pressed;    /*!< 1 = press received, UI shows alert     */
    uint8_t  doorbell_device_id;  /*!< 0-3, which doorbell cam                */
    long     doorbell_timestamp;  /*!< Unix timestamp of last press            */
+
+   /* Doorbell per-cam liveness — updated every TCP frame via shm_update_frame() */
+   uint16_t doorbell_age_s[MAX_DOORBELL_CAMS];  /*!< seconds since last heartbeat/press, 0xFFFF=never */
+   uint8_t  doorbell_online[MAX_DOORBELL_CAMS]; /*!< 1=alive within threshold, 0=stale or never seen  */
 };
 
 #endif /* INCLUDE_SHARED_DATA_H_ */

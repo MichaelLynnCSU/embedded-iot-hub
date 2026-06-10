@@ -173,6 +173,7 @@ static void wifi_init(void)
     esp_wifi_start();
 }
 
+
 /*---------------------------------------------------------------------------*/
 /* Lane A — UDP event to hub (authoritative, fires before image capture)      */
 /*---------------------------------------------------------------------------*/
@@ -370,6 +371,45 @@ static void capture_task(void *arg)
 }
 
 /*---------------------------------------------------------------------------*/
+/* Heartbeat                                                                   */
+/*---------------------------------------------------------------------------*/
+
+#define HEARTBEAT_INTERVAL_MS  30000   /* 30s — tune to taste */
+
+static void send_heartbeat(void)
+{
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(HUB_UDP_PORT);
+    inet_pton(AF_INET, HUB_HOST, &addr.sin_addr);
+
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) { return; }
+
+    char    buf[128];
+    uint64_t ts_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+
+    int len = snprintf(buf, sizeof(buf),
+        "{\"device_id\":%d,\"device_type\":\"doorbell\","
+        "\"event_type\":\"heartbeat\",\"timestamp_ms\":%llu}",
+        DOORBELL_ID, (unsigned long long)ts_ms);
+
+    sendto(sock, buf, len, 0, (struct sockaddr *)&addr, sizeof(addr));
+    close(sock);
+}
+
+static void heartbeat_task(void *arg)
+{
+    while (!g_wifi_up) { vTaskDelay(pdMS_TO_TICKS(500)); }
+
+    while (1)
+    {
+        vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_INTERVAL_MS));
+        send_heartbeat();
+    }
+}
+
+/*---------------------------------------------------------------------------*/
 /* app_main                                                                    */
 /*---------------------------------------------------------------------------*/
 
@@ -388,5 +428,6 @@ void app_main(void)
     button_init();
     wifi_init();
 
+    xTaskCreate(heartbeat_task, "heartbeat", 4096, NULL, 3, NULL);
     xTaskCreate(capture_task, "capture", 8192, NULL, 5, NULL);
 }

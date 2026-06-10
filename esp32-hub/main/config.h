@@ -39,6 +39,11 @@
 
 /******************************** CONSTANTS ***********************************/
 
+/** \brief Doorbell camera heartbeat liveness */
+#define MAX_DOORBELL_CAMS           4u       /**< max concurrent doorbell cams        */
+#define DOORBELL_OFFLINE_S          90u      /**< offline threshold seconds (3x 30s)  */
+#define DOORBELL_HEARTBEAT_MS       90000u   /**< offline threshold ms                */
+
 /** \brief WiFi event group bits */
 #define WIFI_CONNECTED_BIT          BIT0  /**< WiFi connected successfully */
 #define WIFI_FAIL_BIT               BIT1  /**< WiFi connection failed */

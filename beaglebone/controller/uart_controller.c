@@ -123,7 +123,23 @@
  ******************************************************************************/
 
 #include <termios.h>
-#include "controller_internal.h"
+#include <pthread.h>
+#include <semaphore.h>
+#include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <time.h>
+#include <stdlib.h>
+#include "config.h"
+#include "sensor_types.h"
+#include "shared_data.h"
+#include "log.h"
+#include "globals.h"
+#include "heartbeat.h"
+#include "db_manager.h"
+#include "uart_controller.h"
+#include "cmd/shm_updater.h"
 #include "controller_logic.h"
 #include "cmd/uart_staging.h"
 #include "cmd/state_registry.h"
@@ -999,6 +1015,16 @@ void uart_update_frame(const struct LatestData *p_snapshot,
                       p_snapshot->temp_slots[i].temp_decidegc,
                       p_snapshot->temp_slots[i].batt,
                       p_snapshot->temp_slots[i].age);
+   }
+
+   /* Doorbell per-cam liveness — mirrors TEMP<n> pattern */
+   for (i = 0; i < MAX_DOORBELL_CAMS; i++)
+   {
+       pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "DB%d:%d,%d\n",
+                      i,
+                      p_raw_frame->doorbell_slots[i].age_s,
+                      p_raw_frame->doorbell_slots[i].online);
    }
 
    /* Read doorbell from shm one-shot — clear after reading */

@@ -26,6 +26,12 @@
  *          - process_json() summary line extended with motor_online
  *            and pir_occ.
  *
+ *          Doorbell liveness (2026-06-09):
+ *          parse_doorbell_slots() added — parses "doorbells" JSON array
+ *          into SensorData.doorbell_slots[]. id is 0-based (matches hub
+ *          serialization). Initializes all slots to AGE_UNKNOWN/offline
+ *          before parse. Per-cam log block added after Reed log.
+ *
  *          Dependency direction:
  *            json_parser.c -> pipe_writer.c -> named pipe -> controller
  ******************************************************************************/
@@ -297,6 +303,54 @@ static void parse_temp_slots(struct json_object *p_temps_arr,
 }
 
 /******************************************************************************
+ * \brief Parse "doorbells" JSON array into p_data->doorbell_slots[].
+ *
+ * \param p_doorbells_arr - JSON array object for "doorbells" key.
+ * \param p_data          - Pointer to SensorData to populate.
+ *
+ * \details id is 0-based — matches hub serialization ("id": i not i+1).
+ *          Each entry has id (0-3), age_s, online.
+ *          Populates doorbell_slots[id] directly.
+ ******************************************************************************/
+static void parse_doorbell_slots(struct json_object *p_doorbells_arr,
+                                  struct SensorData  *p_data)
+{
+   int                 n      = 0;
+   int                 i      = 0;
+   int                 id     = 0;
+   int                 age    = 0;
+   struct json_object *p_r    = NULL;
+   struct json_object *p_jid  = NULL;
+   struct json_object *p_jval = NULL;
+
+   n = json_object_array_length(p_doorbells_arr);
+
+   for (i = 0; i < n; i++)
+   {
+      p_r = json_object_array_get_idx(p_doorbells_arr, i);
+
+      if (!json_object_object_get_ex(p_r, "id", &p_jid)) { continue; }
+
+      id = json_object_get_int(p_jid);
+
+      if ((0 > id) || (id >= MAX_DOORBELL_CAMS)) { continue; }
+
+      if (json_object_object_get_ex(p_r, "age_s", &p_jval))
+      {
+         age = json_object_get_int(p_jval);
+         p_data->doorbell_slots[id].age_s =
+            (0 > age) ? AGE_UNKNOWN : (uint16_t)age;
+      }
+
+      if (json_object_object_get_ex(p_r, "online", &p_jval))
+      {
+         p_data->doorbell_slots[id].online =
+            (uint8_t)json_object_get_int(p_jval);
+      }
+   }
+}
+
+/******************************************************************************
  * \brief Parse room entries from JSON rooms array into SensorData.
  *
  * \param p_rooms_arr - JSON array object for "rooms" key.
@@ -394,13 +448,20 @@ void process_json(const char *p_json_body)
 
    for (i = 0; i < MAX_PIRS; i++)
    {
-      data.pir_slots[i].age     = AGE_UNKNOWN;
-      data.pir_slots[i].batt    = -1;
-      data.pir_slots[i].active  = 0;
-      data.pir_slots[i].count   = 0;
-      data.pir_slots[i].offline = 0;
+      data.pir_slots[i].age      = AGE_UNKNOWN;
+      data.pir_slots[i].batt     = -1;
+      data.pir_slots[i].active   = 0;
+      data.pir_slots[i].count    = 0;
+      data.pir_slots[i].offline  = 0;
       data.pir_slots[i].occupied = 0;
    }
+
+   for (i = 0; i < MAX_DOORBELL_CAMS; i++)
+   {
+      data.doorbell_slots[i].age_s  = AGE_UNKNOWN;
+      data.doorbell_slots[i].online = 0;
+   }
+   data.doorbell_count = MAX_DOORBELL_CAMS;
 
    if (json_object_object_get_ex(p_root, "avg_temp", &p_obj))
    {
@@ -435,10 +496,12 @@ void process_json(const char *p_json_body)
    {
       data.pir_occupied = (int8_t)json_object_get_int(p_obj);
    }
+
    if (json_object_object_get_ex(p_root, "doorbell_pressed", &p_obj))
    {
       data.doorbell_pressed = (uint8_t)json_object_get_int(p_obj);
    }
+
    if (json_object_object_get_ex(p_root, "doorbell_device_id", &p_obj))
    {
       data.doorbell_device_id = (uint8_t)json_object_get_int(p_obj);
@@ -478,9 +541,15 @@ void process_json(const char *p_json_body)
    {
       data.temp_count = (uint8_t)json_object_get_int(p_obj);
    }
+
    if (json_object_object_get_ex(p_root, "temps", &p_obj))
    {
       parse_temp_slots(p_obj, &data);
+   }
+
+   if (json_object_object_get_ex(p_root, "doorbells", &p_obj))
+   {
+      parse_doorbell_slots(p_obj, &data);
    }
 
    if (json_object_object_get_ex(p_root, "rooms", &p_obj))
@@ -536,6 +605,15 @@ void process_json(const char *p_json_body)
                  data.reed_slots[i].offline,
                  data.reed_slots[i].gen);
       }
+   }
+
+   /* Per-cam doorbell liveness */
+   for (i = 0; i < MAX_DOORBELL_CAMS; i++)
+   {
+      log_msg("  Doorbell id=%d age_s=%d online=%d",
+              i,
+              data.doorbell_slots[i].age_s,
+              data.doorbell_slots[i].online);
    }
 
    /* Per-room log */

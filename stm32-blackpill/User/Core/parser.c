@@ -11,13 +11,14 @@
  * \details Processes line-oriented ASCII messages from the ESP32. Messages
  *          follow the pattern "ID:field[,field...]". Supported IDs:
  *            REED_COUNT, DR1-DR6, PIR_COUNT, PIR1-PIR4, OCC1-OCC4, PIR,
- *            LGT, LCK, MTR, STATE, OCC.
+ *            LGT, LCK, MTR, STATE, OCC, TEMP_COUNT, TEMP1-TEMP4,
+ *            DB0-DB3, DOORBELL.
  *          All parsing uses strtol() rather than atoi() for error detection.
  *
  *          Online/offline pattern (all devices including MTR):
  *          - When online: update value and stamp last-seen tick
  *          - When offline: do nothing — HB_TIMEOUT_MS expiry drives dot red
- *          - This is identical behaviour for PIR, LGT, LCK, and MTR
+ *          - This is identical behaviour for PIR, LGT, LCK, MTR, and DB
  *
  * \note    OCC frame (2026-04-30):
  *          OCC:0 / OCC:1 sent by BeagleBone every UART_PUSH_INTERVAL_SEC.
@@ -37,6 +38,13 @@
  *          PIR<1-4> pattern. Calls ui_set_pir_slot_occupied(slot, val).
  *          Legacy OCC:n handler retained in parse_single_value() for
  *          backward compatibility during rollout.
+ *
+ * \note    Doorbell liveness (2026-06-09):
+ *          DB<0-3>:age_s,online dispatched before DOORBELL: press handler.
+ *          parse_doorbell_slot() mirrors parse_pir_slot() / parse_temp_slot().
+ *          Stamps ui_stamp_doorbell_online() when online=1.
+ *          DB_DIGIT_OFFSET=2, slot is 0-based (- '0' not - '1') matching
+ *          hub serialization convention.
  ******************************************************************************/
 
 #include "parser.h"
@@ -57,7 +65,9 @@
 #define DR_DIGIT_OFFSET        2u  /**< Character offset of digit in "DR1"     */
 #define PIR_DIGIT_OFFSET       3u  /**< Character offset of digit in "PIR1"    */
 #define OCC_DIGIT_OFFSET       3u  /**< Character offset of digit in "OCC1"    */
-#define TEMP_DIGIT_OFFSET      4u  /**< Character offset of digit in "TEMP1" */
+#define TEMP_DIGIT_OFFSET      4u  /**< Character offset of digit in "TEMP1"   */
+#define DB_DIGIT_OFFSET        2u  /**< Character offset of digit in "DB0"     */
+
 /************************** STATIC (PRIVATE) FUNCTIONS ************************/
 
 /**
@@ -138,15 +148,8 @@ static void parse_pir_count(const char *p_rest)
       return;
    }
 
-   if (n > (int)MAX_PIRS)
-   {
-      n = (int)MAX_PIRS;
-   }
-
-   if (n < 0)
-   {
-      n = 0;
-   }
+   if (n > (int)MAX_PIRS) { n = (int)MAX_PIRS; }
+   if (n < 0)             { n = 0; }
 
    if ((uint8_t)n != ui_get_pir_count_slots())
    {
@@ -284,11 +287,9 @@ static void parse_pir_slot(int slot, const char *p_rest)
    }
 
    char dbg[96];
-
    snprintf(dbg, sizeof(dbg),
          "[PIR] slot=%d count=%d batt=%d age=%d\r\n",
          slot, count, batt, age);
-
    log_enqueue(dbg);
 }
 
@@ -338,6 +339,60 @@ static void parse_temp_slot(int slot, const char *p_rest)
    snprintf(dbg, sizeof(dbg),
             "[TEMP] slot=%d decidegc=%d batt=%d age=%d\r\n",
             slot, temp_decidegc, batt, age);
+   log_enqueue(dbg);
+}
+
+/**
+ * \brief  Handle a DB<0-3>:age_s,online message — update one doorbell cam slot.
+ *
+ * \param  slot   - Zero-based doorbell index (0..MAX_DOORBELL_CAMS-1).
+ * \param  p_rest - String after the colon: "age_s,online".
+ *
+ * \details Mirrors parse_temp_slot(). Stamps ui_stamp_doorbell_online()
+ *          when online=1. Slot is 0-based — matches hub serialization
+ *          (id=0..3, not 1-based like reed/PIR).
+ */
+static void parse_doorbell_slot(int slot, const char *p_rest)
+{
+   char     tmp[UART_LINE_LEN] = {0};
+   char    *p_tok              = NULL;
+   int      age_s              = 0xFFFF;
+   int      online             = 0;
+   uint32_t now                = 0u;
+
+   if ((slot < 0) || (slot >= (int)MAX_DOORBELL_CAMS))
+   {
+      return;
+   }
+
+   if (NULL == p_rest)
+   {
+      return;
+   }
+
+   (void)strncpy(tmp, p_rest, sizeof(tmp) - 1u);
+   tmp[sizeof(tmp) - 1u] = '\0';
+
+   p_tok = strtok(tmp, ",");
+   if (NULL != p_tok) { (void)parse_int(p_tok, &age_s); }
+
+   p_tok = strtok(NULL, ",");
+   if (NULL != p_tok) { (void)parse_int(p_tok, &online); }
+
+   now = HAL_GetTick();
+
+   ui_set_doorbell_slot_age((uint8_t)slot,    (uint16_t)age_s);
+   ui_set_doorbell_slot_online((uint8_t)slot, (uint8_t)online);
+
+   if (1 == online)
+   {
+      ui_stamp_doorbell_online((uint8_t)slot, now);
+   }
+
+   char dbg[64];
+   snprintf(dbg, sizeof(dbg),
+            "[DB] slot=%d age_s=%d online=%d\r\n",
+            slot, age_s, online);
    log_enqueue(dbg);
 }
 
@@ -482,8 +537,12 @@ static void parse_single_value(const char *p_id, int val, int batt)
  *          3. PIR_COUNT   — PIR slot count handler, returns.
  *          4. PIR<1-4>    — per-slot PIR handler, returns.
  *          5. OCC<1-4>    — per-slot occupancy handler, returns.
- *          6. STATE       — bulk state handler, returns.
- *          7. Everything else — single-value fallthrough (PIR, LGT, LCK,
+ *          6. TEMP_COUNT  — temp slot count handler, returns.
+ *          7. TEMP<1-4>   — per-slot temp handler, returns.
+ *          8. DB<0-3>     — per-cam doorbell liveness handler, returns.
+ *          9. DOORBELL    — press event handler, returns.
+ *         10. STATE       — bulk state handler, returns.
+ *         11. Everything else — single-value fallthrough (PIR, LGT, LCK,
  *             MTR, OCC).
  */
 void parser_process_line(const char *p_line)
@@ -538,7 +597,7 @@ void parser_process_line(const char *p_line)
       return;
    }
 
-   /* PIR<1-4>:count,batt,age
+   /* PIR<1-5>:count,batt,age
     * ID is exactly 4 chars: P I R <digit> */
    if (('P' == p_id[0]) && ('I' == p_id[1]) && ('R' == p_id[2]) &&
        (p_id[PIR_DIGIT_OFFSET] >= '1') && (p_id[PIR_DIGIT_OFFSET] <= '5') &&
@@ -549,9 +608,7 @@ void parser_process_line(const char *p_line)
       return;
    }
 
-   /* OCC<1-4>:occupied — per-slot occupancy, mirrors PIR<1-4> pattern.
-    * \note Per-slot OCC (2026-05-20): replaces single OCC:n global frame.
-    *       BeagleBone sends OCC1:n..OCC4:n, one per active PIR slot.
+   /* OCC<1-5>:occupied — per-slot occupancy, mirrors PIR<1-5> pattern.
     * ID is exactly 4 chars: O C C <digit> */
    if (('O' == p_id[0]) && ('C' == p_id[1]) && ('C' == p_id[2]) &&
        (p_id[OCC_DIGIT_OFFSET] >= '1') && (p_id[OCC_DIGIT_OFFSET] <= '5') &&
@@ -570,7 +627,8 @@ void parser_process_line(const char *p_line)
       return;
    }
 
-   /* TEMP<1-4>:decidegc,batt,age */
+   /* TEMP<1-4>:decidegc,batt,age
+    * ID is exactly 5 chars: T E M P <digit> */
    if (('T' == p_id[0]) && ('E' == p_id[1]) && ('M' == p_id[2]) && ('P' == p_id[3]) &&
        (p_id[TEMP_DIGIT_OFFSET] >= '1') && (p_id[TEMP_DIGIT_OFFSET] <= '4') &&
        ('\0' == p_id[TEMP_DIGIT_OFFSET + 1u]))
@@ -580,7 +638,20 @@ void parser_process_line(const char *p_line)
       return;
    }
 
-   /* DOORBELL:pressed,device_id */
+   /* DB<0-3>:age_s,online — per-cam doorbell liveness.
+    * ID is exactly 3 chars: D B <digit>.
+    * Slot is 0-based (- '0') matching hub serialization convention.
+    * Must be dispatched before DOORBELL: to avoid prefix collision. */
+   if (('D' == p_id[0]) && ('B' == p_id[1]) &&
+       (p_id[DB_DIGIT_OFFSET] >= '0') && (p_id[DB_DIGIT_OFFSET] <= '3') &&
+       ('\0' == p_id[DB_DIGIT_OFFSET + 1u]))
+   {
+      slot = (int)(p_id[DB_DIGIT_OFFSET] - '0');
+      parse_doorbell_slot(slot, p_rest);
+      return;
+   }
+
+   /* DOORBELL:pressed,device_id — press event, one-shot */
    if (0 == strcmp(p_id, "DOORBELL"))
    {
       char  tmp[UART_LINE_LEN] = {0};
