@@ -350,6 +350,44 @@ static void parse_doorbell_slots(struct json_object *p_doorbells_arr,
    }
 }
 
+static void parse_cam_slots(struct json_object *p_cams_arr,
+                             struct SensorData  *p_data)
+{
+   int                 n      = 0;
+   int                 i      = 0;
+   int                 id     = 0;
+   int                 age    = 0;
+   struct json_object *p_r    = NULL;
+   struct json_object *p_jid  = NULL;
+   struct json_object *p_jval = NULL;
+
+   n = json_object_array_length(p_cams_arr);
+
+   for (i = 0; i < n; i++)
+   {
+      p_r = json_object_array_get_idx(p_cams_arr, i);
+
+      if (!json_object_object_get_ex(p_r, "id", &p_jid)) { continue; }
+
+      id = json_object_get_int(p_jid);
+
+      if ((0 > id) || (id >= MAX_CAMS)) { continue; }
+
+      if (json_object_object_get_ex(p_r, "age_s", &p_jval))
+      {
+         age = json_object_get_int(p_jval);
+         p_data->cam_slots[id].age_s =
+            (0 > age) ? AGE_UNKNOWN : (uint16_t)age;
+      }
+
+      if (json_object_object_get_ex(p_r, "online", &p_jval))
+      {
+         p_data->cam_slots[id].online =
+            (uint8_t)json_object_get_int(p_jval);
+      }
+   }
+}
+
 /******************************************************************************
  * \brief Parse room entries from JSON rooms array into SensorData.
  *
@@ -463,6 +501,12 @@ void process_json(const char *p_json_body)
    }
    data.doorbell_count = MAX_DOORBELL_CAMS;
 
+   for (i = 0; i < MAX_CAMS; i++)
+   {
+      data.cam_slots[i].age_s  = AGE_UNKNOWN;
+      data.cam_slots[i].online = 0;
+   }
+
    if (json_object_object_get_ex(p_root, "avg_temp", &p_obj))
    {
       data.avg_temp = json_object_get_double(p_obj);
@@ -552,6 +596,11 @@ void process_json(const char *p_json_body)
       parse_doorbell_slots(p_obj, &data);
    }
 
+   if (json_object_object_get_ex(p_root, "cams", &p_obj))
+   {
+      parse_cam_slots(p_obj, &data);
+   }
+
    if (json_object_object_get_ex(p_root, "rooms", &p_obj))
    {
       parse_rooms(p_obj, &data);
@@ -614,6 +663,14 @@ void process_json(const char *p_json_body)
               i,
               data.doorbell_slots[i].age_s,
               data.doorbell_slots[i].online);
+   }
+
+   for (i = 0; i < MAX_CAMS; i++)
+   {
+      log_msg("  Cam slot=%d age_s=%d online=%d",
+              i,
+              data.cam_slots[i].age_s,
+              data.cam_slots[i].online);
    }
 
    /* Per-room log */

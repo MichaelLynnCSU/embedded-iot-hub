@@ -32,6 +32,7 @@
 #define MAX_PIRS         5
 #define MAX_TEMPS        4
 #define MAX_DOORBELL_CAMS 4   /* must match ESP32 tcp_manager.c and shared_data.h */
+#define MAX_CAMS          3   /* must match ESP32 udp_device_ingress.c */
 #define TEMP_NAME_LEN   32
 #define UART_LINE_LEN   64
 

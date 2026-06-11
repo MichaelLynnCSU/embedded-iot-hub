@@ -7,16 +7,20 @@
  *
  * \details Extracted from sensor_server.c (2026-05-10) so that
  *          json_parser.c and pipe_writer.c can both include SensorData
- *          and ReedSlotData without depending on sensor_server.c.
+ *          and slot structs without depending on sensor_server.c.
  *
- * \warning SensorData and ReedSlotData must be byte-for-byte identical
- *          with controller_internal.h. Both files must be updated
- *          together if the layout changes.
+ * \warning All structs and SensorData layout must be byte-for-byte
+ *          identical with beaglebone/controller/include/sensor_types.h.
+ *          Both files must be updated together if the layout changes.
  *
  * \note    Doorbell liveness (2026-06-09):
- *          DoorbellSlotData added — per-cam age_s and online flag.
- *          doorbell_slots[MAX_DOORBELL_CAMS] and doorbell_count added
- *          to SensorData tail. Must match controller_internal.h exactly.
+ *          DoorbellSlotData added. doorbell_slots[MAX_DOORBELL_CAMS]
+ *          and doorbell_count added to SensorData tail.
+ *
+ * \note    Inference camera liveness (2026-06-10):
+ *          CamSlotData added. cam_slots[MAX_CAMS] added to SensorData
+ *          tail. MAX_CAMS=3 (indoor/front/back). Heartbeat stamped by
+ *          esp32-cam udp_device_ingress, projected to BBB via TCP frame.
  ******************************************************************************/
 
 #ifndef SENSOR_TYPES_H
@@ -30,6 +34,7 @@
 #define MAX_REEDS          6   /**< must match ESP32 and controller */
 #define MAX_PIRS           5   /**< must match ESP32 and controller */
 #define MAX_DOORBELL_CAMS  4   /**< must match ESP32 and controller */
+#define MAX_CAMS           3   /**< inference cameras — must match controller */
 
 #define REED_NAME_LEN  16  /**< reed BLE name buffer size */
 #define ROOM_NAME_LEN  32  /**< room name buffer size */
@@ -39,108 +44,103 @@
 #define AGE_MAX     0xFFFEu /**< maximum reportable age */
 #define AGE_UNKNOWN 0xFFFFu /**< age sentinel: never seen */
 
-/**
- * \brief Doorbell camera slot -- packed wire format.
- *
- * \warning Must match controller_internal.h DoorbellSlotData exactly.
- */
+/** \brief Doorbell camera slot — packed wire format. */
 struct __attribute__((packed)) DoorbellSlotData
 {
    uint16_t age_s;   /*!< seconds since last heartbeat/press, 0xFFFF=never */
    uint8_t  online;  /*!< 1=alive within threshold, 0=stale or never seen  */
-   uint8_t  _pad;    /*!< alignment padding                                 */
+   uint8_t  _pad;
 };
 
-/**
- * \brief Reed sensor slot -- packed wire format.
- *
- * \warning Must match controller_internal.h ReedSlotData exactly.
- */
+/** \brief Inference camera slot — packed wire format. */
+struct __attribute__((packed)) CamSlotData
+{
+   uint16_t age_s;   /*!< seconds since last heartbeat, 0xFFFF=never */
+   uint8_t  online;  /*!< 1=alive within threshold, 0=stale          */
+   uint8_t  _pad;
+};
+
+/** \brief Reed sensor slot — packed wire format. */
 struct __attribute__((packed)) ReedSlotData
 {
-   uint16_t age;                 /*!< seconds since last adv, 0xFFFF=never */
-   int8_t   batt;                /*!< battery SOC percent, -1=unknown */
-   uint8_t  active;              /*!< 1=slot occupied (ACTIVE or OFFLINE) */
-   uint8_t  state;               /*!< 0=closed 1=open 0xFF=unknown */
-   uint8_t  offline;             /*!< 1=SLOT_OFFLINE, red dot, tile stays */
-   uint16_t gen;                 /*!< generation counter, increments on swap */
-   char     name[REED_NAME_LEN]; /*!< BLE advertised name */
+   uint16_t age;
+   int8_t   batt;
+   uint8_t  active;
+   uint8_t  state;
+   uint8_t  offline;
+   uint16_t gen;
+   char     name[REED_NAME_LEN];
 };
 
-/**
- * \brief PIR sensor slot -- packed wire format.
- *
- * \warning Must match controller_internal.h PirSlotData exactly.
- */
+/** \brief PIR sensor slot — packed wire format. */
 struct __attribute__((packed)) PirSlotData
 {
-   uint32_t count;    /*!< cumulative motion event count   */
-   uint16_t age;      /*!< seconds since last adv          */
-   int8_t   batt;     /*!< battery SOC percent, -1=unknown */
-   uint8_t  active;   /*!< 1=slot occupied                 */
-   int8_t   occupied; /*!< sliding-window occupancy flag   */
-   uint8_t  offline;  /*!< age > PIR_OFFLINE_S             */
+   uint32_t count;
+   uint16_t age;
+   int8_t   batt;
+   uint8_t  active;
+   int8_t   occupied;
+   uint8_t  offline;
 };
 
-/**
- * \brief Temperature sensor slot -- packed wire format.
- *
- * \warning Must match controller_internal.h TempSlotData exactly.
- */
+/** \brief Temperature sensor slot — packed wire format. */
 struct __attribute__((packed)) TempSlotData
 {
-   int16_t  temp_decidegc; /*!< temperature in tenths of °C      */
-   uint16_t age;           /*!< seconds since last adv           */
-   int8_t   batt;          /*!< battery SOC percent, -1=unknown  */
-   uint8_t  active;        /*!< 1=slot occupied                  */
-   uint8_t  offline;       /*!< age > TEMP_OFFLINE_S             */
-   uint8_t  _pad;          /*!< padding for alignment            */
-   char     name[TEMP_NAME_LEN]; /*!< BLE advertised name        */
+   int16_t  temp_decidegc;
+   uint16_t age;
+   int8_t   batt;
+   uint8_t  active;
+   uint8_t  offline;
+   uint8_t  _pad;
+   char     name[TEMP_NAME_LEN];
 };
 
 /**
- * \brief Sensor data pipe wire format.
+ * \brief Sensor data pipe wire format — written by server, read by controller.
  *
- * \warning Must match controller_internal.h SensorData exactly.
+ * \warning Layout must match beaglebone/controller/include/sensor_types.h
+ *          SensorData exactly. Any field change requires recompiling both.
  */
 struct SensorData
 {
-   double   avg_temp;     /*!< average temperature in Celsius */
-   int      motion_count; /*!< PIR motion event count */
-   int      light_state;  /*!< smart light relay state */
-   int      lock_state;   /*!< smart lock state */
-   long     timestamp;    /*!< Unix timestamp of reading */
-   int      room_count;   /*!< number of valid room entries */
-   uint8_t  doorbell_pressed;    /*!< 1 = press received this frame          */
-   uint8_t  doorbell_device_id;  /*!< 0-3, which doorbell cam                */
+   double   avg_temp;
+   int      motion_count;
+   int      light_state;
+   int      lock_state;
+   long     timestamp;
+   int      room_count;
+   uint8_t  doorbell_pressed;
+   uint8_t  doorbell_device_id;
 
    struct
    {
-      int  sensor_id;                /*!< room sensor identifier */
-      char room_name[ROOM_NAME_LEN]; /*!< room name string */
-      char state[ROOM_STATE_LEN];    /*!< current state string */
-      char location[ROOM_LOC_LEN];   /*!< physical location string */
+      int  sensor_id;
+      char room_name[ROOM_NAME_LEN];
+      char state[ROOM_STATE_LEN];
+      char location[ROOM_LOC_LEN];
    } rooms[MAX_ROOMS];
 
-   uint16_t age_pir;      /*!< PIR device age seconds (legacy flat) */
-   uint16_t age_lgt;      /*!< light device age seconds */
-   uint16_t age_lck;      /*!< lock device age seconds */
-   int8_t   batt_pir;     /*!< PIR battery SOC percent (legacy flat) */
-   int8_t   pir_occupied; /*!< 1=occupied, 0=empty */
-   int8_t   batt_lck;     /*!< lock battery SOC percent */
-   int      batt_motor;   /*!< motor battery SOC percent */
+   uint16_t age_pir;
+   uint16_t age_lgt;
+   uint16_t age_lck;
+   int8_t   batt_pir;
+   int8_t   pir_occupied;
+   int8_t   batt_lck;
+   int      batt_motor;
 
-   struct ReedSlotData reed_slots[MAX_REEDS]; /*!< dynamic reed slot array */
-   uint8_t  motor_online; /*!< 1 if C3 motor controller is online */
+   struct ReedSlotData reed_slots[MAX_REEDS];
+   uint8_t             motor_online;
 
-   struct PirSlotData pir_slots[MAX_PIRS]; /*!< dynamic PIR slot array */
-   uint8_t            pir_count;           /*!< number of active PIR slots */
+   struct PirSlotData pir_slots[MAX_PIRS];
+   uint8_t            pir_count;
 
-   struct TempSlotData temp_slots[MAX_TEMPS]; /*!< dynamic temp slot array */
-   uint8_t             temp_count;            /*!< number of active temp slots */
+   struct TempSlotData temp_slots[MAX_TEMPS];
+   uint8_t             temp_count;
 
-   struct DoorbellSlotData doorbell_slots[MAX_DOORBELL_CAMS]; /*!< per-cam liveness */
-   uint8_t                 doorbell_count;                    /*!< always MAX_DOORBELL_CAMS */
+   struct DoorbellSlotData doorbell_slots[MAX_DOORBELL_CAMS];
+   uint8_t                 doorbell_count;
+
+   struct CamSlotData cam_slots[MAX_CAMS];
 };
 
 #endif /* SENSOR_TYPES_H */

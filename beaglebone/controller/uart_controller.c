@@ -1037,5 +1037,15 @@ void uart_update_frame(const struct LatestData *p_snapshot,
    pos += snprintf(msg + pos, sizeof(msg) - pos,
                    "DOORBELL:%d,%d\n", doorbell_pressed, doorbell_device_id);
 
+   /* Inference camera liveness — derived from shm at push time */
+   pthread_mutex_lock(&shm_data->shm_mutex);
+   for (i = 0; i < CAM_COUNT; i++)
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "CAM%d:%d\n", i + 1,
+                      shm_data->cam_online[i]);
+   }
+   pthread_mutex_unlock(&shm_data->shm_mutex);
+
    uart_push_msg(msg, pos);
 }

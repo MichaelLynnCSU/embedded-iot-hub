@@ -10,28 +10,19 @@
  *          include this header — the layout must never change without
  *          recompiling both binaries.
  *
- * \warning SHM_NAME is also defined in controller_internal.h.
- *          shared_data.h is the authoritative definition — controller_internal.h
- *          includes this header and should not redefine it.
- *
  * \note    Semaphore → mutex migration (2026-05-22):
- *          shm_sem (named POSIX semaphore, binary, val=1) replaced by
- *          shm_mutex (pthread_mutex_t, PTHREAD_PROCESS_SHARED) embedded
- *          as the first field of SharedSensorData. Embedding the mutex
- *          inside the mapped region means any process that calls mmap()
- *          on SHM_NAME gets the mutex automatically — no named semaphore
- *          object, no sem_open/sem_close/sem_unlink in any process.
- *          shm_mutex must be initialized with PTHREAD_PROCESS_SHARED
- *          before any other process maps the region (done in
- *          data_controller.c:init_shared_memory()).
+ *          shm_sem replaced by shm_mutex (pthread_mutex_t,
+ *          PTHREAD_PROCESS_SHARED) embedded as the first field.
+ *          Initialized once by data_controller.c:init_shared_memory().
  *
  * \note    Doorbell liveness (2026-06-09):
- *          doorbell_age_s[MAX_DOORBELL_CAMS] and doorbell_online[MAX_DOORBELL_CAMS]
- *          added after doorbell_timestamp. Per-cam liveness projected from
+ *          doorbell_age_s[] and doorbell_online[] added. Projected from
  *          SensorData.doorbell_slots[] by shm_updater.c:shm_update_frame().
- *          Any consumer that mmaps SharedSensorData gets per-cam status
- *          without additional IPC. Recompile both controller and LCD after
- *          this change.
+ *
+ * \note    Inference camera liveness (2026-06-10):
+ *          cam_age_s[] and cam_online[] added. CAM_COUNT=3.
+ *          Projected from SensorData.cam_slots[] by shm_updater.c.
+ *          Heartbeat stamped by esp32-cam, forwarded by hub TCP frame.
  ******************************************************************************/
 
 #ifndef INCLUDE_SHARED_DATA_H_
@@ -52,115 +43,102 @@
 #define ROOM_STATE_SZ     16  /**< room state string buffer size */
 #define ROOM_LOC_SZ       32  /**< room location string buffer size */
 #define MAX_DOORBELL_CAMS 4   /**< number of doorbell camera slots */
+#define CAM_COUNT         3   /**< number of inference cameras */
 
 /** \brief Alert severity levels */
-#define ALERT_SEVERITY_LOW    1  /**< low severity alert */
-#define ALERT_SEVERITY_MED    2  /**< medium severity alert */
-#define ALERT_SEVERITY_HIGH   3  /**< high severity alert */
+#define ALERT_SEVERITY_LOW    1
+#define ALERT_SEVERITY_MED    2
+#define ALERT_SEVERITY_HIGH   3
 
 /************************ STRUCTURE/UNION DATA TYPES **************************/
 
 /** \brief Single historical sensor reading. */
 struct HistoryPoint
 {
-   double temp;      /*!< temperature reading in Celsius */
-   int    motion;    /*!< motion event count */
-   long   timestamp; /*!< Unix timestamp of reading */
+   double temp;
+   int    motion;
+   long   timestamp;
 };
 
 /** \brief System alert entry. */
 struct Alert
 {
-   long timestamp;               /*!< Unix timestamp of alert */
-   char message[ALERT_MSG_SIZE]; /*!< alert description string */
-   int  severity;                /*!< severity level: 1=low, 2=medium, 3=high */
+   long timestamp;
+   char message[ALERT_MSG_SIZE];
+   int  severity;
 };
 
 /** \brief Room sensor status entry. */
 struct RoomStatus
 {
-   int  sensor_id;               /*!< unique room sensor identifier */
-   char room_name[ROOM_NAME_SZ]; /*!< room name string */
-   char state[ROOM_STATE_SZ];    /*!< current state e.g. "open" or "closed" */
-   char location[ROOM_LOC_SZ];   /*!< physical location string */
-   long timestamp;               /*!< Unix timestamp of last update */
+   int  sensor_id;
+   char room_name[ROOM_NAME_SZ];
+   char state[ROOM_STATE_SZ];
+   char location[ROOM_LOC_SZ];
+   long timestamp;
 };
 
 /**
  * \brief POSIX shared memory layout — written by controller, read by LCD.
  *
- * \warning Both controller and LCD display must be compiled with the same
- *          version of this struct. Any layout change requires recompiling
- *          both binaries.
- *
- * \note    shm_mutex is the first field so its alignment is always correct
- *          regardless of platform. It must be initialized once by the
- *          controller process before the LCD process maps the region.
+ * \warning Any layout change requires recompiling both controller and LCD.
+ *          shm_mutex must be first field for correct alignment.
  */
 struct SharedSensorData
 {
-   /* Process-shared mutex — replaces the named shm_sem semaphore.
-    * Initialized with PTHREAD_PROCESS_SHARED in init_shared_memory().
-    * All readers and writers in any process lock this before touching
-    * any other field in this struct.                                    */
-   pthread_mutex_t shm_mutex;
+   pthread_mutex_t shm_mutex; /*!< process-shared mutex, init by controller  */
 
-   uint8_t device_online[DEVICE_COUNT]; /*!< online flags indexed by DEV_ID_E */
+   uint8_t device_online[DEVICE_COUNT];
 
-   /* Current sensor reading */
-   double current_temp;      /*!< latest average temperature in Celsius */
-   int    current_motion;    /*!< latest PIR motion event count */
-   int    current_light;     /*!< latest smart light relay state */
-   int    current_lock;      /*!< latest smart lock state */
-   int    batt_motor;        /*!< motor battery percentage (0-100), -1=unknown */
-   long   current_timestamp; /*!< Unix timestamp of latest reading */
-   int    data_valid;        /*!< 1 if at least one reading has been received */
+   double current_temp;
+   int    current_motion;
+   int    current_light;
+   int    current_lock;
+   int    batt_motor;
+   long   current_timestamp;
+   int    data_valid;
 
-   /* Statistics */
-   double temp_min;          /*!< minimum recorded temperature */
-   double temp_max;          /*!< maximum recorded temperature */
-   double temp_avg;          /*!< average recorded temperature */
-   int    motion_total;      /*!< total motion event count */
+   double temp_min;
+   double temp_max;
+   double temp_avg;
+   int    motion_total;
 
-   /* History ring buffer */
-   struct HistoryPoint history[HISTORY_BUF_SIZE]; /*!< circular history buffer */
-   int    history_count;     /*!< number of valid history entries */
+   struct HistoryPoint history[HISTORY_BUF_SIZE];
+   int    history_count;
 
-   /* Trends */
-   double temp_trend;        /*!< temperature trend direction */
-   int    motion_trend;      /*!< motion trend direction */
+   double temp_trend;
+   int    motion_trend;
 
-   /* Peak activity */
-   int    peak_motion_hour;  /*!< hour of peak motion activity (0-23) */
-   double peak_temp_time;    /*!< time of peak temperature */
+   int    peak_motion_hour;
+   double peak_temp_time;
 
-   /* Alerts */
-   int          alert_count;            /*!< number of active alerts */
-   struct Alert alerts[ALERT_BUF_SIZE]; /*!< active alert array */
+   int          alert_count;
+   struct Alert alerts[ALERT_BUF_SIZE];
 
-   /* Room sensor status */
-   int               room_count;           /*!< number of valid room entries */
-   struct RoomStatus rooms[ROOM_BUF_SIZE]; /*!< room sensor status array */
+   int               room_count;
+   struct RoomStatus rooms[ROOM_BUF_SIZE];
 
-   /* System information */
-   int  total_records;       /*!< total database record count */
-   long uptime_seconds;      /*!< controller process uptime in seconds */
-   int  disk_usage_percent;  /*!< filesystem usage percent */
+   int  total_records;
+   long uptime_seconds;
+   int  disk_usage_percent;
 
-   /* IPC response metadata */
-   int  last_command;        /*!< last command processed */
-   int  command_result;      /*!< result of last command (0=success, -1=fail) */
-   int  sequence;            /*!< increments on each shm update */
-   long response_time_ms;    /*!< time taken to process last command ms */
+   int  last_command;
+   int  command_result;
+   int  sequence;
+   long response_time_ms;
 
    /* Doorbell press event — one-shot, cleared after each consumer reads */
-   uint8_t  doorbell_pressed;    /*!< 1 = press received, UI shows alert     */
-   uint8_t  doorbell_device_id;  /*!< 0-3, which doorbell cam                */
-   long     doorbell_timestamp;  /*!< Unix timestamp of last press            */
+   uint8_t  doorbell_pressed;
+   uint8_t  doorbell_device_id;
+   long     doorbell_timestamp;
 
-   /* Doorbell per-cam liveness — updated every TCP frame via shm_update_frame() */
-   uint16_t doorbell_age_s[MAX_DOORBELL_CAMS];  /*!< seconds since last heartbeat/press, 0xFFFF=never */
-   uint8_t  doorbell_online[MAX_DOORBELL_CAMS]; /*!< 1=alive within threshold, 0=stale or never seen  */
+   /* Doorbell per-cam liveness */
+   uint16_t doorbell_age_s[MAX_DOORBELL_CAMS];
+   uint8_t  doorbell_online[MAX_DOORBELL_CAMS];
+
+   /* Inference camera liveness */
+   uint16_t cam_age_s[CAM_COUNT];
+   uint8_t  cam_online[CAM_COUNT];
 };
 
 #endif /* INCLUDE_SHARED_DATA_H_ */
