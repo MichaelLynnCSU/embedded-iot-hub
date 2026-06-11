@@ -14,6 +14,15 @@
  *          mutex-in-fault-handler deadlock risk in the same way.
  ******************************************************************************/
 
+
+/* \note  The following sdkconfig.defaults flags are required for Trinity to
+ *        report accurate fault context on IDF targets:
+ *          CONFIG_FREERTOS_WATCHPOINT_ON_STACK_OVERFLOW=y
+ *          CONFIG_ESP_TASK_WDT_PANIC=y
+ *          CONFIG_HEAP_POISONING_LIGHT=y
+ *        Without these, stack overflow task names and heap corruption sites
+ *        are lost before Trinity's panic handler can log them.
+ */
 #ifndef TRINITY_PRIVATE_IDF_H_
 #define TRINITY_PRIVATE_IDF_H_
 

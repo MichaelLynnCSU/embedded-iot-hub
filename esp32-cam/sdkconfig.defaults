@@ -1,0 +1,4 @@
+# FreeRTOS / IDF safety — required for Trinity to report accurate fault context
+CONFIG_FREERTOS_WATCHPOINT_ON_STACK_OVERFLOW=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_HEAP_POISONING_LIGHT=y

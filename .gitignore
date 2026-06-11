@@ -81,7 +81,6 @@ build_esp/
 
 # === ESP-IDF sdkconfig (may contain compiled-in credentials) ===
 sdkconfig
-sdkconfig.defaults
 
 # === BeagleBone WiFi Tools ===
 beaglebone/wifi/
