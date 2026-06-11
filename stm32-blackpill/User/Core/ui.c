@@ -16,47 +16,25 @@
  *          internal data structures.
  *
  * \note    Multi-view architecture (2026-06-01):
- *          Three views replace the single-screen compressed layout.
- *          HOME     — status headline, temperature, network summary.
- *          SECURITY — PIR slot tiles + reed tiles + lock tile.
- *          SYSTEM   — scrollable list, one row per device.
+ *          Three views: HOME, SECURITY, SYSTEM.
  *          Navigation: 28px nav bar at bottom, three tap zones.
- *          Touch polling: ui_poll_touch() called from main loop.
+ *          Touch handled via registered lv_indev driver.
  *
  * \note    SYSTEM view (2026-06-01):
- *          Replaced tile grid with a scrollable LVGL label list.
- *          One lv_label_t per device, updated via lv_label_set_text().
- *          No reflow math — LVGL flex column handles layout.
- *          Scales to 24+ devices without modification.
- *
- * \note    SECURITY view (2026-06-01):
- *          Tiles now show operational state only: OPEN/CLOSED/MOTION/LOCKED.
- *          Battery and age moved to SYSTEM view.
- *
- * \note    System list color fix (2026-06-01):
- *          sys_row_set() helper added. All system list rows now render
- *          green when online and red when offline. Unicode dot glyphs
- *          replaced with ASCII [ON]/[--] — default LVGL font does not
- *          include U+25CF/U+25CB codepoints.
- *
- * \note    BLE temp slots in SYSTEM view (2026-06-03):
- *          SYS_ROW_COUNT increased by MAX_TEMPS.
- *          create_sys_list() adds one row per temp slot after fixed rows.
- *          system_list_refresh() renders TEMP1/TEMP2 with decidegc, online
- *          status, and battery. Inactive slots are hidden.
- *          ui_reflow_temp() stub promoted to update g_temp_count_slots and
- *          refresh the system list when slot count changes.
+ *          Scrollable LVGL label list. One lv_label per device.
+ *          LVGL flex column handles layout. Scales to 24+ devices.
  *
  * \note    Doorbell liveness (2026-06-09):
- *          g_doorbell_last_seen[MAX_DOORBELL_CAMS] and
- *          g_doorbell_online[MAX_DOORBELL_CAMS] added — mirror PIR/temp
- *          per-slot online tracking. HOME_STATE_X gains
- *          doorbell_slot_age[MAX_DOORBELL_CAMS] and
- *          doorbell_slot_online[MAX_DOORBELL_CAMS].
+ *          g_doorbell_last_seen[MAX_DOORBELL_CAMS] added.
  *          SYS_ROW_COUNT increased by MAX_DOORBELL_CAMS.
  *          system_list_refresh() renders DB0..DB3 rows after reed rows.
- *          ui_set_doorbell_slot_age(), ui_set_doorbell_slot_online(),
- *          ui_stamp_doorbell_online() added.
+ *
+ * \note    Inference camera liveness (2026-06-10):
+ *          g_cam_last_seen[MAX_CAMS], g_cam_online[MAX_CAMS] added.
+ *          g_cam_buf[MAX_CAMS] holds formatted row text.
+ *          SYS_ROW_COUNT increased by MAX_CAMS.
+ *          system_list_refresh() renders CAM1..CAM3 after doorbell rows.
+ *          ui_set_cam(), ui_stamp_cam_online() added.
  ******************************************************************************/
 
 #include "ui.h"
@@ -93,7 +71,6 @@
 #define TILE_LABEL_Y        4u
 #define TILE_VALUE_Y       22u
 #define TILE_SUB_Y         42u
-#define REED_TITLE_BUF     16u
 #define PIR_TITLE_BUF      16u
 #define SNPRINTF_BUF       48u
 #define AGE_UNKNOWN_VAL    0xFFFFu
@@ -101,11 +78,7 @@
 #define TILE_H_MIN_SEC     36
 #define TILE_H_MAX_SEC     72
 
-#define TOUCH_DEBOUNCE_MS  150ul
-
-/* Fixed rows: TEMP(aggregate), MOTOR, LIGHT, LOCK = 4
- * Then one row per BLE temp slot, PIR slot, reed slot, doorbell cam. */
-#define SYS_ROW_COUNT  (4u + MAX_TEMPS + MAX_PIRS + MAX_REEDS + MAX_DOORBELL_CAMS)
+#define SYS_ROW_COUNT  (4u + MAX_TEMPS + MAX_PIRS + MAX_REEDS + MAX_DOORBELL_CAMS + MAX_CAMS)
 
 /************************** STRUCTURE DATA TYPES ******************************/
 
@@ -142,8 +115,8 @@ typedef struct _HOME_STATE_X
    int      motor_batt;
    uint8_t  doorbell;
    uint8_t  doorbell_device_id;
-   uint16_t doorbell_slot_age[MAX_DOORBELL_CAMS];    /*!< per-cam age seconds */
-   uint8_t  doorbell_slot_online[MAX_DOORBELL_CAMS]; /*!< per-cam online flag */
+   uint16_t doorbell_slot_age[MAX_DOORBELL_CAMS];
+   uint8_t  doorbell_slot_online[MAX_DOORBELL_CAMS];
 } HOME_STATE_X;
 
 /************************ STATIC (PRIVATE) DATA *****************************/
@@ -172,9 +145,14 @@ static uint32_t g_temp_last_seen[MAX_TEMPS];
 static uint8_t  g_temp_online[MAX_TEMPS];
 static uint8_t  g_temp_count_slots = 0u;
 
-/* Doorbell per-cam online tracking — mirrors PIR/temp pattern */
+/* Doorbell per-cam online tracking */
 static uint32_t g_doorbell_last_seen[MAX_DOORBELL_CAMS];
 static uint8_t  g_doorbell_online[MAX_DOORBELL_CAMS];
+
+/* Inference camera liveness */
+static uint32_t g_cam_last_seen[MAX_CAMS];
+static uint8_t  g_cam_online[MAX_CAMS];
+static char     g_cam_buf[MAX_CAMS][32];
 
 static lv_disp_draw_buf_t g_draw_buf;
 static lv_color_t         g_buf1[LV_BUF_SIZE];
@@ -189,10 +167,10 @@ static TILE_X g_t_reed[MAX_REEDS];
 static TILE_X g_t_lock;
 
 /* ---- View state --------------------------------------------------------- */
-static UI_VIEW_E  g_current_view  = eVIEW_HOME;
+static UI_VIEW_E  g_current_view = eVIEW_HOME;
 
 /* ---- Nav bar ------------------------------------------------------------ */
-static lv_obj_t  *g_nav_bar            = NULL;
+static lv_obj_t  *g_nav_bar         = NULL;
 static lv_obj_t  *g_nav_lbl[eVIEW_COUNT];
 
 /* ---- Home view labels --------------------------------------------------- */
@@ -464,8 +442,16 @@ static void create_sys_list(lv_obj_t *p_scr)
    /* One row per doorbell cam — hidden until first DB frame arrives */
    for (i = 0u; i < (uint8_t)MAX_DOORBELL_CAMS; i++)
    {
-      (void)snprintf(name, sizeof(name), "CAM %u", (unsigned int)i);
+      (void)snprintf(name, sizeof(name), "DB%u", (unsigned int)i);
       sys_row_create(g_sys_list, &g_sys_rows[row], name, 1u);
+      row++;
+   }
+
+   /* One row per inference camera */
+   for (i = 0u; i < (uint8_t)MAX_CAMS; i++)
+   {
+      (void)snprintf(name, sizeof(name), "CAM%u", (unsigned int)(i + 1u));
+      sys_row_create(g_sys_list, &g_sys_rows[row], name, 0u);
       row++;
    }
 
@@ -578,20 +564,6 @@ static void sys_row_set(uint8_t row, const char *p_buf, uint8_t online)
       0);
 }
 
-/**
- * \brief  Refresh SYSTEM list rows from current state.
- *
- * \details Row layout:
- *            [0]                                   TEMP (aggregate)
- *            [1]                                   MOTOR
- *            [2]                                   LIGHT
- *            [3]                                   LOCK
- *            [4 .. 4+MAX_TEMPS-1]                  BLE temp slots
- *            [4+MAX_TEMPS .. +MAX_PIRS-1]           PIR slots
- *            [4+MAX_TEMPS+MAX_PIRS .. +MAX_REEDS-1] Reed/door slots
- *            [4+MAX_TEMPS+MAX_PIRS+MAX_REEDS .. +MAX_DOORBELL_CAMS-1]
- *                                                  Doorbell cams
- */
 static void system_list_refresh(void)
 {
    char    buf[48];
@@ -626,9 +598,9 @@ static void system_list_refresh(void)
    {
       if (i < g_temp_count_slots)
       {
-         int16_t dg        = g_home.temp_slot_decidegc[i];
-         int     deg_int   = (int)(dg / 10);
-         int     deg_frac  = (int)(dg % 10);
+         int16_t dg       = g_home.temp_slot_decidegc[i];
+         int     deg_int  = (int)(dg / 10);
+         int     deg_frac = (int)(dg % 10);
          if (deg_frac < 0) { deg_frac = -deg_frac; }
 
          (void)snprintf(buf, sizeof(buf), "TEMP%-2u %s  %d.%dC  B:%d%%",
@@ -695,12 +667,12 @@ static void system_list_refresh(void)
       row++;
    }
 
-   /* Doorbell cams — show all MAX_DOORBELL_CAMS; hide if never seen */
+   /* Doorbell cams — hide if never seen */
    for (i = 0u; i < (uint8_t)MAX_DOORBELL_CAMS; i++)
    {
       if (g_home.doorbell_slot_age[i] != AGE_UNKNOWN_VAL)
       {
-         (void)snprintf(buf, sizeof(buf), "CAM%-2u  %s  A:%us",
+         (void)snprintf(buf, sizeof(buf), "DB%-2u   %s  A:%us",
                         (unsigned int)i,
                         g_doorbell_online[i] ? "[ON]" : "[--]",
                         (unsigned int)g_home.doorbell_slot_age[i]);
@@ -711,6 +683,14 @@ static void system_list_refresh(void)
       {
          lv_obj_add_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
       }
+      row++;
+   }
+
+   /* Inference cameras */
+   for (i = 0u; i < (uint8_t)MAX_CAMS; i++)
+   {
+      sys_row_set(row, g_cam_buf[i], g_cam_online[i]);
+      lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
       row++;
    }
 }
@@ -737,7 +717,6 @@ static void nav_btn_event_cb(lv_event_t *p_e)
    if (NULL != p_view) { ui_set_view(*p_view); }
 }
 
-
 /************************** PUBLIC FUNCTIONS ***********************************/
 
 void ui_tick(void)
@@ -747,10 +726,18 @@ void ui_tick(void)
 
 void ui_create(void)
 {
-   static lv_disp_drv_t disp_drv;
-   lv_obj_t            *p_scr     = NULL;
-   char                 title_buf[PIR_TITLE_BUF];
-   uint8_t              i         = 0u;
+   static lv_disp_drv_t  disp_drv;
+   static lv_indev_drv_t indev_drv;
+   lv_obj_t             *p_scr     = NULL;
+   char                  title_buf[PIR_TITLE_BUF];
+   uint8_t               i         = 0u;
+
+   /* Init cam row buffers to default text */
+   for (i = 0u; i < (uint8_t)MAX_CAMS; i++)
+   {
+      (void)snprintf(g_cam_buf[i], sizeof(g_cam_buf[i]),
+                     "CAM%u  [--]", (unsigned int)(i + 1u));
+   }
 
    lv_disp_draw_buf_init(&g_draw_buf, g_buf1, g_buf2, LV_BUF_SIZE);
 
@@ -761,9 +748,6 @@ void ui_create(void)
    disp_drv.draw_buf = &g_draw_buf;
    (void)lv_disp_drv_register(&disp_drv);
 
-   (void)lv_disp_drv_register(&disp_drv);
-
-   static lv_indev_drv_t indev_drv;
    lv_indev_drv_init(&indev_drv);
    indev_drv.type    = LV_INDEV_TYPE_POINTER;
    indev_drv.read_cb = touch_read_cb;
@@ -844,12 +828,17 @@ void ui_update(void)
    {
       g_doorbell_online[i] = ((g_doorbell_last_seen[i] > 0ul) &&
                               ((now - g_doorbell_last_seen[i]) < HB_TIMEOUT_MS)) ? 1u : 0u;
-      /* Only flag all_online=0 if cam has ever checked in (age != UNKNOWN) */
       if ((g_home.doorbell_slot_age[i] != AGE_UNKNOWN_VAL) &&
           (0u == g_doorbell_online[i]))
       {
          all_online = 0u;
       }
+   }
+
+   for (i = 0u; i < (uint8_t)MAX_CAMS; i++)
+   {
+      g_cam_online[i] = ((g_cam_last_seen[i] > 0ul) &&
+                         ((now - g_cam_last_seen[i]) < HB_TIMEOUT_MS)) ? 1u : 0u;
    }
 
    /* HOME */
@@ -861,11 +850,9 @@ void ui_update(void)
       if (0u != doorbell)
       {
          char db_buf[32];
-         snprintf(db_buf, sizeof(db_buf), "DOORBELL %d",
-                  g_home.doorbell_device_id);
+         snprintf(db_buf, sizeof(db_buf), "DOORBELL %d", g_home.doorbell_device_id);
          lv_label_set_text(g_home_status_lbl, db_buf);
-         lv_obj_set_style_text_color(g_home_status_lbl,
-                                     lv_color_hex(0xFFCC00u), 0);
+         lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0xFFCC00u), 0);
          g_home.doorbell = 0u;
       }
       else
@@ -881,14 +868,12 @@ void ui_update(void)
          if (0u != alert)
          {
             lv_label_set_text(g_home_status_lbl, "! ALERT !");
-            lv_obj_set_style_text_color(g_home_status_lbl,
-                                        lv_color_hex(0xFF4444u), 0);
+            lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0xFF4444u), 0);
          }
          else
          {
             lv_label_set_text(g_home_status_lbl, "HOME SECURE");
-            lv_obj_set_style_text_color(g_home_status_lbl,
-                                        lv_color_hex(0x00FF66u), 0);
+            lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0x00FF66u), 0);
          }
       }
 
@@ -963,9 +948,7 @@ UI_VIEW_E ui_get_view(void)
 
 void ui_poll_touch(void)
 {
-   /* No-op: touch is now owned by the registered lv_indev driver.
-    * LVGL calls touch_read_cb() from lv_task_handler() each tick.
-    * Nav taps are dispatched via nav_btn_event_cb(). */
+   /* No-op: touch owned by registered lv_indev driver. */
 }
 
 void ui_reflow_pir(int n_pir)
@@ -991,10 +974,7 @@ void ui_reflow_temp(int n)
 
    g_temp_count_slots = (uint8_t)n;
 
-   if (g_current_view == eVIEW_SYSTEM)
-   {
-      system_list_refresh();
-   }
+   if (g_current_view == eVIEW_SYSTEM) { system_list_refresh(); }
 }
 
 /* ---- Accessor functions ------------------------------------------------- */
@@ -1040,6 +1020,21 @@ void ui_stamp_doorbell_online(uint8_t slot, uint32_t tick)
    if (slot < (uint8_t)MAX_DOORBELL_CAMS) { g_doorbell_last_seen[slot] = tick; }
 }
 
+void ui_stamp_cam_online(uint8_t slot, uint32_t tick)
+{
+   if (slot < (uint8_t)MAX_CAMS) { g_cam_last_seen[slot] = tick; }
+}
+
+void ui_set_cam(uint8_t slot, uint8_t online)
+{
+   if (slot >= (uint8_t)MAX_CAMS) { return; }
+   g_cam_online[slot] = online;
+   (void)snprintf(g_cam_buf[slot], sizeof(g_cam_buf[slot]),
+                  "CAM%u  %s",
+                  (unsigned int)(slot + 1u),
+                  online ? "[ON]" : "[--]");
+}
+
 void ui_set_temp(uint8_t val)            { g_home.temp         = val; }
 void ui_set_hum(uint8_t val)             { g_home.hum          = val; }
 void ui_set_pir_count(uint32_t val)      { g_home.pir_count    = val; }
@@ -1050,6 +1045,7 @@ void ui_set_lock(uint8_t val)            { g_home.lock         = val; }
 void ui_set_lock_batt(int8_t val)        { g_home.lock_batt    = val; }
 void ui_set_motor(uint8_t val)           { g_home.motor        = val; }
 void ui_set_motor_batt(int val)          { g_home.motor_batt   = val; }
+
 void ui_set_doorbell(uint8_t pressed, uint8_t device_id)
 {
    g_home.doorbell           = pressed;
