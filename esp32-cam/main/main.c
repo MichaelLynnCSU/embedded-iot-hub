@@ -290,6 +290,54 @@ static void capture_task(void *arg)
 }
 
 /*---------------------------------------------------------------------------*/
+/* Heartbeat task                                                              */
+/*---------------------------------------------------------------------------*/
+
+static void heartbeat_task(void *arg)
+{
+    struct sockaddr_in addr = {0};
+    int      sock           = -1;
+    char     buf[128];
+    uint32_t seq            = 0;
+
+    (void)arg;
+
+    while (!g_wifi_up) { vTaskDelay(pdMS_TO_TICKS(500)); }
+
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(HUB_HEARTBEAT_PORT);
+    inet_pton(AF_INET, HUB_HOST, &addr.sin_addr);
+
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0)
+    {
+        ESP_LOGE(TAG, "heartbeat socket() failed");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (1)
+    {
+        snprintf(buf, sizeof(buf),
+                 "{\"device_id\":%d,\"device_type\":\"cam\","
+                 "\"event_type\":\"heartbeat\",\"seq\":%lu,"
+                 "\"timestamp_ms\":%lu}",
+                 (int)CAM_SLOT,
+                 (unsigned long)seq++,
+                 (unsigned long)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+
+        sendto(sock, buf, strlen(buf), 0,
+               (struct sockaddr *)&addr, sizeof(addr));
+
+        ESP_LOGI(TAG, "Heartbeat sent seq=%lu", (unsigned long)(seq - 1));
+
+        uint32_t jitter_ms = esp_random() % CAM_HEARTBEAT_JITTER;
+        vTaskDelay(pdMS_TO_TICKS(CAM_HEARTBEAT_MS + jitter_ms));
+
+    }
+}
+
+/*---------------------------------------------------------------------------*/
 /* app_main                                                                    */
 /*---------------------------------------------------------------------------*/
 
@@ -309,4 +357,5 @@ void app_main(void)
 
     xTaskCreate(udp_trigger_task, "udp_trigger", 4096, NULL, 5, NULL);
     xTaskCreate(capture_task,     "capture",     8192, NULL, 5, NULL);
+    xTaskCreate(heartbeat_task, "heartbeat", 4096, NULL, 4, NULL);
 }

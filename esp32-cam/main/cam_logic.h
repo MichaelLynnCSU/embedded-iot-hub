@@ -69,6 +69,16 @@
 #define CAM_HDR_SIZE        4          /**< JPEG length header bytes         */
 
 /*---------------------------------------------------------------------------*/
+/* Heartbeat                                                                   */
+/*---------------------------------------------------------------------------*/
+
+#define CAM_SLOT              0             /**< this camera's slot index 0-2   */
+#define HUB_HOST              "10.0.0.190"  /**< Hub static IP                  */
+#define HUB_HEARTBEAT_PORT    9092          /**< UDP heartbeat receive port on hub */
+#define CAM_HEARTBEAT_MS      30000         /**< heartbeat interval ms, 30secs         */
+#define CAM_HEARTBEAT_JITTER  5000          /**< max jitter ms to avoid sync    */
+
+/*---------------------------------------------------------------------------*/
 /* Pure logic: JPEG length header packing                                     */
 /*---------------------------------------------------------------------------*/
 
