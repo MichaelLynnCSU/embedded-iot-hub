@@ -123,6 +123,7 @@ typedef struct
    uint8_t           doorbell_pressed;  /* 1 = new press, cleared after send */
    uint8_t           doorbell_device_id;
    uint16_t          doorbell_age_s[MAX_DOORBELL_CAMS];  /* age per cam, 0xFFFF = never seen */
+   uint16_t          cam_age_s[MAX_CAMS];       /* age per cam, 0xFFFF = never seen */
    uint8_t           light_state;
    uint8_t           lock_state;
    int               lock_batt;
@@ -332,6 +333,21 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
       g_state.doorbell_age_s[i] = doorbell_get_age_s((uint8_t)i);
    }
 
+   /* Snapshot camera liveness — mirrors doorbell pattern */
+   for (i = 0; i < MAX_CAMS; i++)
+   {
+      g_state.cam_age_s[i] = cam_get_age_s((uint8_t)i);
+   }
+
+   /* ---- Cam debug log ---- */
+   for (i = 0; i < MAX_CAMS; i++)
+   {
+      ESP_LOGI(TAG, "[CAM] slot=%d age_s=%d online=%d",
+               i,
+               g_state.cam_age_s[i],
+               cam_is_alive((uint8_t)i) ? 1 : 0);
+   }
+
    /* ---- Doorbell debug log ---- */
    for (i = 0; i < MAX_DOORBELL_CAMS; i++)
    {
@@ -538,6 +554,23 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
       (void)cJSON_AddItemToObject(p_root, "temps", p_temps);
    }
    (void)cJSON_AddNumberToObject(p_root, "temp_count", g_state.temp_count);
+
+   cJSON *p_cams = cJSON_CreateArray();
+   if (NULL != p_cams)
+   {
+      for (i = 0; i < MAX_CAMS; i++)
+      {
+         p_entry = cJSON_CreateObject();
+         if (NULL != p_entry)
+         {
+            (void)cJSON_AddNumberToObject(p_entry, "id",     i);
+            (void)cJSON_AddNumberToObject(p_entry, "age_s",  g_state.cam_age_s[i]);
+            (void)cJSON_AddNumberToObject(p_entry, "online", cam_is_alive((uint8_t)i) ? 1 : 0);
+            (void)cJSON_AddItemToArray(p_cams, p_entry);
+         }
+      }
+      (void)cJSON_AddItemToObject(p_root, "cams", p_cams);
+   }
 
    cJSON *p_doorbells = cJSON_CreateArray();
    if (NULL != p_doorbells)

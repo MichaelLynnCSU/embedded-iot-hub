@@ -41,6 +41,7 @@
 
 /** \brief Doorbell camera heartbeat liveness */
 #define MAX_DOORBELL_CAMS           4u       /**< max concurrent doorbell cams        */
+#define MAX_CAMS                    3u       /**< number of inference cameras         */
 #define DOORBELL_OFFLINE_S          90u      /**< offline threshold seconds (3x 30s)  */
 #define DOORBELL_HEARTBEAT_MS       90000u   /**< offline threshold ms                */
 
