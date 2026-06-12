@@ -44,6 +44,15 @@
  *          heartbeat_task: CAM_HEARTBEAT_MS + jitter delay chunked into 2s
  *          kicks (WDT timeout is 5s).
  *          TRINITY_CHIP_ESP32_CAM_IDF / "cam_log" namespace.
+ *
+ * \note    Main-task stack overflow fix (2026-06-12):
+ *          Root cause of the post-wifi_init() CORRUPT HEAP / Bad tail crash
+ *          was main task stack overflow, not heap corruption from
+ *          malloc/free. Fixed via:
+ *              CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+ *          Confirmed by clean boot: WiFi connects, IP obtained, heartbeat
+ *          task sends successfully with no crash. Debug heap checkpoints
+ *          removed.
  ******************************************************************************/
 
 #include <string.h>
@@ -62,16 +71,6 @@
 #include "trinity_log.h"
 
 static const char *TAG = "CAM";
-
-/*---------------------------------------------------------------------------*/
-/* Config                                                                      */
-/*---------------------------------------------------------------------------*/
-
-
-/*---------------------------------------------------------------------------*/
-/* Camera pins (from board silkscreen)                                         */
-/*---------------------------------------------------------------------------*/
-
 
 /*---------------------------------------------------------------------------*/
 /* Globals                                                                     */
@@ -171,6 +170,7 @@ static void wifi_init(void)
 
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+
     esp_wifi_start();
 }
 
@@ -393,6 +393,7 @@ static void heartbeat_task(void *arg)
 void app_main(void)
 {
     nvs_flash_init();
+
     trinity_log_dump_previous();
     trinity_log_init();
     trinity_wdt_init();
@@ -409,5 +410,5 @@ void app_main(void)
 
     xTaskCreate(udp_trigger_task, "udp_trigger", 4096, NULL, 5, NULL);
     xTaskCreate(capture_task,     "capture",     8192, NULL, 5, NULL);
-    xTaskCreate(heartbeat_task, "heartbeat", 4096, NULL, 4, NULL);
+    xTaskCreate(heartbeat_task,   "heartbeat",   4096, NULL, 4, NULL);
 }
