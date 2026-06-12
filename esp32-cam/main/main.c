@@ -9,7 +9,7 @@
  *
  *          Flow:
  *          boot -> wifi up -> listen for UDP "CAPTURE" on UDP_TRIGGER_PORT
- *          trigger received -> capture JPEG -> connect to BBB -> send -> close
+ *          trigger received -> connect to BBB -> stream frames for CAM_CLIP_DURATION_MS -> close
  *
  *          TCP connection is opened per-trigger and closed after send.
  *          No persistent connection; BBB never times out waiting for data.
@@ -28,6 +28,12 @@
  *
  * \note    XCLK bump (2026-05-31):
  *          10 MHz -> 20 MHz for better OV2640 frame quality.
+ *
+ * \note    Clip streaming (2026-06-11):
+ *          capture_task changed from single JPEG to 10s clip stream.
+ *          On trigger: connect to BBB, send frames every CAM_CLIP_FRAME_MS
+ *          for CAM_CLIP_DURATION_MS ms, then close. BBB detects end of clip
+ *          by connection close. Wire protocol unchanged: [len:4][jpeg] per frame.
  *
  * \note    Trinity integration (2026-06-11):
  *          trinity_wdt / canary / panic / nvs / stats added.
@@ -286,33 +292,36 @@ static void capture_task(void *arg)
         }
         trinity_wdt_kick();
 
-        ESP_LOGI(TAG, "Triggered — capturing JPEG");
-
-        camera_fb_t *p_fb = NULL;
-        for (int i = 0; i < 5; i++)
-        {
-            p_fb = esp_camera_fb_get();
-            if (NULL != p_fb) { break; }
-            ESP_LOGW(TAG, "Capture failed, retry %d", i + 1);
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-
-        if (NULL == p_fb)
-        {
-            ESP_LOGE(TAG, "Camera capture failed after retries");
-            continue;
-        }
-
-        ESP_LOGI(TAG, "Captured JPEG %zu bytes", p_fb->len);
+        ESP_LOGI(TAG, "Triggered — starting clip");
 
         tcp_connect();
+        trinity_wdt_kick();
 
-        if (!send_jpeg_to_bbb(p_fb))
+        uint32_t elapsed = 0;
+        while (elapsed < CAM_CLIP_DURATION_MS)
         {
-            ESP_LOGW(TAG, "Send failed");
+            camera_fb_t *p_fb = esp_camera_fb_get();
+            if (NULL != p_fb)
+            {
+                if (!send_jpeg_to_bbb(p_fb))
+                {
+                    ESP_LOGW(TAG, "Send failed — aborting clip");
+                    esp_camera_fb_return(p_fb);
+                    break;
+                }
+                esp_camera_fb_return(p_fb);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "Capture failed at %lu ms", (unsigned long)elapsed);
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(CAM_CLIP_FRAME_MS));
+            trinity_wdt_kick();
+            elapsed += CAM_CLIP_FRAME_MS;
         }
 
-        esp_camera_fb_return(p_fb);
+        ESP_LOGI(TAG, "Clip complete — %lu ms", (unsigned long)elapsed);
         close(g_tcp_sock);
         g_tcp_sock = -1;
     }

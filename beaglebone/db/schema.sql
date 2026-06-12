@@ -98,3 +98,22 @@ CREATE INDEX IF NOT EXISTS idx_motor_readings_ts  ON motor_readings(ts);
 CREATE INDEX IF NOT EXISTS idx_device_events_ts   ON device_events(ts);
 CREATE INDEX IF NOT EXISTS idx_device_events_dev  ON device_events(device, ts);
 CREATE INDEX IF NOT EXISTS idx_room_sensors_id    ON room_sensors(sensor_id, ts);
+
+-- -----------------------------------------------------------------------------
+-- clips
+-- One row per PIR-triggered indoor camera clip.
+-- clip_path points to .avi file under /data/clips/.
+-- person/confidence reflect best detection across all frames in the clip.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS clips (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          INTEGER NOT NULL,        -- unix timestamp of PIR trigger
+    camera      TEXT    NOT NULL,        -- 'indoor' | 'front' | 'back'
+    clip_path   TEXT    NOT NULL,        -- absolute path to .avi file
+    frame_count INTEGER NOT NULL,        -- number of frames received
+    person      INTEGER NOT NULL,        -- 1 if person detected in any frame
+    confidence  REAL    NOT NULL,        -- highest confidence across frames
+    duration_ms INTEGER NOT NULL         -- actual clip duration ms
+);
+CREATE INDEX IF NOT EXISTS idx_clips_ts     ON clips(ts);
+CREATE INDEX IF NOT EXISTS idx_clips_camera ON clips(camera, ts);

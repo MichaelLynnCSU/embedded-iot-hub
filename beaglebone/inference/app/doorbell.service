@@ -5,6 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=debian
+Environment=LD_LIBRARY_PATH=/opt/inference/lib
 WorkingDirectory=/opt/inference/app
 ExecStart=/opt/inference/app/doorbell_daemon
 Restart=always

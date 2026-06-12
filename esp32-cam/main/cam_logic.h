@@ -59,6 +59,8 @@
 #define CAM_CAPTURE_RETRIES 5         /**< Max capture retries on failure     */
 #define CAM_CAPTURE_RETRY_MS 200      /**< Delay between capture retries ms  */
 #define CAM_WARMUP_MS       500       /**< Camera warmup delay ms            */
+#define CAM_CLIP_DURATION_MS  10000   /**< total clip duration ms            */
+#define CAM_CLIP_FRAME_MS     500     /**< interval between frames ms        */
 
 /*---------------------------------------------------------------------------*/
 /* UDP trigger                                                                 */
