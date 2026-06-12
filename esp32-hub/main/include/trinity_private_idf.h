@@ -12,17 +12,18 @@
  * \note    No write_panic exposure needed on IDF -- the panic handler calls
  *          trinity_log_event() directly. IDF doesn't have the Zephyr
  *          mutex-in-fault-handler deadlock risk in the same way.
+ *
+ * \note    Trinity sdkconfig.defaults requirements:
+ *          CONFIG_FREERTOS_WATCHPOINT_ON_STACK_OVERFLOW=y -- names the
+ *          overflowing task instead of generic panic
+ *          CONFIG_ESP_TASK_WDT_PANIC=y -- WDT timeout triggers Trinity panic
+ *          CONFIG_HEAP_POISONING_LIGHT=y -- catches heap corruption near
+ *          its source instead of a later unrelated crash
+ *          Without these, stack overflow task names and heap corruption
+ *          sites are lost before Trinity's panic handler can log them.
  ******************************************************************************/
 
 
-/* \note  The following sdkconfig.defaults flags are required for Trinity to
- *        report accurate fault context on IDF targets:
- *          CONFIG_FREERTOS_WATCHPOINT_ON_STACK_OVERFLOW=y
- *          CONFIG_ESP_TASK_WDT_PANIC=y
- *          CONFIG_HEAP_POISONING_LIGHT=y
- *        Without these, stack overflow task names and heap corruption sites
- *        are lost before Trinity's panic handler can log them.
- */
 #ifndef TRINITY_PRIVATE_IDF_H_
 #define TRINITY_PRIVATE_IDF_H_
 

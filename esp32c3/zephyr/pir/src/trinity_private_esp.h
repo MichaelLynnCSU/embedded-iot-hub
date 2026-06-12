@@ -13,17 +13,16 @@
  *
  *          No flash mutex on ESP32-C3 Zephyr -- flash driver serializes
  *          internally. write_entry() calls write_internal() directly.
+ *
+ * \note    Trinity prj.conf requirements:
+ *          CONFIG_HW_STACK_PROTECTION=y -- MPU stack overflow detection
+ *          CONFIG_THREAD_STACK_INFO=y   -- exposes stack usage to Trinity stats
+ *          CONFIG_INIT_STACKS=y         -- sentinel pattern for high-water mark
+ *          Without these, stack overflow task names and fault sites are lost
+ *          before Trinity's fault handler can log them.
  ******************************************************************************/
 
 
-/* \note  The following prj.conf flags are required for Trinity to report
- *        accurate fault context on Zephyr/ESP targets:
- *          CONFIG_HW_STACK_PROTECTION=y
- *          CONFIG_STACK_SENTINEL=y
- *          CONFIG_HEAP_MEM_POOL_SIZE — set appropriately per device
- *        Without these, stack overflow task names and heap corruption sites
- *        are lost before Trinity's fault handler can log them.
- */
 #ifndef TRINITY_PRIVATE_ESP_H_
 #define TRINITY_PRIVATE_ESP_H_
 

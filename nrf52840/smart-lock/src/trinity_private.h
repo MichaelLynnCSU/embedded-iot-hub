@@ -18,21 +18,17 @@
  *            trinity_canary.c, read by trinity_flash.c and trinity_fault.c.
  *            write_panic -- defined in trinity_flash.c, called only by
  *            trinity_fault.c. Cannot use mutex (fault handler context).
- ******************************************************************************/
-
-
-/* \note  The following prj.conf flags are required for Trinity to report
- *        accurate fault context on Zephyr/nRF52840 targets:
+ *
+ * \note    Trinity prj.conf requirements:
  *          CONFIG_HW_STACK_PROTECTION=y   -- MPU stack overflow detection
  *          CONFIG_THREAD_STACK_INFO=y     -- exposes stack usage to Trinity stats
  *          CONFIG_INIT_STACKS=y           -- sentinel pattern for high-water mark
  *          CONFIG_WDT_DISABLE_AT_BOOT=n   -- keeps WDT active (do not disable)
- *        Without these, stack overflow task names and fault sites are lost
- *        before Trinity's fault handler can log them to flash.
- *
- * \note    smart-lock/prj.conf CONFIG_WDT_DISABLE_AT_BOOT=n fixed 2026-06-11.
- *          All four nRF devices now have WDT active at boot.
- */
+ *          Without these, stack overflow task names and fault sites are lost
+ *          before Trinity's fault handler can log them to flash.
+ ******************************************************************************/
+
+
 #ifndef TRINITY_PRIVATE_H_
 #define TRINITY_PRIVATE_H_
 
