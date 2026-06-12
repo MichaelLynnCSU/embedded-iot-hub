@@ -37,6 +37,13 @@
  *          Lane B: TCP JPEG   → BBB   (payload, best-effort)
  *          Neither lane depends on the other for correctness.
  *          event_id ties both lanes together as a join key at the BBB.
+ *
+ * \note    Trinity integration (2026-06-11):
+ *          trinity_wdt / canary / panic / nvs / stats added.
+ *          capture_task: blocking xSemaphoreTake(portMAX_DELAY) replaced
+ *          with bounded 2s wait so the WDT can be kicked while idle.
+ *          heartbeat_task: 30s vTaskDelay chunked into 2s kicks.
+ *          TRINITY_CHIP_ESP32_DOORBELL_IDF / "doorbell_log" namespace.
  ******************************************************************************/
 
 #include <string.h>
@@ -55,6 +62,7 @@
 #include "lwip/netdb.h"
 #include "wifi_secrets.h"
 #include "cam_logic.h"
+#include "trinity_log.h"
 
 static const char *TAG = "DOORBELL";
 
@@ -304,9 +312,19 @@ static void capture_task(void *arg)
     ESP_LOGI(TAG, "Ready — waiting for doorbell button press (device_id=%d)",
              DOORBELL_ID);
 
+    /* ---- Trinity: register after WiFi is up, before the main loop ---- */
+    trinity_wdt_add();
+
     while (1)
     {
-        xSemaphoreTake(g_trigger_sem, portMAX_DELAY);
+        /* ---- Trinity: bounded wait so the loop can kick the WDT while
+         *      idle, waiting for a button press.                       ---- */
+        if (pdTRUE != xSemaphoreTake(g_trigger_sem, pdMS_TO_TICKS(2000)))
+        {
+            trinity_wdt_kick();
+            continue;
+        }
+        trinity_wdt_kick();
 
         /* Debounce */
         vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
@@ -402,9 +420,18 @@ static void heartbeat_task(void *arg)
 {
     while (!g_wifi_up) { vTaskDelay(pdMS_TO_TICKS(500)); }
 
+    /* ---- Trinity: register before entering the heartbeat loop ---- */
+    trinity_wdt_add();
+
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_INTERVAL_MS));
+        /* ---- Trinity: chunk the 30s interval into 2s kicks so the WDT
+         *      (5s timeout) never starves during the wait.            ---- */
+        for (int elapsed = 0; elapsed < HEARTBEAT_INTERVAL_MS; elapsed += 2000)
+        {
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            trinity_wdt_kick();
+        }
         send_heartbeat();
     }
 }
@@ -416,6 +443,11 @@ static void heartbeat_task(void *arg)
 void app_main(void)
 {
     nvs_flash_init();
+
+    /* ---- Trinity: dump previous fault record, init logging + WDT ---- */
+    trinity_log_dump_previous();
+    trinity_log_init();
+    trinity_wdt_init();
 
     g_trigger_sem = xSemaphoreCreateCounting(5, 0);
 

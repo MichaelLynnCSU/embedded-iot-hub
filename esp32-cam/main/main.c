@@ -28,6 +28,16 @@
  *
  * \note    XCLK bump (2026-05-31):
  *          10 MHz -> 20 MHz for better OV2640 frame quality.
+ *
+ * \note    Trinity integration (2026-06-11):
+ *          trinity_wdt / canary / panic / nvs / stats added.
+ *          udp_trigger_task: recv() given a 2s SO_RCVTIMEO so the loop can
+ *          kick the WDT while idle.
+ *          capture_task: blocking xSemaphoreTake(portMAX_DELAY) replaced
+ *          with bounded 2s wait so the WDT can be kicked while idle.
+ *          heartbeat_task: CAM_HEARTBEAT_MS + jitter delay chunked into 2s
+ *          kicks (WDT timeout is 5s).
+ *          TRINITY_CHIP_ESP32_CAM_IDF / "cam_log" namespace.
  ******************************************************************************/
 
 #include <string.h>
@@ -43,6 +53,7 @@
 #include "lwip/netdb.h"
 #include "wifi_secrets.h"
 #include "cam_logic.h"
+#include "trinity_log.h"
 
 static const char *TAG = "CAM";
 
@@ -228,10 +239,19 @@ static void udp_trigger_task(void *arg)
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     bind(sock, (struct sockaddr *)&addr, sizeof(addr));
 
+    /* ---- Trinity: bounded recv so the loop can kick the WDT while idle ---- */
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    trinity_wdt_add();
+
     char buf[32];
     while (1)
     {
         int n = recv(sock, buf, sizeof(buf) - 1, 0);
+
+        trinity_wdt_kick();
+
         if (n > 0)
         {
             buf[n] = '\0';
@@ -252,10 +272,19 @@ static void capture_task(void *arg)
 {
     while (!g_wifi_up) { vTaskDelay(pdMS_TO_TICKS(500)); }
 
+    /* ---- Trinity: register after WiFi is up, before the main loop ---- */
+    trinity_wdt_add();
+
     while (1)
     {
-        /* Block until triggered */
-        xSemaphoreTake(g_trigger_sem, portMAX_DELAY);
+        /* ---- Trinity: bounded wait so the loop can kick the WDT while
+         *      idle, waiting for a trigger.                            ---- */
+        if (pdTRUE != xSemaphoreTake(g_trigger_sem, pdMS_TO_TICKS(2000)))
+        {
+            trinity_wdt_kick();
+            continue;
+        }
+        trinity_wdt_kick();
 
         ESP_LOGI(TAG, "Triggered — capturing JPEG");
 
@@ -316,6 +345,9 @@ static void heartbeat_task(void *arg)
         return;
     }
 
+    /* ---- Trinity: register before entering the heartbeat loop ---- */
+    trinity_wdt_add();
+
     while (1)
     {
         snprintf(buf, sizeof(buf),
@@ -331,9 +363,17 @@ static void heartbeat_task(void *arg)
 
         ESP_LOGI(TAG, "Heartbeat sent seq=%lu", (unsigned long)(seq - 1));
 
+        /* ---- Trinity: chunk the heartbeat interval into 2s kicks so the
+         *      WDT (5s timeout) never starves during the wait.        ---- */
         uint32_t jitter_ms = esp_random() % CAM_HEARTBEAT_JITTER;
-        vTaskDelay(pdMS_TO_TICKS(CAM_HEARTBEAT_MS + jitter_ms));
+        uint32_t total_ms  = CAM_HEARTBEAT_MS + jitter_ms;
 
+        for (uint32_t elapsed = 0; elapsed < total_ms; elapsed += 2000)
+        {
+            uint32_t chunk = (total_ms - elapsed > 2000) ? 2000 : (total_ms - elapsed);
+            vTaskDelay(pdMS_TO_TICKS(chunk));
+            trinity_wdt_kick();
+        }
     }
 }
 
@@ -344,6 +384,9 @@ static void heartbeat_task(void *arg)
 void app_main(void)
 {
     nvs_flash_init();
+    trinity_log_dump_previous();
+    trinity_log_init();
+    trinity_wdt_init();
 
     g_trigger_sem = xSemaphoreCreateCounting(5, 0);
 
