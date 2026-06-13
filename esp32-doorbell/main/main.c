@@ -4,7 +4,7 @@
  *
  * \brief ESP32 doorbell CAM — button-triggered JPEG capture and push to BBB.
  *
- * \details Board: AI-Thinker ESP32-CAM (OV2640).
+ * \details Board: AI-Thinker ESP32-CAM (OV2640), 8MB external PSRAM.
  *          Pinout from AI-Thinker schematic.
  *
  *          Flow:
@@ -44,10 +44,43 @@
  *          with bounded 2s wait so the WDT can be kicked while idle.
  *          heartbeat_task: 30s vTaskDelay chunked into 2s kicks.
  *          TRINITY_CHIP_ESP32_DOORBELL_IDF / "doorbell_log" namespace.
+ *
+ * \note    Image quality bump (2026-06-13):
+ *          QQVGA/quality 12/DRAM -> VGA/quality 6/PSRAM, matching the S3
+ *          PIR cam tuning (capped gain ceiling, aec2, bpc/wpc, sharpness).
+ *          Requires CONFIG_SPIRAM=y (8MB PSRAM present on this board).
+ *          VGA JPEG frames (~10KB) plus sensor tuning calls increase
+ *          capture_task's stack usage — bumped from 8192 to 12288 bytes.
+ *
+ * \note    Send-loop WDT fix (2026-06-13):
+ *          Bumping to VGA increased JPEG size from ~3KB to ~11KB.
+ *          send_jpeg_to_bbb()'s send loop had no WDT kicks; under network
+ *          congestion this blocked long enough to trip the 5s task_wdt
+ *          and abort/reboot mid-send (observed: capture task_wdt abort
+ *          ~2.5s after BBB connect, before send completed).
+ *
+ *          Fix: trinity_wdt_kick() added inside the send loop in
+ *          send_jpeg_to_bbb(), after each send() call. Same fix was
+ *          already applied to the S3 PIR cam's send_jpeg_to_bbb() when
+ *          it was bumped to VGA — should have been carried over here at
+ *          the same time but was missed.
+ *
+ * \note    WiFi power-save disabled (2026-06-13):
+ *          Diagnostic send-loop logging showed send() throughput of
+ *          ~5740 bytes per ~1.5s call (~30 kbps), then EAGAIN under a
+ *          1s SO_SNDTIMEO — far below normal WiFi TX speed. Root cause:
+ *          default modem-sleep power-save (WIFI_PS_MIN_MODEM) puts the
+ *          radio to sleep between DTIM beacons, badly throttling TCP
+ *          throughput right after connect.
+ *
+ *          Fix: esp_wifi_set_ps(WIFI_PS_NONE) added in wifi_init(),
+ *          matching the S3 PIR cam (which already had this fix from its
+ *          own frame-capture deadlock investigation on 2026-06-12).
  ******************************************************************************/
 
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -106,10 +139,10 @@ static esp_err_t camera_init(void)
         .ledc_timer     = LEDC_TIMER_0,
         .ledc_channel   = LEDC_CHANNEL_0,
         .pixel_format   = PIXFORMAT_JPEG,
-        .frame_size     = FRAMESIZE_QQVGA,
-        .jpeg_quality   = 12,
+        .frame_size     = FRAMESIZE_VGA,
+        .jpeg_quality   = 6,
         .fb_count       = 1,
-        .fb_location    = CAMERA_FB_IN_DRAM,
+        .fb_location    = CAMERA_FB_IN_PSRAM,
         .grab_mode      = CAMERA_GRAB_WHEN_EMPTY,
     };
 
@@ -118,6 +151,34 @@ static esp_err_t camera_init(void)
     {
         ESP_LOGE(TAG, "Camera init failed: 0x%x", err);
         return err;
+    }
+
+    /* Image quality tuning (2026-06-13) — matches S3 PIR cam.
+     * Caps AGC gain (eliminates speckle/noise), enables advanced AEC and
+     * pixel correction, and adds in-sensor sharpening to counter the
+     * softness introduced by higher resolution + lower compression.
+     * set_sharpness() return value is checked since not all sensor
+     * drivers implement it (returns -1/ESP_ERR_NOT_SUPPORTED if absent).
+     */
+    sensor_t *p_sensor = esp_camera_sensor_get();
+    if (NULL != p_sensor)
+    {
+        p_sensor->set_framesize(p_sensor, FRAMESIZE_VGA);
+        p_sensor->set_quality(p_sensor, 6);
+        p_sensor->set_gainceiling(p_sensor, GAINCEILING_2X);
+        p_sensor->set_aec2(p_sensor, 1);
+        p_sensor->set_bpc(p_sensor, 1);
+        p_sensor->set_wpc(p_sensor, 1);
+
+        if (0 != p_sensor->set_sharpness(p_sensor, 2))
+        {
+            ESP_LOGW(TAG, "set_sharpness() not supported by this sensor driver");
+        }
+    }
+    else
+    {
+        ESP_LOGW(TAG, "esp_camera_sensor_get() returned NULL — "
+                      "skipping image quality tuning");
     }
 
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -179,6 +240,12 @@ static void wifi_init(void)
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     esp_wifi_start();
+
+    esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (ESP_OK != ps_err)
+    {
+        ESP_LOGW(TAG, "esp_wifi_set_ps(WIFI_PS_NONE) failed: 0x%x", ps_err);
+    }
 }
 
 
@@ -240,6 +307,9 @@ static bool tcp_connect_once(void)
 
     if (0 == connect(g_tcp_sock, (struct sockaddr *)&addr, sizeof(addr)))
     {
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+        setsockopt(g_tcp_sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
         ESP_LOGI(TAG, "Connected to BBB %s:%d (device_id=%d)",
                  BBB_HOST, BBB_PORT, DOORBELL_ID);
         return true;
@@ -256,21 +326,35 @@ static bool send_jpeg_to_bbb(camera_fb_t *p_fb, uint64_t event_id)
     cam_pack_header(hdr_buf, (uint8_t)DOORBELL_ID, event_id,
                     (uint32_t)p_fb->len);
 
-    if (CAM_HEADER_SIZE != send(g_tcp_sock, hdr_buf, CAM_HEADER_SIZE, 0))
+    int hn = send(g_tcp_sock, hdr_buf, CAM_HEADER_SIZE, 0);
+    ESP_LOGI(TAG, "Header send() returned %d (errno=%d %s)",
+             hn, errno, strerror(errno));
+    if (CAM_HEADER_SIZE != hn)
     {
         return false;
     }
 
-    size_t sent = 0;
+    size_t sent  = 0;
+    int    iters = 0;
     while (sent < p_fb->len)
     {
         int n = send(g_tcp_sock, p_fb->buf + sent, p_fb->len - sent, 0);
-        if (0 >= n) { return false; }
+        ESP_LOGI(TAG, "  send() iter=%d req=%zu ret=%d errno=%d (%s) sent_so_far=%zu/%zu",
+                 iters, p_fb->len - sent, n, errno, strerror(errno),
+                 sent, p_fb->len);
+        if (0 >= n)
+        {
+            ESP_LOGE(TAG, "send() failed/zero at sent=%zu/%zu — aborting send",
+                     sent, p_fb->len);
+            return false;
+        }
         sent += (size_t)n;
+        iters++;
+        trinity_wdt_kick();
     }
 
-    ESP_LOGI(TAG, "Sent JPEG %zu bytes event_id=%08lx%08lx",
-             p_fb->len,
+    ESP_LOGI(TAG, "Sent JPEG %zu bytes in %d send() calls event_id=%08lx%08lx",
+             p_fb->len, iters,
              (unsigned long)(event_id >> 32),
              (unsigned long)(event_id & 0xFFFFFFFFUL));
     return true;
@@ -461,5 +545,9 @@ void app_main(void)
     wifi_init();
 
     xTaskCreate(heartbeat_task, "heartbeat", 4096, NULL, 3, NULL);
-    xTaskCreate(capture_task, "capture", 8192, NULL, 5, NULL);
+
+    /* Stack bumped 8192 -> 12288: VGA JPEG buffers (~10KB) plus the added
+     * sensor tuning calls in camera_init() increase capture_task's stack
+     * footprint versus the original QQVGA/quality-12 configuration. */
+    xTaskCreate(capture_task, "capture", 12288, NULL, 5, NULL);
 }
