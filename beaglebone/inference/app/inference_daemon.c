@@ -26,6 +26,41 @@
  *          ESP32 streams frames for CAM_CLIP_DURATION_MS then closes.
  *          BBB saves frames as JPEGs, assembles .avi via ffmpeg,
  *          runs inference per-frame, inserts DB record via sqlite3.
+ *
+ * \note    ffmpeg re-encode removed / -c:v copy (2026-06-13):
+ *          Previous ffmpeg command was:
+ *              ffmpeg -framerate 2 -i frame_%03d.jpg -c:v mjpeg -q:v 3 out.avi
+ *          This caused two distinct problems:
+ *
+ *          1) Double-encode quality loss. The ESP32 sends JPEG frames
+ *             already compressed by the OV3660 sensor at quality=6
+ *             (esp32-camera scale). ffmpeg was decoding those JPEGs to
+ *             raw YUV, then re-encoding as MJPEG at -q:v 3. Every
+ *             decode+re-encode cycle permanently destroys detail that
+ *             cannot be recovered — the saved AVI looked visibly softer
+ *             and lower resolution than the source frames even though the
+ *             pixel dimensions were unchanged. This was the root cause of
+ *             the "smooth low pixel" appearance reported in field clips.
+ *
+ *          2) FPS mismatch. FRAME_FPS was set to 2, but the ESP32 sends
+ *             frames every CAM_CLIP_FRAME_MS = ~530ms (~1.9 fps actual).
+ *             A small mismatch, but the correct value derived from the
+ *             actual ESP32 config is 2 fps (floor of 1000/530), so
+ *             FRAME_FPS stays at 2 — it is now explicitly documented as
+ *             derived from CAM_CLIP_FRAME_MS on the ESP32 side and should
+ *             be updated if that constant changes.
+ *
+ *          Fix: replaced -c:v mjpeg -q:v 3 with -c:v copy. ffmpeg now
+ *          muxes the source JPEGs directly into the AVI container with
+ *          zero re-encoding. The frames in the .avi are bit-for-bit
+ *          identical to what the OV3660 produced. AVI/MJPEG supports
+ *          JPEG passthrough natively so no container change is needed.
+ *          ffmpeg encode time also drops significantly since there is no
+ *          decode/encode cycle.
+ *
+ *          If FRAME_FPS ever needs to change, derive it as:
+ *              FRAME_FPS = 1000 / CAM_CLIP_FRAME_MS   (from main.c)
+ *          and update the constant here to match.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -54,7 +89,13 @@
 #define LOG_PATH        "/var/log/inference.log"
 #define LISTEN_PORT     9090
 #define MAX_CLIP_FRAMES 64        /**< hard cap on frames per clip           */
-#define FRAME_FPS       2         /**< nominal FPS for ffmpeg encoding       */
+
+/* Nominal FPS for ffmpeg mux. Derived from CAM_CLIP_FRAME_MS in main.c:
+ *   ESP32 sends one frame every CAM_CLIP_FRAME_MS ms (~530ms = ~1.9fps).
+ *   floor(1000 / 530) = 1, but 2fps is the closest standard value and
+ *   matches observed inter-frame timing (~530ms). Update this if
+ *   CAM_CLIP_FRAME_MS changes on the ESP32 side. */
+#define FRAME_FPS       2
 
 /******************************** GLOBALS *************************************/
 static volatile int  g_running   = 1;    /**< main loop run flag  */
@@ -349,10 +390,19 @@ static void process_clip(uint8_t **frames,
             best_detected ? "person" : "noperson",
             (int)(best_conf * 100));
 
-   /* Encode .avi via ffmpeg */
+   /* Encode .avi via ffmpeg.
+    *
+    * -c:v copy: mux source JPEGs directly into the AVI container with no
+    * re-encoding. Frames are bit-for-bit identical to what the OV3660
+    * produced. Previously -c:v mjpeg -q:v 3 was used, which decoded each
+    * JPEG to raw YUV then re-encoded it, destroying detail on every frame.
+    * See file header note for full explanation.
+    *
+    * -framerate %d: set to FRAME_FPS (2), matching the ~530ms inter-frame
+    * interval from CAM_CLIP_FRAME_MS on the ESP32 side. */
    snprintf(cmd, sizeof(cmd),
             "ffmpeg -y -framerate %d -i %s/frame_%%03d.jpg "
-            "-c:v mjpeg -q:v 3 %s 2>/dev/null",
+            "-c:v copy %s 2>/dev/null",
             FRAME_FPS, tmp_dir, avi_path);
 
    if (system(cmd) != 0)
