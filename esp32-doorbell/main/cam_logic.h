@@ -42,7 +42,7 @@
 /*---------------------------------------------------------------------------*/
 /* Network config                                                               */
 /*---------------------------------------------------------------------------*/
-#define BBB_HOST            "10.0.0.208"  /**< BeagleBone IP address          */
+#define BBB_HOST            "10.0.0.206"  /**< BeagleBone Wifi Hub IP address */
 #define BBB_PORT            9091          /**< BBB TCP listen port (doorbell) */
 #define RECONNECT_MS        3000          /**< TCP reconnect delay ms         */
 #define HUB_HOST            "10.0.0.190"  /**< Hub static IP                  */

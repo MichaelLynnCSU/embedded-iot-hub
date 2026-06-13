@@ -5,6 +5,7 @@ idf_component_register(SRCS "main.c"
         "trinity_stats_idf.c"
         "trinity_panic_idf.c"
         "build_info.c"
+        "trinity_log_stack.c"
     INCLUDE_DIRS "." "include")
 
 target_compile_definitions(${COMPONENT_LIB} PUBLIC

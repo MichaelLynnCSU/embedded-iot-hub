@@ -26,6 +26,7 @@ idf_component_register(
         "motor_server.c"
         "udp_device_ingress.c"
         "cam_trigger.c"
+        "trinity_log_stack.c"
     INCLUDE_DIRS "." "include"
     REQUIRES
         bt

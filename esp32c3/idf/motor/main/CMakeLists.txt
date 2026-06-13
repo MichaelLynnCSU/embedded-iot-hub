@@ -12,6 +12,7 @@ idf_component_register(
         "trinity_nvs_idf.c"
         "trinity_stats_idf.c"
         "trinity_panic_idf.c"
+        "trinity_log_stack.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash

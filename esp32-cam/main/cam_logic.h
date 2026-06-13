@@ -23,7 +23,7 @@
 /* Network config -- hub/BBB alignment regression guards                       */
 /*---------------------------------------------------------------------------*/
 
-#define BBB_HOST            "10.0.0.206"  /**< BeagleBone IP address         */
+#define BBB_HOST            "10.0.0.206"  /**< BeagleBone Wifi USB IP address */
 #define BBB_PORT            9090          /**< BBB TCP listen port            */
 #define UDP_TRIGGER_PORT    9091          /**< UDP trigger listen port        */
 #define RECONNECT_MS        3000          /**< TCP reconnect delay ms         */

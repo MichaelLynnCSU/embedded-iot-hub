@@ -82,4 +82,36 @@ void app_main(void)
     ESP_LOGI(TAG, "[MAIN] motor_task spawned");
 
     ESP_LOGI(TAG, "[MAIN] app_main returning");
+
+    /* -----------------------------------------------------------------------
+     * log main-task stack high-water-mark before app_main() exits.
+     *
+     * trinity_wdt_kick() covers all spawned Trinity tasks, but app_main()
+     * itself never calls it.  Sample here so a shrinking margin is visible
+     * in the serial log on every boot AND survives a crash via the NVS fault
+     * log (trinity_log_dump_previous() on next boot).
+     *
+     * NOTE: On ESP32-C3 (RISC-V), sizeof(StackType_t) == 1, so words == bytes.
+     * On Xtensa targets (ESP32, ESP32-S3) sizeof(StackType_t) == 4, so bytes = words * 4
+     * --------------------------------------------------------------------- */
+    {
+        UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
+        ESP_LOGI(TAG,
+                 "[TRINITY] app_main exit stack HWM: %u words (%u B)",
+                 (unsigned)hwm,
+                 (unsigned)(hwm * sizeof(StackType_t)));
+
+#ifndef CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS
+#define CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS 256u
+#endif
+        if (hwm < (UBaseType_t)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS)
+        {
+            ESP_LOGW(TAG,
+                     "[TRINITY] LOW STACK on main task at exit: hwm=%u words threshold=%u words",
+                     (unsigned)hwm,
+                     (unsigned)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS);
+            trinity_log_record_low_stack((uint32_t)hwm);
+        }
+    }
+
 }

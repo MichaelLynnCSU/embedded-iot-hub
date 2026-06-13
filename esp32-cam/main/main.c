@@ -252,7 +252,7 @@
 #include "trinity_log.h"
 
 static const char *TAG = "CAM";
-
+static const char *APP_MAIN_TAG = "APP_MAIN";
 /*---------------------------------------------------------------------------*/
 /* Globals                                                                     */
 /*---------------------------------------------------------------------------*/
@@ -834,4 +834,33 @@ void app_main(void)
     xTaskCreate(udp_trigger_task, "udp_trigger", 4096, NULL, 5, NULL);
     xTaskCreate(capture_task,     "capture",     8192, NULL, 5, NULL);
     xTaskCreate(heartbeat_task,   "heartbeat",   4096, NULL, 4, NULL);
+
+    /* -----------------------------------------------------------------------
+     * log main-task stack high-water-mark before app_main() exits.
+     *
+     * trinity_wdt_kick() covers all spawned Trinity tasks, but app_main()
+     * itself never calls it.  Sample here so a shrinking margin is visible
+     * in the serial log on every boot AND survives a crash via the NVS fault
+     * log (trinity_log_dump_previous() on next boot).
+     * --------------------------------------------------------------------- */
+    {
+        UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
+        ESP_LOGI(APP_MAIN_TAG,
+                 "[TRINITY] app_main exit stack HWM: %u words (%u B)",
+                 (unsigned)hwm,
+                 (unsigned)(hwm * sizeof(StackType_t)));
+
+#ifndef CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS
+#define CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS 256u
+#endif
+        if (hwm < (UBaseType_t)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS)
+        {
+            ESP_LOGW(APP_MAIN_TAG,
+                     "[TRINITY] LOW STACK on main task at exit: hwm=%u words threshold=%u words",
+                     (unsigned)hwm,
+                     (unsigned)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS);
+            trinity_log_record_low_stack((uint32_t)hwm);
+        }
+    }
+
 }

@@ -46,6 +46,7 @@
 #define WIFI_POLL_INTERVAL_MS   2000u    /**< WiFi-wait polling / WDT kick rate */
 
 static const char *TAG = "VROOM";
+static const char *APP_MAIN_TAG = "APP_MAIN";
 
 static EventGroupHandle_t g_system_eg;
 static EventGroupHandle_t g_wifi_eg;
@@ -212,6 +213,35 @@ void app_main(void)
    ESP_LOGI("RAM", "Free heap: %lu", esp_get_free_heap_size());
    ESP_LOGI("RAM", "Min free heap: %lu", esp_get_minimum_free_heap_size());
    ESP_LOGI("RAM", "Free DRAM: %lu", heap_caps_get_free_size(MALLOC_CAP_8BIT));
+
+    /* -----------------------------------------------------------------------
+     * log main-task stack high-water-mark before app_main() exits.
+     *
+     * trinity_wdt_kick() covers all spawned Trinity tasks, but app_main()
+     * itself never calls it.  Sample here so a shrinking margin is visible
+     * in the serial log on every boot AND survives a crash via the NVS fault
+     * log (trinity_log_dump_previous() on next boot).
+     * --------------------------------------------------------------------- */
+    {
+        UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
+        ESP_LOGI(APP_MAIN_TAG,
+                 "[TRINITY] app_main exit stack HWM: %u words (%u B)",
+                 (unsigned)hwm,
+                 (unsigned)(hwm * sizeof(StackType_t)));
+
+#ifndef CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS
+#define CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS 256u
+#endif
+        if (hwm < (UBaseType_t)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS)
+        {
+            ESP_LOGW(APP_MAIN_TAG,
+                     "[TRINITY] LOW STACK on main task at exit: hwm=%u words threshold=%u words",
+                     (unsigned)hwm,
+                     (unsigned)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS);
+            trinity_log_record_low_stack((uint32_t)hwm);
+        }
+    }
+
 }
 
 /******************************************************************************
