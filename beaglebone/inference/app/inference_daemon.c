@@ -453,6 +453,12 @@ int main(void)
       if (receive_clip(&frames, &lens, &n_frames,
                        &start_ts, &duration_ms) < 0)
       {
+          /* SIGTERM/SIGINT sets g_running=0 and interrupts any blocking
+          * syscall (accept, recv) with EINTR, causing receive_clip() to
+          * return -1. The while(g_running) condition would catch it on
+          * the next iteration, but checking here avoids the usleep(100ms)
+          * delay and exits immediately on the same pass. */
+         if (!g_running) { break; }
          usleep(100000);
          continue;
       }
