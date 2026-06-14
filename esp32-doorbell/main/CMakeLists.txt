@@ -6,6 +6,7 @@ idf_component_register(SRCS "main.c"
         "trinity_panic_idf.c"
         "build_info.c"
         "trinity_log_stack.c"
+        "buzzer.c"
     INCLUDE_DIRS "." "include")
 
 if(DEFINED DOORBELL_ID)

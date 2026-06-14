@@ -76,6 +76,12 @@
  *          Fix: esp_wifi_set_ps(WIFI_PS_NONE) added in wifi_init(),
  *          matching the S3 PIR cam (which already had this fix from its
  *          own frame-capture deadlock investigation on 2026-06-12).
+ *
+ * \note    Passive buzzer (2026-06-13):
+ *          Passive buzzer added on GPIO14 via 2N7000 N-channel MOSFET.
+ *          buzzer_beep() called on button press for immediate audio
+ *          feedback before capture and send. LEDC_TIMER_1/CHANNEL_1
+ *          reserved for buzzer; camera uses LEDC_TIMER_0/CHANNEL_0.
  ******************************************************************************/
 
 #include <string.h>
@@ -96,9 +102,9 @@
 #include "wifi_secrets.h"
 #include "cam_logic.h"
 #include "trinity_log.h"
+#include "buzzer.h"
 
 static const char *TAG = "DOORBELL";
-static const char *APP_MAIN_TAG = "APP_MAIN";
 
 /*---------------------------------------------------------------------------*/
 /* Globals                                                                     */
@@ -248,7 +254,6 @@ static void wifi_init(void)
         ESP_LOGW(TAG, "esp_wifi_set_ps(WIFI_PS_NONE) failed: 0x%x", ps_err);
     }
 }
-
 
 /*---------------------------------------------------------------------------*/
 /* Lane A — UDP event to hub (authoritative, fires before image capture)      */
@@ -411,6 +416,11 @@ static void capture_task(void *arg)
         }
         trinity_wdt_kick();
 
+        /* Immediate audio feedback on button press — fires before capture
+         * and send so the user knows the press registered even if BBB is
+         * slow or unreachable. */
+        buzzer_beep();
+
         /* Debounce */
         vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
 
@@ -543,6 +553,7 @@ void app_main(void)
     }
 
     button_init();
+    buzzer_init();
     wifi_init();
 
     xTaskCreate(heartbeat_task, "heartbeat", 4096, NULL, 3, NULL);
@@ -562,7 +573,7 @@ void app_main(void)
      * --------------------------------------------------------------------- */
     {
         UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
-        ESP_LOGI(APP_MAIN_TAG,
+        ESP_LOGI(TAG,
                  "[TRINITY] app_main exit stack HWM: %u words (%u B)",
                  (unsigned)hwm,
                  (unsigned)(hwm * sizeof(StackType_t)));
@@ -572,12 +583,11 @@ void app_main(void)
 #endif
         if (hwm < (UBaseType_t)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS)
         {
-            ESP_LOGW(APP_MAIN_TAG,
+            ESP_LOGW(TAG,
                      "[TRINITY] LOW STACK on main task at exit: hwm=%u words threshold=%u words",
                      (unsigned)hwm,
                      (unsigned)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS);
             trinity_log_record_low_stack((uint32_t)hwm);
         }
     }
-
 }
