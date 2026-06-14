@@ -1,0 +1,16 @@
+[Unit]
+Description=Doorbell MJPEG stream daemon (TCP → ffmpeg → mediamtx RTSP)
+After=network.target mediamtx.service
+Requires=mediamtx.service
+
+[Service]
+Type=simple
+ExecStart=/opt/inference/app/doorbell_stream_daemon
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=doorbell-stream
+
+[Install]
+WantedBy=multi-user.target

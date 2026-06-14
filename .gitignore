@@ -152,3 +152,5 @@ beaglebone/inference/lib/tensorflow/
 #   esp32c3/idf/motor/managed_components/espressif__cjson/cJSON/cJSON.h
 #       (IDF managed component, re-add if idf.py regenerates managed_components)
 # ------------------------------------------------------------
+beaglebone/inference/app/doorbell_daemon
+beaglebone/inference/app/doorbell_stream_daemon
