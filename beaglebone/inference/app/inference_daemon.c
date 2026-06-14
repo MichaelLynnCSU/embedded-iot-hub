@@ -97,6 +97,15 @@
  *   CAM_CLIP_FRAME_MS changes on the ESP32 side. */
 #define FRAME_FPS       2
 
+/* Minimum interval between inference calls in process_clip().
+ * Frames are still saved to disk and included in the AVI regardless.
+ * Only inference_worker_run() is skipped for frames within the interval.
+ *
+ * At 2fps (one frame every ~530ms), INFER_INTERVAL_MS=500 means inference
+ * runs on approximately every frame. Raise to 1000+ to halve CPU load.
+ * Set to 0 to disable gating (every-frame inference, original behaviour). */
+#define INFER_INTERVAL_MS  500
+
 /******************************** GLOBALS *************************************/
 static volatile int  g_running   = 1;    /**< main loop run flag  */
 static FILE         *g_log       = NULL; /**< log file handle     */
@@ -365,31 +374,53 @@ static void process_clip(uint8_t **frames,
    snprintf(tmp_dir, sizeof(tmp_dir), "%s/tmp_%s", CLIPS_DIR, ts_str);
    mkdir(tmp_dir, 0755);
 
-   /* Save frames + run inference */
+   /* Save frames + run inference (time-gated).
+    *
+    * Inference runs on every Nth frame where N = INFER_INTERVAL_MS / frame_period.
+    * All frames are saved to disk and included in the AVI regardless.
+    * Frame 0 is always inferred so no clip starts blind.
+    *
+    * Example: 10s clip, 20 frames -> frame_period = 500ms.
+    *   INFER_INTERVAL_MS=500  -> every frame  (N=1)
+    *   INFER_INTERVAL_MS=1000 -> every 2nd    (N=2)
+    *   INFER_INTERVAL_MS=2000 -> every 4th    (N=4)
+    *
+    * Set INFER_INTERVAL_MS=0 to disable gating (original every-frame behaviour). */
+   int frame_period_ms = (n_frames > 0 && duration_ms > 0) ? (duration_ms / n_frames) : 500;
+   int infer_every_n;
+
+   if (INFER_INTERVAL_MS > 0 && frame_period_ms > 0)
+   {
+      infer_every_n = INFER_INTERVAL_MS / frame_period_ms;
+   }
+   else
+   {
+      infer_every_n = 1; /* fallback: infer every frame */
+   }
+   if (infer_every_n < 1) { infer_every_n = 1; }
+
    for (i = 0; i < n_frames; i++)
    {
       int   detected = 0;
       float conf     = 0.0f;
 
+      /* Save frame to disk unconditionally */
       snprintf(frame_path, sizeof(frame_path), "%s/frame_%03d.jpg", tmp_dir, i);
       f = fopen(frame_path, "wb");
       if (NULL != f) { fwrite(frames[i], 1, lens[i], f); fclose(f); }
 
-      inference_worker_run(frames[i], lens[i], &detected, &conf);
-      log_msg("Frame %d: person=%d confidence=%.2f", i + 1, detected, conf);
-
-      if (detected && conf > best_conf) { best_detected = 1; best_conf = conf; }
+      /* Run inference on every Nth frame */
+      if (i % infer_every_n == 0)
+      {
+         inference_worker_run(frames[i], lens[i], &detected, &conf);
+         log_msg("Frame %d: person=%d confidence=%.2f", i + 1, detected, conf);
+         if (detected && conf > best_conf) { best_detected = 1; best_conf = conf; }
+      }
+      else
+      {
+         log_msg("Frame %d: skipped inference (every_n=%d)", i + 1, infer_every_n);
+      }
    }
-
-   log_msg("Clip result: person=%d best_confidence=%.2f frames=%d duration=%dms",
-           best_detected, best_conf, n_frames, duration_ms);
-
-   /* Build .avi path */
-   snprintf(avi_path, sizeof(avi_path), "%s/%s_indoor_%s_%03d.avi",
-            CLIPS_DIR, ts_str,
-            best_detected ? "person" : "noperson",
-            (int)(best_conf * 100));
-
    /* Encode .avi via ffmpeg.
     *
     * -c:v copy: mux source JPEGs directly into the AVI container with no
