@@ -30,6 +30,14 @@
  *          Neither lane depends on the other for correctness.
  *          event_id is the join key — BBB correlates JPEG to event
  *          without time-window heuristics.
+ *
+ * \note    DOORBELL_MODE build flag (2026-06-14):
+ *          DOORBELL_MODE_SNAPSHOT (default): button press → single JPEG
+ *          → BBB:9091 → doorbell_daemon (inference + storage).
+ *          DOORBELL_MODE_STREAM: button press toggles stream ON/OFF
+ *          → BBB:9093 → doorbell_stream_daemon → ffmpeg → mediamtx RTSP.
+ *          Set at build time: idf.py -DDOORBELL_MODE=SNAPSHOT build
+ *                             idf.py -DDOORBELL_MODE=STREAM   build
  ******************************************************************************/
 
 #ifndef CAM_LOGIC_H
@@ -43,10 +51,23 @@
 /* Network config                                                               */
 /*---------------------------------------------------------------------------*/
 #define BBB_HOST            "10.0.0.206"  /**< BeagleBone Wifi Hub IP address */
-#define BBB_PORT            9091          /**< BBB TCP listen port (doorbell) */
+#define BBB_PORT            9091          /**< BBB TCP port — snapshot mode   */
+#define BBB_STREAM_PORT     9093          /**< BBB TCP port — stream mode     */
 #define RECONNECT_MS        3000          /**< TCP reconnect delay ms         */
 #define HUB_HOST            "10.0.0.190"  /**< Hub static IP                  */
 #define HUB_UDP_PORT        9092          /**< Hub UDP doorbell event port    */
+
+/*---------------------------------------------------------------------------*/
+/* Mode config                                                                  */
+/*---------------------------------------------------------------------------*/
+
+/** \brief DOORBELL_MODE values — set at build time via -DDOORBELL_MODE=X   */
+#define DOORBELL_MODE_SNAPSHOT  0   /**< Button → single JPEG → port 9091   */
+#define DOORBELL_MODE_STREAM    1   /**< Button → toggle MJPEG → port 9093  */
+
+#ifndef DOORBELL_MODE
+#define DOORBELL_MODE  DOORBELL_MODE_SNAPSHOT  /**< Default: snapshot mode   */
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* Multi-device config                                                         */
@@ -61,7 +82,7 @@
 #endif                                    /**< at build: -DDOORBELL_ID=N)     */
 
 /**
- * \brief Packed TCP header sent before each JPEG payload.
+ * \brief Packed TCP header sent before each JPEG payload (snapshot mode).
  *
  * \details BBB uses magic to validate, version to handle future formats,
  *          device_id to route, event_id to correlate with UDP event,
@@ -101,6 +122,29 @@ typedef struct {
 /*---------------------------------------------------------------------------*/
 #define BUTTON_GPIO      13   /**< Doorbell button GPIO (active low)         */
 #define DEBOUNCE_MS     200   /**< Button debounce delay ms                  */
+
+/*---------------------------------------------------------------------------*/
+/* Stream frame header                                                          */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * \brief Pack a 4-byte big-endian frame length header for stream mode.
+ *
+ * \details Stream wire protocol:
+ *          [device_id:1] sent once on connect, then per frame:
+ *          [jpeg_len:4 big-endian][jpeg bytes]
+ *          This matches the BBB doorbell_stream_daemon wire protocol.
+ *
+ * \param[out] buf       4-byte output buffer.
+ * \param[in]  jpeg_len  JPEG payload length in bytes.
+ */
+static inline void cam_pack_stream_frame_hdr(uint8_t *buf, uint32_t jpeg_len)
+{
+    buf[0] = (uint8_t)((jpeg_len >> 24) & 0xFF);
+    buf[1] = (uint8_t)((jpeg_len >> 16) & 0xFF);
+    buf[2] = (uint8_t)((jpeg_len >>  8) & 0xFF);
+    buf[3] = (uint8_t)((jpeg_len      ) & 0xFF);
+}
 
 /*---------------------------------------------------------------------------*/
 /* Header pack / unpack — testable on host                                     */

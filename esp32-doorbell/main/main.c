@@ -4,23 +4,34 @@
  *
  * \brief ESP32 doorbell CAM — button-triggered JPEG capture and push to BBB.
  *
- * \details Board: AI-Thinker ESP32-CAM (OV2640), 8MB external PSRAM.
+ * \details Board: AI-Thinker ESP32-CAM (OV3660), 8MB external PSRAM.
  *          Pinout from AI-Thinker schematic.
  *
- *          Flow:
+ *          Flow (DOORBELL_MODE_SNAPSHOT, default):
  *          boot -> wifi up -> wait for GPIO13 button press
  *          button press -> generate event_id
  *                       -> send UDP event to hub (Lane A, authoritative)
  *                       -> capture JPEG
  *                       -> connect to BBB:9091 -> send header+JPEG -> close
  *
- *          TCP connection is opened per-trigger and closed after send.
+ *          Flow (DOORBELL_MODE_STREAM):
+ *          boot -> wifi up -> wait for GPIO13 button press
+ *          button press -> generate event_id
+ *                       -> send UDP event to hub (Lane A, still fires)
+ *                       -> toggle stream state
+ *                          ON:  connect to BBB:9093, send device_id byte,
+ *                               then loop sending [len:4][jpeg] frames
+ *                          OFF: close connection, stop loop
+ *
+ *          TCP connection is opened per-trigger and closed after send
+ *          (SNAPSHOT), or held open for the duration of the stream (STREAM).
  *          Button is debounced in software (DEBOUNCE_MS).
  *          GPIO13 pullup disabled — external LED+resistor acts as pullup.
  *
  * \note    Separate from S3 PIR cam which streams MJPEG to BBB:9090.
- *          Doorbell sends single JPEG to BBB:9091 on each button press.
- *          Up to MAX_DOORBELL_CAMS (4) devices share port 9091.
+ *          Doorbell sends single JPEG to BBB:9091 on each button press
+ *          (SNAPSHOT mode) or continuous frames to BBB:9093 (STREAM mode).
+ *          Up to MAX_DOORBELL_CAMS (4) devices share each port.
  *          Device ID set at build time: idf.py -DDOORBELL_ID=N build
  *
  * \note    Non-blocking connect (2026-06-07):
@@ -45,12 +56,15 @@
  *          heartbeat_task: 30s vTaskDelay chunked into 2s kicks.
  *          TRINITY_CHIP_ESP32_DOORBELL_IDF / "doorbell_log" namespace.
  *
- * \note    Image quality bump (2026-06-13):
- *          QQVGA/quality 12/DRAM -> VGA/quality 6/PSRAM, matching the S3
- *          PIR cam tuning (capped gain ceiling, aec2, bpc/wpc, sharpness).
- *          Requires CONFIG_SPIRAM=y (8MB PSRAM present on this board).
- *          VGA JPEG frames (~10KB) plus sensor tuning calls increase
- *          capture_task's stack usage — bumped from 8192 to 12288 bytes.
+ * \note    Camera quality tuning (2026-06-14):
+ *          Sensor confirmed as OV3660, not OV2640 as originally assumed.
+ *          OV2640-specific tuning calls (set_gainceiling, set_aec2, set_bpc,
+ *          set_wpc, set_sharpness) were misconfiguring the OV3660, producing
+ *          near-continuous NO-SOI corrupt frames during idle and streaming.
+ *          Removed entirely. jpeg_quality bumped from 6 to 10: smaller frames
+ *          (~5-7KB vs ~13KB) reduce WiFi transmission time, lower lag in VLC,
+ *          and reduce FB-OVF frequency. VGA at quality 10 is still adequate
+ *          resolution for a doorbell cam.
  *
  * \note    Send-loop WDT fix (2026-06-13):
  *          Bumping to VGA increased JPEG size from ~3KB to ~11KB.
@@ -82,6 +96,53 @@
  *          buzzer_beep() called on button press for immediate audio
  *          feedback before capture and send. LEDC_TIMER_1/CHANNEL_1
  *          reserved for buzzer; camera uses LEDC_TIMER_0/CHANNEL_0.
+ *
+ * \note    DOORBELL_MODE build flag (2026-06-14):
+ *          Added DOORBELL_MODE_SNAPSHOT (default) and DOORBELL_MODE_STREAM
+ *          build-time modes, allowing mixed deployment across the 4
+ *          doorbell cams. SNAPSHOT path is unchanged from prior behaviour.
+ *          STREAM path adds stream_task(): button press toggles a
+ *          persistent TCP connection to BBB:9093 carrying continuous
+ *          [len:4][jpeg] frames, relayed by doorbell_stream_daemon ->
+ *          ffmpeg -> mediamtx RTSP. Lane A UDP event still fires on every
+ *          button press in both modes. buzzer_beep() called on stream
+ *          toggle ON and toggle OFF for audio feedback. No inference is
+ *          performed in the stream path — pure video transport.
+ *
+ * \note    Camera DMA buffer tuning (2026-06-14):
+ *          fb_count bumped 1 -> 2, grab_mode changed CAMERA_GRAB_WHEN_EMPTY
+ *          -> CAMERA_GRAB_LATEST. Under STREAM mode, network congestion
+ *          caused the single DMA buffer to overflow (FB-OVF) while
+ *          stream_send_all() was blocked retrying a slow send. The second
+ *          buffer gives the DMA engine a slot to write into during that
+ *          window; GRAB_LATEST ensures the driver continuously overwrites
+ *          the oldest buffer so stream_task always dequeues the freshest
+ *          frame rather than accumulating lag. SNAPSHOT mode is unaffected:
+ *          the camera is idle between presses so no overflow is possible,
+ *          and GRAB_LATEST on a rapid double-press delivers the most recent
+ *          image of the visitor rather than queuing historical frames.
+ *          Both buffers allocated in PSRAM (fb_location unchanged).
+ *
+ * \note    Truncation fix (2026-06-14):
+ *          Root cause: stream_send_all() treated SO_SNDTIMEO-induced send()
+ *          failures as fatal socket errors, closing the connection mid-frame.
+ *          On lwIP/ESP-IDF, SO_SNDTIMEO expiry returns send() == -1 with
+ *          errno == ETIMEDOUT (not always EAGAIN/EWOULDBLOCK). The original
+ *          retry condition only checked EAGAIN/EWOULDBLOCK, so ETIMEDOUT
+ *          fell through to "return false", causing the higher layer to close
+ *          the socket. The BBB saw the resulting TCP FIN mid-frame and logged
+ *          "JPEG recv truncated" — a false corruption report triggered by a
+ *          soft send stall, not actual data loss.
+ *
+ *          Fix: ETIMEDOUT added to the transient-retry set in
+ *          stream_send_all(). errno is only evaluated when send() returns
+ *          < 0, since lwIP only guarantees errno validity on failure.
+ *          n == 0 (shouldn't occur for non-zero sends on lwIP but handled
+ *          defensively) is treated as retry-safe rather than fatal.
+ *
+ *          Counterpart BBB fix in doorbell_stream_daemon.c: recv_all()
+ *          now distinguishes clean TCP FIN (return -2) from transport
+ *          error (return -1) so the log reflects the true cause.
  ******************************************************************************/
 
 #include <string.h>
@@ -147,10 +208,20 @@ static esp_err_t camera_init(void)
         .ledc_channel   = LEDC_CHANNEL_0,
         .pixel_format   = PIXFORMAT_JPEG,
         .frame_size     = FRAMESIZE_VGA,
-        .jpeg_quality   = 6,
-        .fb_count       = 1,
+        .jpeg_quality   = 10,              /* quality 10: ~5-7KB per VGA frame,
+                                            * good balance of speed and clarity
+                                            * for a doorbell cam over WiFi.
+                                            * Was 6 (~13KB) — tuned down after
+                                            * confirming sensor is OV3660, not
+                                            * OV2640 as originally assumed.    */
+        .fb_count       = 2,                  /* was 1 — absorbs network jitter
+                                               * in STREAM mode; both bufs in
+                                               * PSRAM (fb_location below).  */
         .fb_location    = CAMERA_FB_IN_PSRAM,
-        .grab_mode      = CAMERA_GRAB_WHEN_EMPTY,
+        .grab_mode      = CAMERA_GRAB_LATEST, /* was CAMERA_GRAB_WHEN_EMPTY —
+                                               * driver overwrites oldest buf
+                                               * so stream_task always gets
+                                               * the freshest frame.         */
     };
 
     esp_err_t err = esp_camera_init(&config);
@@ -160,33 +231,11 @@ static esp_err_t camera_init(void)
         return err;
     }
 
-    /* Image quality tuning (2026-06-13) — matches S3 PIR cam.
-     * Caps AGC gain (eliminates speckle/noise), enables advanced AEC and
-     * pixel correction, and adds in-sensor sharpening to counter the
-     * softness introduced by higher resolution + lower compression.
-     * set_sharpness() return value is checked since not all sensor
-     * drivers implement it (returns -1/ESP_ERR_NOT_SUPPORTED if absent).
-     */
-    sensor_t *p_sensor = esp_camera_sensor_get();
-    if (NULL != p_sensor)
-    {
-        p_sensor->set_framesize(p_sensor, FRAMESIZE_VGA);
-        p_sensor->set_quality(p_sensor, 6);
-        p_sensor->set_gainceiling(p_sensor, GAINCEILING_2X);
-        p_sensor->set_aec2(p_sensor, 1);
-        p_sensor->set_bpc(p_sensor, 1);
-        p_sensor->set_wpc(p_sensor, 1);
-
-        if (0 != p_sensor->set_sharpness(p_sensor, 2))
-        {
-            ESP_LOGW(TAG, "set_sharpness() not supported by this sensor driver");
-        }
-    }
-    else
-    {
-        ESP_LOGW(TAG, "esp_camera_sensor_get() returned NULL — "
-                      "skipping image quality tuning");
-    }
+    /* Sensor tuning removed (2026-06-14): the tuning block previously here
+     * (set_gainceiling, set_aec2, set_bpc, set_wpc, set_sharpness) was
+     * written for OV2640 and was misconfiguring the actual sensor (OV3660),
+     * producing near-continuous NO-SOI corrupt frames. Removed entirely;
+     * OV3660 defaults produce clean frames without manual register tuning. */
 
     vTaskDelay(pdMS_TO_TICKS(500));
     return ESP_OK;
@@ -295,8 +344,10 @@ static void send_udp_event(uint64_t event_id)
              (unsigned long)(event_id & 0xFFFFFFFFUL));
 }
 
+#if DOORBELL_MODE == DOORBELL_MODE_SNAPSHOT
+
 /*---------------------------------------------------------------------------*/
-/* Lane B — TCP JPEG to BBB (payload, best-effort)                            */
+/* Lane B — TCP JPEG to BBB (payload, best-effort) — SNAPSHOT mode            */
 /*---------------------------------------------------------------------------*/
 
 static bool tcp_connect_once(void)
@@ -366,6 +417,169 @@ static bool send_jpeg_to_bbb(camera_fb_t *p_fb, uint64_t event_id)
     return true;
 }
 
+#else /* DOORBELL_MODE == DOORBELL_MODE_STREAM */
+
+/*---------------------------------------------------------------------------*/
+/* Lane B — TCP MJPEG stream to BBB — STREAM mode                            */
+/*---------------------------------------------------------------------------*/
+
+static bool stream_send_all(const void *buf, size_t len);
+
+/**
+ * \brief Connect to BBB:9093 and send the one-shot device_id byte.
+ *
+ * \details Wire protocol (matches doorbell_stream_daemon):
+ *          connect -> send [device_id:1] once -> loop sending
+ *          [jpeg_len:4 big-endian][jpeg bytes] per frame.
+ *
+ * \return true on success, false on failure (socket left closed).
+ */
+static bool stream_tcp_connect_once(void)
+{
+    struct sockaddr_in addr = {0};
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(BBB_STREAM_PORT);
+    inet_pton(AF_INET, BBB_HOST, &addr.sin_addr);
+
+    if (g_tcp_sock >= 0) { close(g_tcp_sock); g_tcp_sock = -1; }
+
+    g_tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (0 > g_tcp_sock) { return false; }
+
+    if (0 != connect(g_tcp_sock, (struct sockaddr *)&addr, sizeof(addr)))
+    {
+        close(g_tcp_sock);
+        g_tcp_sock = -1;
+        return false;
+    }
+
+    /* SO_SNDTIMEO of 500ms — NOT used as a "this send must finish within
+     * X" deadline (the link can't sustain ~13KB frames that fast). Instead
+     * stream_send_all() treats a 500ms EAGAIN/EWOULDBLOCK/ETIMEDOUT as
+     * "still sending, call again", looping with a trinity_wdt_kick() every
+     * ~500ms. This decouples total per-frame send time (which can
+     * legitimately exceed the 5s WDT period under WiFi congestion) from
+     * the WDT, while still kicking often enough that no single iteration
+     * can starve it.
+     *
+     * History: 1s and 2s timeouts both caused "frame send() failed" every
+     * ~5-6s because the link genuinely takes longer than that per ~13KB
+     * frame; a 5s timeout tripped the WDT directly since a single blocked
+     * send() could consume the whole WDT period with no intervening kick.
+     * 500ms + retry-loop fixes both. ETIMEDOUT (not just EAGAIN) must be
+     * in the retry set — lwIP maps SO_SNDTIMEO expiry to ETIMEDOUT, not
+     * always EAGAIN. Missing this caused the original truncation bug. */
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 500000 };
+    setsockopt(g_tcp_sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    uint8_t device_id_byte = (uint8_t)DOORBELL_ID;
+    if (!stream_send_all(&device_id_byte, 1))
+    {
+        ESP_LOGW(TAG, "Stream: device_id byte send() failed (errno=%d %s)",
+                 errno, strerror(errno));
+        close(g_tcp_sock);
+        g_tcp_sock = -1;
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Stream: connected to BBB %s:%d (device_id=%d)",
+             BBB_HOST, BBB_STREAM_PORT, DOORBELL_ID);
+    return true;
+}
+
+/**
+ * \brief Send exactly len bytes on g_tcp_sock, tolerating SO_SNDTIMEO
+ *        timeouts on a slow link by retrying, kicking the Trinity WDT
+ *        every retry so total send time can exceed the WDT period without
+ *        tripping it.
+ *
+ * \details g_tcp_sock has SO_SNDTIMEO set to 500ms. On lwIP/ESP-IDF,
+ *          SO_SNDTIMEO expiry returns send() == -1 with errno == ETIMEDOUT
+ *          (and sometimes EAGAIN or EWOULDBLOCK). All three are treated as
+ *          transient backpressure — "keep trying", not failure.
+ *
+ *          errno is only evaluated when send() returns < 0. lwIP only
+ *          guarantees errno validity on failure; reading it after n > 0 or
+ *          n == 0 would read stale state.
+ *
+ *          n == 0 should not occur for non-zero sends on lwIP but is
+ *          treated as retry-safe rather than fatal as a defensive measure.
+ *
+ *          Any other negative errno (ECONNRESET, EPIPE, ENOTCONN, ...)
+ *          is a real connection failure and returns false immediately.
+ *
+ * \param[in] buf  Data to send.
+ * \param[in] len  Number of bytes to send.
+ * \return         true if all len bytes were sent, false on hard failure.
+ */
+static bool stream_send_all(const void *buf, size_t len)
+{
+    const uint8_t *p    = (const uint8_t *)buf;
+    size_t          sent = 0;
+
+    while (sent < len)
+    {
+        trinity_wdt_kick();
+
+        int n = send(g_tcp_sock, p + sent, len - sent, 0);
+
+        if (n > 0)
+        {
+            sent += (size_t)n;
+            continue;
+        }
+
+        if (n < 0)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT)
+            {
+                /* Transient: SO_SNDTIMEO expired or send buffer full.
+                 * lwIP maps SO_SNDTIMEO to ETIMEDOUT; EAGAIN/EWOULDBLOCK
+                 * can also appear. Loop and retry — not a dead socket. */
+                continue;
+            }
+
+            /* Any other errno is a real connection failure. */
+            return false;
+        }
+
+        /* n == 0: shouldn't happen for non-zero sends on lwIP, but treat
+         * as retry-safe rather than fatal. */
+    }
+
+    return true;
+}
+
+/**
+ * \brief Send one [len:4][jpeg] frame on the already-connected stream socket.
+ *
+ * \param[in] p_fb  Camera frame buffer to send.
+ * \return          true if the full frame was sent, false on any failure.
+ */
+static bool stream_send_frame(camera_fb_t *p_fb)
+{
+    uint8_t len_hdr[4];
+    cam_pack_stream_frame_hdr(len_hdr, (uint32_t)p_fb->len);
+
+    if (!stream_send_all(len_hdr, sizeof(len_hdr)))
+    {
+        ESP_LOGW(TAG, "Stream: frame length header send() failed (errno=%d %s)",
+                 errno, strerror(errno));
+        return false;
+    }
+
+    if (!stream_send_all(p_fb->buf, p_fb->len))
+    {
+        ESP_LOGE(TAG, "Stream: frame payload send() failed (errno=%d %s)",
+                 errno, strerror(errno));
+        return false;
+    }
+
+    return true;
+}
+
+#endif /* DOORBELL_MODE */
+
 /*---------------------------------------------------------------------------*/
 /* Button ISR                                                                  */
 /*---------------------------------------------------------------------------*/
@@ -392,14 +606,60 @@ static void button_init(void)
 }
 
 /*---------------------------------------------------------------------------*/
-/* Capture task                                                                */
+/* Common: wait for a debounced button press, fire Lane A UDP event           */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * \brief Block (with WDT-friendly bounded waits) until a debounced button
+ *        press occurs, then fire the Lane A UDP event.
+ *
+ * \details Shared by capture_task (SNAPSHOT) and stream_task (STREAM).
+ *          Returns the generated event_id, which both modes include for
+ *          correlation even though the STREAM path currently has no Lane B
+ *          per-frame event_id field.
+ *
+ * \return event_id for this press.
+ */
+static uint64_t wait_for_button_press(void)
+{
+    while (1)
+    {
+        if (pdTRUE != xSemaphoreTake(g_trigger_sem, pdMS_TO_TICKS(2000)))
+        {
+            trinity_wdt_kick();
+            continue;
+        }
+        trinity_wdt_kick();
+        break;
+    }
+
+    /* Debounce */
+    vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
+
+    /* Drain bounce */
+    while (xSemaphoreTake(g_trigger_sem, 0) == pdTRUE) {}
+
+    ESP_LOGI(TAG, "Doorbell pressed — generating event");
+
+    uint64_t event_id = cam_make_event_id(g_mac_tail, g_boot_ms, g_event_seq++);
+
+    /* Lane A — fires on every button press in both modes */
+    send_udp_event(event_id);
+
+    return event_id;
+}
+
+#if DOORBELL_MODE == DOORBELL_MODE_SNAPSHOT
+
+/*---------------------------------------------------------------------------*/
+/* Capture task — SNAPSHOT mode                                                */
 /*---------------------------------------------------------------------------*/
 
 static void capture_task(void *arg)
 {
     while (!g_wifi_up) { vTaskDelay(pdMS_TO_TICKS(500)); }
 
-    ESP_LOGI(TAG, "Ready — waiting for doorbell button press (device_id=%d)",
+    ESP_LOGI(TAG, "Ready — waiting for doorbell button press (device_id=%d, mode=SNAPSHOT)",
              DOORBELL_ID);
 
     /* ---- Trinity: register after WiFi is up, before the main loop ---- */
@@ -407,35 +667,12 @@ static void capture_task(void *arg)
 
     while (1)
     {
-        /* ---- Trinity: bounded wait so the loop can kick the WDT while
-         *      idle, waiting for a button press.                       ---- */
-        if (pdTRUE != xSemaphoreTake(g_trigger_sem, pdMS_TO_TICKS(2000)))
-        {
-            trinity_wdt_kick();
-            continue;
-        }
-        trinity_wdt_kick();
+        uint64_t event_id = wait_for_button_press();
 
         /* Immediate audio feedback on button press — fires before capture
          * and send so the user knows the press registered even if BBB is
          * slow or unreachable. */
         buzzer_beep();
-
-        /* Debounce */
-        vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
-
-        /* Drain bounce */
-        while (xSemaphoreTake(g_trigger_sem, 0) == pdTRUE) {}
-
-        ESP_LOGI(TAG, "Doorbell pressed — generating event");
-
-        /* Generate event_id — join key for both lanes */
-        uint64_t event_id = cam_make_event_id(g_mac_tail, g_boot_ms,
-                                               g_event_seq++);
-
-        /* Lane A — fire UDP event to hub immediately, before image capture.
-         * Hub correctness never depends on image delivery. */
-        send_udp_event(event_id);
 
         /* Lane B — capture JPEG and push to BBB with event_id in header */
         ESP_LOGI(TAG, "Capturing JPEG");
@@ -482,6 +719,136 @@ static void capture_task(void *arg)
         g_tcp_sock = -1;
     }
 }
+
+#else /* DOORBELL_MODE == DOORBELL_MODE_STREAM */
+
+/*---------------------------------------------------------------------------*/
+/* Stream task — STREAM mode                                                   */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * \brief Button-toggled continuous MJPEG stream to BBB:9093.
+ *
+ * \details Each button press toggles streaming on/off:
+ *          - Toggle ON:  retry-connect to BBB:9093 (3x, RECONNECT_MS apart,
+ *                         matching the SNAPSHOT pattern), send device_id
+ *                         byte, then begin the frame loop.
+ *          - Toggle OFF: close the TCP connection, stop the frame loop.
+ *
+ *          While streaming, the frame loop captures and sends frames as
+ *          fast as the camera/network allow, with a bounded wait on the
+ *          trigger semaphore so a button press (toggle OFF) and the WDT
+ *          kick are both serviced promptly without a separate poll.
+ *
+ *          On an unexpected BBB disconnect mid-stream (send failure), the
+ *          task retries the connection up to 3x (RECONNECT_MS apart) before
+ *          giving up and falling back to the OFF state, matching the
+ *          existing SNAPSHOT reconnect pattern.
+ *
+ *          Lane A UDP event fires on every press (toggle ON and toggle OFF),
+ *          via wait_for_button_press(). No inference is performed; this is
+ *          pure video transport.
+ */
+static void stream_task(void *arg)
+{
+    while (!g_wifi_up) { vTaskDelay(pdMS_TO_TICKS(500)); }
+
+    ESP_LOGI(TAG, "Ready — waiting for doorbell button press (device_id=%d, mode=STREAM)",
+             DOORBELL_ID);
+
+    /* ---- Trinity: register after WiFi is up, before the main loop ---- */
+    trinity_wdt_add();
+
+    bool streaming = false;
+
+    while (1)
+    {
+        if (!streaming)
+        {
+            /* Idle: wait for a press to toggle streaming ON */
+            (void)wait_for_button_press();
+
+            buzzer_beep();   /* toggle ON feedback */
+
+            bool connected = false;
+            for (int i = 0; i < 3; i++)
+            {
+                if (stream_tcp_connect_once()) { connected = true; break; }
+                ESP_LOGW(TAG, "Stream connect attempt %d failed", i + 1);
+                vTaskDelay(pdMS_TO_TICKS(RECONNECT_MS));
+            }
+
+            if (!connected)
+            {
+                ESP_LOGE(TAG, "Stream: BBB unreachable, staying OFF");
+                continue;
+            }
+
+            ESP_LOGI(TAG, "Stream: started (device_id=%d)", DOORBELL_ID);
+            streaming = true;
+            continue;
+        }
+
+        /* Streaming: send frames until a press toggles OFF or the
+         * connection drops. Bounded semaphore wait services both the
+         * toggle-OFF press and the WDT kick while we're not actively
+         * blocked in send(). */
+        if (pdTRUE == xSemaphoreTake(g_trigger_sem, 0))
+        {
+            /* Debounce + drain, matching wait_for_button_press() */
+            vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
+            while (xSemaphoreTake(g_trigger_sem, 0) == pdTRUE) {}
+
+            ESP_LOGI(TAG, "Doorbell pressed — generating event");
+            uint64_t event_id = cam_make_event_id(g_mac_tail, g_boot_ms, g_event_seq++);
+            send_udp_event(event_id);   /* Lane A — toggle OFF press */
+
+            buzzer_beep();   /* toggle OFF feedback */
+
+            close(g_tcp_sock);
+            g_tcp_sock = -1;
+            streaming = false;
+            ESP_LOGI(TAG, "Stream: stopped (device_id=%d)", DOORBELL_ID);
+            continue;
+        }
+
+        trinity_wdt_kick();
+
+        camera_fb_t *p_fb = esp_camera_fb_get();
+        if (NULL == p_fb)
+        {
+            ESP_LOGW(TAG, "Stream: capture failed, skipping frame");
+            continue;
+        }
+
+        bool ok = stream_send_frame(p_fb);
+        esp_camera_fb_return(p_fb);
+
+        if (!ok)
+        {
+            ESP_LOGW(TAG, "Stream: frame send failed, attempting reconnect");
+            close(g_tcp_sock);
+            g_tcp_sock = -1;
+
+            bool reconnected = false;
+            for (int i = 0; i < 3; i++)
+            {
+                trinity_wdt_kick();
+                if (stream_tcp_connect_once()) { reconnected = true; break; }
+                ESP_LOGW(TAG, "Stream reconnect attempt %d failed", i + 1);
+                vTaskDelay(pdMS_TO_TICKS(RECONNECT_MS));
+            }
+
+            if (!reconnected)
+            {
+                ESP_LOGE(TAG, "Stream: BBB unreachable after retries, stopping stream");
+                streaming = false;
+            }
+        }
+    }
+}
+
+#endif /* DOORBELL_MODE */
 
 /*---------------------------------------------------------------------------*/
 /* Heartbeat                                                                   */
@@ -558,10 +925,16 @@ void app_main(void)
 
     xTaskCreate(heartbeat_task, "heartbeat", 4096, NULL, 3, NULL);
 
+#if DOORBELL_MODE == DOORBELL_MODE_SNAPSHOT
     /* Stack bumped 8192 -> 12288: VGA JPEG buffers (~10KB) plus the added
      * sensor tuning calls in camera_init() increase capture_task's stack
      * footprint versus the original QQVGA/quality-12 configuration. */
     xTaskCreate(capture_task, "capture", 12288, NULL, 5, NULL);
+#else
+    /* stream_task carries the same per-frame buffers as capture_task, so
+     * use the same 12288-byte stack sizing. */
+    xTaskCreate(stream_task, "stream", 12288, NULL, 5, NULL);
+#endif
 
     /* -----------------------------------------------------------------------
      * log main-task stack high-water-mark before app_main() exits.

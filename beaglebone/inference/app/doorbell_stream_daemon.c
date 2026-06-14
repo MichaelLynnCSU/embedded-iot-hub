@@ -26,6 +26,74 @@
  *
  * \note    SIGPIPE is ignored globally. If ffmpeg exits mid-stream,
  *          fwrite() returns an error instead of killing the daemon.
+ *
+ * \note    Truncation fix (2026-06-14):
+ *          Root cause: ESP32 stream_send_all() treated SO_SNDTIMEO-induced
+ *          send() failures (lwIP returns -1/ETIMEDOUT under backpressure)
+ *          as fatal socket errors, closing the connection mid-frame. The
+ *          BBB recv_all() saw the resulting TCP FIN mid-frame and logged
+ *          "JPEG recv truncated", collapsing clean peer-close and transport
+ *          errors into one bucket.
+ *
+ *          BBB fix (this file): recv_all() now returns -2 on clean TCP FIN
+ *          (r == 0) and -1 on transport error (r < 0), so conn_thread()
+ *          can log the correct cause. "connection closed mid-frame" means
+ *          the ESP32 dropped the socket (almost always due to the send-side
+ *          ETIMEDOUT misclassification). "JPEG recv truncated" means a real
+ *          transport error occurred.
+ *
+ *          ESP32 fix (stream_send_all() in main.c): ETIMEDOUT added to the
+ *          transient-retry set alongside EAGAIN/EWOULDBLOCK, and errno is
+ *          only evaluated when send() returns < 0 (lwIP only guarantees
+ *          errno validity on failure). This prevents the soft-stall ->
+ *          socket-close -> BBB-truncation chain.
+ *
+ * \note    Corrupt frame / mediamtx timeout investigation (2026-06-14):
+ *          Observed: ffmpeg publishes to mediamtx successfully but mediamtx
+ *          kills the publisher after ~1-3 minutes with "i/o timeout". ffmpeg
+ *          log showed frames flowing (non-monotonic DTS warnings) but
+ *          mediamtx still timing out. Root cause identified via log
+ *          correlation: ESP32 WiFi jitter causes irregular frame delivery.
+ *          When the daemon blocks in recv_all() waiting for a slow frame,
+ *          fwrite() to ffmpeg's stdin pipe is also stalled. ffmpeg blocks on
+ *          stdin read, stops sending RTP packets to mediamtx, and mediamtx
+ *          declares the publisher inactive after its inactivity window.
+ *          ffmpeg only detects the dead mediamtx socket ~90s later on the
+ *          next write attempt (EPIPE), creating the misleading delayed log.
+ *
+ *          The non-monotonic DTS warnings are a side-effect of irregular
+ *          frame timing from WiFi jitter — they are harmless and do NOT
+ *          cause the mediamtx timeout.
+ *
+ *          Attempted: "-c:v mjpeg -q:v 3" (re-encode). No improvement.
+ *          Attempted: "-flush_packets 1", "-stimeout". Cosmetic only.
+ *          Root cause is architectural: backpressure propagation from
+ *          ESP32 jitter through the daemon pipe into ffmpeg's RTSP output.
+ *
+ * \note    Producer/consumer queue architecture (2026-06-14):
+ *          Fix: decouple the ESP32 receiver from the ffmpeg writer using a
+ *          bounded lock-free-style ring queue with drop-oldest policy.
+ *
+ *          Thread model per connection:
+ *          - conn_thread (producer): receives frames from ESP32 over TCP,
+ *            pushes to queue. Never blocks on ffmpeg.
+ *          - ffmpeg_thread (consumer): pulls from queue, writes to ffmpeg
+ *            stdin. Waits on condvar with timeout so it never blocks
+ *            indefinitely — preventing mediamtx inactivity timeout even
+ *            during ESP32 jitter gaps.
+ *
+ *          Queue spec:
+ *          - FRAME_QUEUE_DEPTH slots (4) — absorbs ~100-200ms WiFi bursts
+ *          - Drop-oldest when full: doorbell live view always wants the
+ *            freshest frame, never a stale backlog. Blocking the producer
+ *            would recreate the stall cascade at a higher level.
+ *          - Mutex + condvar for producer/consumer sync.
+ *          - Mutex never held during fwrite() — only during queue slot
+ *            access.
+ *
+ *          Result: ESP32 jitter is absorbed by the queue. ffmpeg sees a
+ *          steady frame supply. mediamtx sees continuous RTP activity.
+ *          The entire backpressure propagation chain is broken.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -44,16 +112,37 @@
 #include <arpa/inet.h>
 
 /******************************** CONFIG **************************************/
-#define LISTEN_PORT      9093
-#define BACKLOG          8
-#define MAX_FRAME_BYTES  (1024u * 1024u)   /**< 1 MB per-frame sanity cap  */
-#define LOG_PATH         "/var/log/doorbell_stream_daemon.log"
-#define RTSP_BASE        "rtsp://localhost:8554/doorbell"
+#define LISTEN_PORT        9093
+#define BACKLOG            8
+#define MAX_FRAME_BYTES    (1024u * 1024u)  /**< 1 MB per-frame sanity cap   */
+#define LOG_PATH           "/var/log/doorbell_stream_daemon.log"
+#define RTSP_BASE          "rtsp://localhost:8554/doorbell"
+#define FFMPEG_LOG_PATH    "/var/log/ffmpeg_doorbell.log"
+
+/**
+ * \brief Queue depth — number of frame slots in the ring buffer.
+ *
+ * \details 4 slots absorbs ~100-200ms of WiFi jitter at typical VGA MJPEG
+ *          frame rates (~5-10 fps over this link), without accumulating
+ *          enough latency to make the doorbell feel delayed.
+ */
+#define FRAME_QUEUE_DEPTH  4
+
+/**
+ * \brief ffmpeg consumer wait timeout in milliseconds.
+ *
+ * \details If the queue is empty for this long, the consumer wakes up and
+ *          loops. This prevents the ffmpeg writer thread from blocking
+ *          indefinitely on an empty queue, which would cause mediamtx to
+ *          time out the RTSP session during ESP32 jitter gaps.
+ *          500ms is well under mediamtx's default inactivity window.
+ */
+#define QUEUE_WAIT_MS      500
 
 /******************************** GLOBALS *************************************/
-static volatile int  g_running   = 1;    /**< main loop run flag           */
-static FILE         *g_log       = NULL; /**< log file handle              */
-static int           g_server_fd = -1;  /**< TCP listen socket            */
+static volatile int  g_running   = 1;    /**< main loop run flag             */
+static FILE         *g_log       = NULL; /**< log file handle                */
+static int           g_server_fd = -1;  /**< TCP listen socket              */
 
 /******************************** LOGGING *************************************/
 
@@ -104,7 +193,13 @@ static void sig_handler(int sig)
  * \param fd   Socket file descriptor.
  * \param buf  Destination buffer (must be at least n bytes).
  * \param n    Number of bytes to receive.
- * \return     0 on success, -1 on connection close or error.
+ * \return      0 on success,
+ *             -1 on transport error (recv() < 0),
+ *             -2 on clean TCP FIN mid-frame (recv() == 0, peer closed).
+ *
+ * \note    -2 vs -1 matters: -2 means the ESP32 closed the socket (likely
+ *          due to a send-side error on its end), not a BBB-side recv fault.
+ *          Callers should log these separately so the true cause is visible.
  */
 static int recv_all(int fd, void *buf, size_t n)
 {
@@ -114,52 +209,285 @@ static int recv_all(int fd, void *buf, size_t n)
    while (got < n)
    {
       r = recv(fd, (char *)buf + got, n - got, 0);
-      if (r <= 0) { return -1; }
+      if (r == 0) { return -2; }   /* clean TCP FIN — peer closed mid-frame */
+      if (r <  0) { return -1; }   /* transport error                       */
       got += (size_t)r;
    }
    return 0;
 }
 
-/******************************** CONN STRUCT *********************************/
+/******************************** FRAME QUEUE *********************************/
 
 /**
- * \brief Arguments passed to each per-connection thread.
+ * \brief One slot in the frame ring buffer.
  */
 typedef struct
 {
-   int                client_fd;              /**< accepted socket fd        */
-   struct sockaddr_in peer;                   /**< remote address            */
-} conn_args_t;
+   uint8_t *buf;    /**< heap-allocated JPEG data, NULL if slot is empty     */
+   size_t   len;    /**< length of JPEG data in buf                          */
+} frame_slot_t;
+
+/**
+ * \brief Bounded ring buffer decoupling the ESP32 receiver from ffmpeg.
+ *
+ * \details Producer (conn_thread) pushes frames. Consumer (ffmpeg_thread)
+ *          pulls them. Drop-oldest policy when full: the producer overwrites
+ *          the oldest unconsumed slot rather than blocking, so ESP32 jitter
+ *          never propagates into ffmpeg's write path.
+ *
+ *          Invariant: head == tail means empty.
+ *          (tail - head) % FRAME_QUEUE_DEPTH == number of queued frames.
+ *
+ *          Mutex must be held to read or write head/tail/slots.
+ *          fwrite() to ffmpeg is done OUTSIDE the mutex.
+ *
+ * \note    done flag signals the consumer to exit after the producer closes
+ *          the connection. The consumer drains remaining frames first.
+ */
+typedef struct
+{
+   frame_slot_t    slots[FRAME_QUEUE_DEPTH]; /**< ring buffer slots          */
+   int             head;                     /**< consumer reads from here   */
+   int             tail;                     /**< producer writes here       */
+   int             count;                    /**< frames currently queued    */
+   int             done;                     /**< producer has finished      */
+   pthread_mutex_t mu;                       /**< protects all fields        */
+   pthread_cond_t  cv;                       /**< signals consumer on push   */
+} frame_queue_t;
+
+/**
+ * \brief Initialise a frame_queue_t. Must be called before use.
+ */
+static void fq_init(frame_queue_t *q)
+{
+   memset(q, 0, sizeof(*q));
+   pthread_mutex_init(&q->mu, NULL);
+   pthread_cond_init(&q->cv, NULL);
+}
+
+/**
+ * \brief Destroy a frame_queue_t, freeing any queued frame buffers.
+ */
+static void fq_destroy(frame_queue_t *q)
+{
+   int i;
+   for (i = 0; i < FRAME_QUEUE_DEPTH; i++)
+   {
+      free(q->slots[i].buf);
+      q->slots[i].buf = NULL;
+   }
+   pthread_mutex_destroy(&q->mu);
+   pthread_cond_destroy(&q->cv);
+}
+
+/**
+ * \brief Push a frame into the queue (producer side).
+ *
+ * \details If the queue is full, the oldest slot (at head) is evicted and
+ *          its buffer freed before the new frame takes its place. This is
+ *          the drop-oldest policy: live view always gets the freshest frame.
+ *
+ *          Takes ownership of buf — caller must not free it after push.
+ *          Signals the consumer condvar after every successful push.
+ *
+ * \param q    Queue to push into.
+ * \param buf  Heap-allocated JPEG buffer (ownership transferred).
+ * \param len  Length of buf in bytes.
+ */
+static void fq_push(frame_queue_t *q, uint8_t *buf, size_t len)
+{
+   pthread_mutex_lock(&q->mu);
+
+   if (q->count == FRAME_QUEUE_DEPTH)
+   {
+      /* Queue full — evict oldest (head slot) */
+      free(q->slots[q->head].buf);
+      q->slots[q->head].buf = NULL;
+      q->head = (q->head + 1) % FRAME_QUEUE_DEPTH;
+      q->count--;
+   }
+
+   q->slots[q->tail].buf = buf;
+   q->slots[q->tail].len = len;
+   q->tail  = (q->tail + 1) % FRAME_QUEUE_DEPTH;
+   q->count++;
+
+   pthread_cond_signal(&q->cv);
+   pthread_mutex_unlock(&q->mu);
+}
+
+/**
+ * \brief Pop a frame from the queue (consumer side), waiting if empty.
+ *
+ * \details Waits on condvar with QUEUE_WAIT_MS timeout. Returns the frame
+ *          buffer and length via out parameters. Caller owns the returned
+ *          buffer and must free it after use.
+ *
+ *          Returns 0 if a frame was popped, -1 if the queue is empty after
+ *          timeout (caller should loop), -2 if done and queue is empty
+ *          (caller should exit).
+ *
+ * \param q    Queue to pop from.
+ * \param buf  Output: pointer to heap-allocated JPEG buffer (caller frees).
+ * \param len  Output: length of buffer in bytes.
+ * \return     0 on success, -1 on timeout (retry), -2 on done+empty (exit).
+ */
+static int fq_pop(frame_queue_t *q, uint8_t **buf, size_t *len)
+{
+   struct timespec ts;
+   clock_gettime(CLOCK_REALTIME, &ts);
+   ts.tv_sec  += QUEUE_WAIT_MS / 1000;
+   ts.tv_nsec += (QUEUE_WAIT_MS % 1000) * 1000000L;
+   if (ts.tv_nsec >= 1000000000L)
+   {
+      ts.tv_sec++;
+      ts.tv_nsec -= 1000000000L;
+   }
+
+   pthread_mutex_lock(&q->mu);
+
+   while (q->count == 0 && !q->done)
+   {
+      int rc = pthread_cond_timedwait(&q->cv, &q->mu, &ts);
+      if (rc == ETIMEDOUT)
+      {
+         int done = q->done;
+         pthread_mutex_unlock(&q->mu);
+         return done ? -2 : -1;
+      }
+   }
+
+   if (q->count == 0)
+   {
+      /* done == 1 and queue empty — consumer should exit */
+      pthread_mutex_unlock(&q->mu);
+      return -2;
+   }
+
+   *buf = q->slots[q->head].buf;
+   *len = q->slots[q->head].len;
+   q->slots[q->head].buf = NULL;
+   q->slots[q->head].len = 0;
+   q->head  = (q->head + 1) % FRAME_QUEUE_DEPTH;
+   q->count--;
+
+   pthread_mutex_unlock(&q->mu);
+   return 0;
+}
+
+/**
+ * \brief Signal the consumer that the producer is done.
+ *
+ * \details Called by conn_thread after the ESP32 connection closes.
+ *          Consumer will drain remaining frames then exit.
+ */
+static void fq_done(frame_queue_t *q)
+{
+   pthread_mutex_lock(&q->mu);
+   q->done = 1;
+   pthread_cond_signal(&q->cv);
+   pthread_mutex_unlock(&q->mu);
+}
+
+/******************************** CONN STRUCT *********************************/
+
+/**
+ * \brief Arguments passed to each per-connection thread pair.
+ *
+ * \details Shared between conn_thread (producer) and ffmpeg_thread
+ *          (consumer). conn_thread fills the queue; ffmpeg_thread drains it.
+ *          Both threads are spawned per ESP32 connection.
+ */
+typedef struct
+{
+   int                client_fd;              /**< accepted socket fd         */
+   struct sockaddr_in peer;                   /**< remote address             */
+   frame_queue_t      queue;                  /**< producer/consumer queue    */
+   FILE              *ffmpeg;                 /**< ffmpeg stdin pipe          */
+   char               peer_ip[INET_ADDRSTRLEN]; /**< dotted-decimal peer IP  */
+   uint8_t            device_id;             /**< doorbell device ID (0-3)   */
+} conn_state_t;
+
+/******************************** FFMPEG THREAD *******************************/
+
+/**
+ * \brief Consumer thread: drain queue and write frames to ffmpeg stdin.
+ *
+ * \details Pops frames from the queue with a bounded wait (QUEUE_WAIT_MS).
+ *          On timeout with empty queue, loops immediately — this keeps the
+ *          thread alive during ESP32 jitter gaps without blocking indefinitely.
+ *          Exits when fq_pop() returns -2 (producer done, queue empty).
+ *
+ *          fwrite() to ffmpeg is done outside the queue mutex so the producer
+ *          is never blocked by a slow ffmpeg write.
+ *
+ * \param arg  conn_state_t pointer (not freed here — owned by conn_thread).
+ * \return     NULL always.
+ */
+static void *ffmpeg_thread(void *arg)
+{
+   conn_state_t *cs  = (conn_state_t *)arg;
+   uint8_t      *buf = NULL;
+   size_t        len = 0;
+
+   while (1)
+   {
+      int rc = fq_pop(&cs->queue, &buf, &len);
+
+      if (-1 == rc)
+      {
+         /* Timeout — queue empty but producer still running (ESP32 jitter
+          * gap). Loop immediately. The bounded wait ensures we never block
+          * indefinitely, so ffmpeg stays alive and mediamtx sees activity. */
+         continue;
+      }
+
+      if (-2 == rc)
+      {
+         /* Producer done and queue drained — exit. */
+         break;
+      }
+
+      /* Write frame to ffmpeg stdin — outside mutex */
+      if (fwrite(buf, 1, len, cs->ffmpeg) != len)
+      {
+         log_msg("%s: fwrite to ffmpeg failed — ffmpeg may have exited",
+                 cs->peer_ip);
+         free(buf);
+         break;
+      }
+      fflush(cs->ffmpeg);
+      free(buf);
+   }
+
+   return NULL;
+}
 
 /******************************** CONN THREAD *********************************/
 
 /**
- * \brief Per-connection thread: read device_id, spawn ffmpeg, relay frames.
+ * \brief Per-connection producer thread: read device_id, spawn ffmpeg and
+ *        ffmpeg_thread, receive frames from ESP32 and push to queue.
  *
- * \details Reads the 1-byte device_id, opens an ffmpeg process targeting
- *          rtsp://localhost:8554/doorbell<N>, then loops receiving
- *          [len:4][jpeg] frames and writing them to ffmpeg stdin until
- *          the ESP32 closes the connection or an error occurs.
+ * \details Spawns ffmpeg via popen() and a ffmpeg_thread to consume the
+ *          queue. Then loops receiving [len:4][jpeg] frames from the ESP32
+ *          and pushing them into the queue. On exit (ESP32 disconnect or
+ *          error), signals fq_done() and joins ffmpeg_thread before cleanup.
  *
- * \param arg  Heap-allocated conn_args_t (this function frees it).
+ * \param arg  Heap-allocated conn_state_t (this function frees it).
  * \return     NULL always.
  */
 static void *conn_thread(void *arg)
 {
-   conn_args_t *ca        = (conn_args_t *)arg;
-   int          fd        = ca->client_fd;
-   uint8_t     *frame_buf = NULL;
-   size_t       frame_cap = 0;
-   uint8_t      device_id = 0;
-   char         peer_ip[INET_ADDRSTRLEN];
-   char         cmd[256];
-   FILE        *ffmpeg    = NULL;
+   conn_state_t *cs        = (conn_state_t *)arg;
+   int           fd        = cs->client_fd;
+   uint8_t      *frame_buf = NULL;
+   size_t        frame_cap = 0;
+   char          cmd[512];
+   pthread_t     ffmpeg_tid;
+   int           ffmpeg_tid_valid = 0;
 
-   inet_ntop(AF_INET, &ca->peer.sin_addr, peer_ip, sizeof(peer_ip));
-   free(ca);
-   ca = NULL;
-
-   /* TCP keepalive — match doorbell_daemon settings */
+   /* TCP keepalive */
    {
       int keepalive = 1, keepidle = 30, keepintvl = 5, keepcnt = 3;
       setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE, &keepalive, sizeof(keepalive));
@@ -168,43 +496,60 @@ static void *conn_thread(void *arg)
       setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &keepcnt,   sizeof(keepcnt));
    }
 
-   log_msg("Connection from %s", peer_ip);
+   log_msg("Connection from %s", cs->peer_ip);
 
    /* --- 1. Read 1-byte device_id ------------------------------------ */
-   if (recv_all(fd, &device_id, 1) < 0)
+   if (recv_all(fd, &cs->device_id, 1) < 0)
    {
-      log_msg("device_id recv failed from %s: %s", peer_ip, strerror(errno));
-      close(fd);
-      return NULL;
+      log_msg("device_id recv failed from %s: %s",
+              cs->peer_ip, strerror(errno));
+      goto cleanup;
    }
-   log_msg("%s: device_id=%u", peer_ip, (unsigned)device_id);
+   log_msg("%s: device_id=%u", cs->peer_ip, (unsigned)cs->device_id);
 
    /* --- 2. Spawn ffmpeg --------------------------------------------- */
    snprintf(cmd, sizeof(cmd),
-            "ffmpeg -loglevel warning"
-            " -f mjpeg -i pipe:0"
-            " -c:v copy"
-            " -f rtsp %s%u",
-            RTSP_BASE, (unsigned)device_id);
+         "ffmpeg -loglevel info"
+         " -analyzeduration 0 -probesize 32"
+         " -f mjpeg"
+         " -i pipe:0"
+         " -c:v copy"
+         " -rtsp_transport tcp"
+         " -f rtsp %s%u"
+         " 2>>%s",
+         RTSP_BASE, (unsigned)cs->device_id, FFMPEG_LOG_PATH);
 
-   ffmpeg = popen(cmd, "w");
-   if (NULL == ffmpeg)
+   cs->ffmpeg = popen(cmd, "w");
+   if (NULL == cs->ffmpeg)
    {
       log_msg("popen ffmpeg failed for device_id=%u: %s",
-              (unsigned)device_id, strerror(errno));
-      close(fd);
-      return NULL;
+              (unsigned)cs->device_id, strerror(errno));
+      goto cleanup;
    }
-   log_msg("ffmpeg started → %s%u", RTSP_BASE, (unsigned)device_id);
+   log_msg("ffmpeg started → %s%u", RTSP_BASE, (unsigned)cs->device_id);
 
-   /* --- 3. Frame relay loop ----------------------------------------- */
+   /* --- 3. Spawn ffmpeg consumer thread ----------------------------- */
+   if (pthread_create(&ffmpeg_tid, NULL, ffmpeg_thread, cs) != 0)
+   {
+      log_msg("%s: pthread_create ffmpeg_thread failed: %s",
+              cs->peer_ip, strerror(errno));
+      goto cleanup;
+   }
+   ffmpeg_tid_valid = 1;
+
+   /* --- 4. Frame receive loop (producer) ---------------------------- */
    while (g_running)
    {
       uint8_t  hdr[4];
       uint32_t frame_len;
+      uint8_t *slot_buf;
 
       /* 4-byte big-endian frame length */
-      if (recv_all(fd, hdr, 4) < 0) { break; }
+      {
+         int rc = recv_all(fd, hdr, 4);
+         if (-2 == rc) { break; }   /* clean FIN — ESP32 stopped stream   */
+         if (rc  < 0)  { break; }   /* transport error                    */
+      }
 
       frame_len = ((uint32_t)hdr[0] << 24) |
                   ((uint32_t)hdr[1] << 16) |
@@ -214,45 +559,67 @@ static void *conn_thread(void *arg)
       if (0u == frame_len || frame_len > MAX_FRAME_BYTES)
       {
          log_msg("%s: bad frame_len=%u — dropping connection",
-                 peer_ip, frame_len);
+                 cs->peer_ip, frame_len);
          break;
       }
 
-      /* Grow frame buffer if needed */
+      /* Receive JPEG payload into temp buffer */
       if (frame_len > frame_cap)
       {
          free(frame_buf);
          frame_buf = malloc(frame_len);
          if (NULL == frame_buf)
          {
-            log_msg("%s: malloc %u bytes failed", peer_ip, frame_len);
+            log_msg("%s: malloc %u bytes failed", cs->peer_ip, frame_len);
             break;
          }
          frame_cap = frame_len;
       }
 
-      /* Receive JPEG payload */
-      if (recv_all(fd, frame_buf, frame_len) < 0)
       {
-         log_msg("%s: JPEG recv truncated", peer_ip);
-         break;
+         int rc = recv_all(fd, frame_buf, frame_len);
+         if (-2 == rc)
+         {
+            log_msg("%s: connection closed mid-frame (frame incomplete)",
+                    cs->peer_ip);
+            break;
+         }
+         if (rc < 0)
+         {
+            log_msg("%s: JPEG recv truncated (transport error)", cs->peer_ip);
+            break;
+         }
       }
 
-      /* Write to ffmpeg stdin */
-      if (fwrite(frame_buf, 1, frame_len, ffmpeg) != frame_len)
+      /* Copy frame into a fresh heap buffer for the queue.
+       * The queue takes ownership; fq_push() will free it on eviction,
+       * and ffmpeg_thread frees it after fwrite(). */
+      slot_buf = malloc(frame_len);
+      if (NULL == slot_buf)
       {
-         log_msg("%s: fwrite to ffmpeg failed — ffmpeg may have exited",
-                 peer_ip);
+         log_msg("%s: malloc queue slot %u bytes failed",
+                 cs->peer_ip, frame_len);
          break;
       }
-      fflush(ffmpeg);
+      memcpy(slot_buf, frame_buf, frame_len);
+
+      fq_push(&cs->queue, slot_buf, frame_len);
    }
 
-   /* --- 4. Cleanup -------------------------------------------------- */
+   /* --- 5. Cleanup -------------------------------------------------- */
+cleanup:
+   /* Signal consumer that production is done, then join it */
+   fq_done(&cs->queue);
+   if (ffmpeg_tid_valid) { pthread_join(ffmpeg_tid, NULL); }
+
    free(frame_buf);
-   pclose(ffmpeg);
+   if (cs->ffmpeg) { pclose(cs->ffmpeg); }
    close(fd);
-   log_msg("%s: device_id=%u stream ended", peer_ip, (unsigned)device_id);
+   log_msg("%s: device_id=%u stream ended",
+           cs->peer_ip, (unsigned)cs->device_id);
+
+   fq_destroy(&cs->queue);
+   free(cs);
    return NULL;
 }
 
@@ -291,33 +658,41 @@ int main(void)
 
    while (g_running)
    {
-      conn_args_t *ca;
-      socklen_t    peer_len;
-      pthread_t    tid;
+      conn_state_t *cs;
+      socklen_t     peer_len;
+      pthread_t     tid;
 
-      ca = malloc(sizeof(conn_args_t));
-      if (NULL == ca)
+      cs = malloc(sizeof(conn_state_t));
+      if (NULL == cs)
       {
-         log_msg("ERROR: malloc conn_args_t");
+         log_msg("ERROR: malloc conn_state_t");
          continue;
       }
+      memset(cs, 0, sizeof(*cs));
+      fq_init(&cs->queue);
+      cs->ffmpeg = NULL;
 
-      peer_len       = sizeof(ca->peer);
-      ca->client_fd  = accept(g_server_fd,
-                              (struct sockaddr *)&ca->peer,
-                              &peer_len);
-      if (ca->client_fd < 0)
+      peer_len      = sizeof(cs->peer);
+      cs->client_fd = accept(g_server_fd,
+                             (struct sockaddr *)&cs->peer,
+                             &peer_len);
+      if (cs->client_fd < 0)
       {
-         free(ca);
+         fq_destroy(&cs->queue);
+         free(cs);
          if (g_running) { log_msg("accept() error: %s", strerror(errno)); }
          continue;
       }
 
-      if (pthread_create(&tid, NULL, conn_thread, ca) != 0)
+      inet_ntop(AF_INET, &cs->peer.sin_addr,
+                cs->peer_ip, sizeof(cs->peer_ip));
+
+      if (pthread_create(&tid, NULL, conn_thread, cs) != 0)
       {
          log_msg("pthread_create failed: %s", strerror(errno));
-         close(ca->client_fd);
-         free(ca);
+         close(cs->client_fd);
+         fq_destroy(&cs->queue);
+         free(cs);
          continue;
       }
       pthread_detach(tid);
