@@ -252,7 +252,6 @@
 #include "trinity_log.h"
 
 static const char *TAG = "CAM";
-static const char *APP_MAIN_TAG = "APP_MAIN";
 /*---------------------------------------------------------------------------*/
 /* Globals                                                                     */
 /*---------------------------------------------------------------------------*/
@@ -845,7 +844,7 @@ void app_main(void)
      * --------------------------------------------------------------------- */
     {
         UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
-        ESP_LOGI(APP_MAIN_TAG,
+        ESP_LOGI(TAG,
                  "[TRINITY] app_main exit stack HWM: %u words (%u B)",
                  (unsigned)hwm,
                  (unsigned)(hwm * sizeof(StackType_t)));
@@ -855,7 +854,7 @@ void app_main(void)
 #endif
         if (hwm < (UBaseType_t)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS)
         {
-            ESP_LOGW(APP_MAIN_TAG,
+            ESP_LOGW(TAG,
                      "[TRINITY] LOW STACK on main task at exit: hwm=%u words threshold=%u words",
                      (unsigned)hwm,
                      (unsigned)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS);
