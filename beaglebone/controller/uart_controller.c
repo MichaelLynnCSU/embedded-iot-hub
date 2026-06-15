@@ -45,7 +45,19 @@
  *          MTR:online[,batt]\n
  *          TEMP_COUNT:n\n
  *          TEMP<n>:decidegc,batt,age\n (one per active temp slot)
- *          DOORBELL:pressed,device_id\n
+ *          DB<n>:age_s,online\n     (one per doorbell cam slot, 0-indexed)
+ *          DOORBELL:pressed,device_id[,person,conf_pct,asset]\n
+ *          CAM<n>:online\n          (one per inference cam, 1-indexed)
+ *
+ *          DOORBELL extended fields (person, conf_pct, asset) are only
+ *          emitted when doorbell_pressed is non-zero AND
+ *          doorbell_result_reader_poll() returns a new inference result
+ *          from the /doorbell_result shm segment (written by
+ *          doorbell_daemon). When no inference result is available for
+ *          a press event, the two-field form is sent instead so the STM32
+ *          always sees at least pressed/device_id. asset is the
+ *          "%Y%m%dT%H%M%SZ" timestamp string (17 chars), NOT the full
+ *          saved filename — the full path is a storage-layer concern.
  *
  *          Lock state machine (LOCK_STATE_E from controller_logic.h):
  *          Inbound LCK frames drive logic_lock_transition(). Commands
@@ -120,6 +132,53 @@
  *
  *          Net result: zero references to latest_data or data_mutex remain
  *          in this translation unit.
+ *
+ * \note    Inference tie-in — doorbell_result_reader (2026-06-14):
+ *          doorbell_daemon (beaglebone/inference/app/) runs inference on
+ *          every JPEG received over Lane B (TCP port 9091) and publishes
+ *          results to the /doorbell_result POSIX shm segment
+ *          (doorbell_result_shm.h: struct DoorbellResult — event_id,
+ *          device_id, person, conf_pct, asset[20]).
+ *
+ *          doorbell_result_reader.c (accessor module, cmd/ pattern) wraps
+ *          the shm attach and lock-free event_id change-detection:
+ *            doorbell_result_reader_init()  — attach, lazy-retry-safe;
+ *            doorbell_result_reader_poll()  — returns 1 + copies out
+ *              person/conf_pct/asset if event_id has changed since last
+ *              call, 0 otherwise. Retries attach internally on each call
+ *              until doorbell_daemon creates the segment.
+ *
+ *          Integration points in this file:
+ *
+ *          uart_update_frame() (TCP ingress path) and uart_push_thread()
+ *          (UART ingress path) — both call doorbell_pending_check() at the
+ *          top of each push cycle. If a result is ready
+ *          (g_db_pending_result_ready), doorbell_inject_pending() injects
+ *          it into the current bundle with pressed=1 so the five-field
+ *          DOORBELL frame goes out inside a complete well-formed payload —
+ *          never as a standalone transmission (which collides on UART).
+ *
+ *          asset field: the 17-char "%Y%m%dT%H%M%SZ" timestamp string
+ *          embedded in the full saved filename (not the filename itself).
+ *          event_id is the authoritative identity for server-side lookup.
+ *
+ *          No other files in this translation unit require changes.
+ *          doorbell_result_reader_init() need not be called explicitly at
+ *          startup — poll() lazy-retries attach on every call.
+ *
+ * \note    Doorbell pending slot redesign (2026-06-15):
+ *          doorbell_pending_check_and_push() replaced by two functions:
+ *            doorbell_pending_check()  — polls shm, stores result in
+ *              g_db_pending_result_ready + five result fields. Never calls
+ *              uart_push_msg() directly.
+ *            doorbell_inject_pending() — called by both push paths before
+ *              their DOORBELL snprintf block. If result is ready and no new
+ *              press this cycle, overwrites local doorbell vars with the
+ *              stored result and sets pressed=1 so the five-field frame
+ *              goes out inside the normal bundle.
+ *          The old standalone push approach sent a separate uart_push_msg()
+ *          which collided with the normal bundle on UART and was lost by
+ *          the STM32 parser.
  ******************************************************************************/
 
 #include <termios.h>
@@ -143,6 +202,10 @@
 #include "controller_logic.h"
 #include "cmd/uart_staging.h"
 #include "cmd/state_registry.h"
+#include "doorbell_result_reader.h"
+#include "doorbell_result_shm.h"
+
+#define DOORBELL_ASSET_LEN  20   /* matches DoorbellResult.asset[20] in doorbell_result_shm.h */
 
 #define UART_PUSH_INTERVAL_SEC  5       /**< max wait in sem_timedwait — watchdog ceiling */
 #define UART_RETRY_DELAY_SEC    5       /**< delay before retrying UART open */
@@ -163,6 +226,49 @@ static pthread_mutex_t g_uart_write_mutex =
  */
 static LOCK_STATE_E    g_lock_state = LOCK_STATE_LOCKED;
 static pthread_mutex_t g_lock_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/******************************************************************************
+ * Doorbell inference "pending result" state (2026-06-15)
+ *
+ * Lane A (UDP press event -> shm_data->doorbell_pressed) arrives almost
+ * immediately, but Lane B (TCP JPEG -> doorbell_daemon -> inference ->
+ * /doorbell_result publish) can take several seconds. The original code
+ * polled doorbell_result_reader_poll() exactly once, at the same moment
+ * doorbell_pressed was read and cleared (one-shot) — so the poll almost
+ * always missed and the five-field result was never delivered.
+ *
+ * Fix: when a press is seen but no result is available yet, remember it
+ * here (single pending slot). Every subsequent push cycle calls
+ * doorbell_pending_check() which polls the result shm. When the result
+ * arrives it is stored in g_db_pending_result_ready and the five result
+ * fields. doorbell_inject_pending() is called by both push paths before
+ * their DOORBELL snprintf block — if a result is ready and no new press
+ * arrived this cycle, it overwrites the local doorbell vars with pressed=1
+ * so the five-field frame goes out inside the normal complete bundle.
+ *
+ * Sending the result as a standalone uart_push_msg() (previous approach)
+ * collided with the normal push bundle on UART and was lost by the STM32
+ * parser — UART is a single byte stream, two concurrent writes interleave.
+ *
+ * If no result arrives within DOORBELL_PENDING_TIMEOUT_SEC the pending
+ * slot is cleared and a warning is logged. STM32 keeps the two-field
+ * fallback from the original press cycle.
+ *
+ * g_db_pending_mutex guards all fields below since uart_push_thread and
+ * the TCP sync path run on different threads and both call these functions.
+ ******************************************************************************/
+#define DOORBELL_PENDING_TIMEOUT_SEC 10
+
+static pthread_mutex_t g_db_pending_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int             g_db_pending              = 0; /* 1 = press seen, result not yet consumed */
+static int             g_db_pending_device       = 0;
+static time_t          g_db_pending_since        = 0;
+/* Result fields — populated by doorbell_pending_check(), injected by next push cycle */
+static int             g_db_pending_result_ready = 0;
+static uint64_t        g_db_pending_event_id     = 0;
+static uint8_t         g_db_pending_person       = 0;
+static uint8_t         g_db_pending_conf_pct     = 0;
+static char            g_db_pending_asset[DOORBELL_ASSET_LEN];
 
 /******************************************************************************
  * \brief Push one UartFrame onto the ring buffer.
@@ -563,11 +669,133 @@ static void uart_push_msg(const char *p_msg, int len)
 }
 
 /******************************************************************************
+ * \brief Poll for late-arriving doorbell inference result and store it.
+ *
+ * \details If g_db_pending is set and g_db_pending_result_ready is not yet
+ *          set, polls doorbell_result_reader_poll(). On a hit, stores the
+ *          result fields in the pending globals and sets
+ *          g_db_pending_result_ready = 1. The caller's next
+ *          doorbell_inject_pending() call will consume these fields and
+ *          inject them into the normal push bundle — never sent standalone.
+ *
+ *          On timeout, clears the pending slot and logs a warning.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+static void doorbell_pending_check(void)
+{
+   int      pending    = 0;
+   int      device     = 0;
+   time_t   since      = 0;
+   time_t   now        = time(NULL);
+   uint64_t event_id   = 0;
+   uint8_t  person     = 0;
+   uint8_t  conf_pct   = 0;
+   char     asset[DOORBELL_ASSET_LEN] = {0};
+   int      got_result = 0;
+
+   pthread_mutex_lock(&g_db_pending_mutex);
+   pending = g_db_pending;
+   device  = g_db_pending_device;
+   since   = g_db_pending_since;
+   if (g_db_pending_result_ready)
+   {
+      /* Result already stored — wait for push cycle to consume it */
+      pthread_mutex_unlock(&g_db_pending_mutex);
+      return;
+   }
+   pthread_mutex_unlock(&g_db_pending_mutex);
+
+   if (!pending) { return; }
+
+   got_result = doorbell_result_reader_poll(&event_id, &person, &conf_pct,
+                                             asset, sizeof(asset));
+   if (got_result)
+   {
+      LOG("[CONTROLLER] result_ready event_id=" EVENT_ID_FMT
+          " device_id=%d person=%d conf=%d",
+          EVENT_ID_ARG(event_id), device, person, conf_pct);
+
+      pthread_mutex_lock(&g_db_pending_mutex);
+      g_db_pending_result_ready = 1;
+      g_db_pending_event_id     = event_id;
+      g_db_pending_person       = person;
+      g_db_pending_conf_pct     = conf_pct;
+      (void)strncpy(g_db_pending_asset, asset, DOORBELL_ASSET_LEN - 1);
+      g_db_pending_asset[DOORBELL_ASSET_LEN - 1] = '\0';
+      pthread_mutex_unlock(&g_db_pending_mutex);
+      return;
+   }
+
+   if ((now - since) > DOORBELL_PENDING_TIMEOUT_SEC)
+   {
+      LOG("[CONTROLLER] result_timeout device_id=%d", device);
+      pthread_mutex_lock(&g_db_pending_mutex);
+      g_db_pending              = 0;
+      g_db_pending_result_ready = 0;
+      pthread_mutex_unlock(&g_db_pending_mutex);
+   }
+}
+
+/******************************************************************************
+ * \brief Inject a stored pending inference result into the current push cycle.
+ *
+ * \details If g_db_pending_result_ready is set and doorbell_pressed is
+ *          currently 0 (no new press this cycle), overwrites the caller's
+ *          local doorbell variables with the stored result fields and sets
+ *          *p_pressed = 1 so the five-field DOORBELL frame goes out in the
+ *          normal bundle. Clears the pending slot atomically under mutex.
+ *
+ *          Must be called after the shm doorbell read block and before the
+ *          DOORBELL snprintf block in each push path.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
+static void doorbell_inject_pending(int     *p_pressed,
+                                    int     *p_device_id,
+                                    int     *p_valid,
+                                    uint64_t *p_event_id,
+                                    uint8_t *p_person,
+                                    uint8_t *p_conf_pct,
+                                    char    *p_asset,
+                                    int      asset_len)
+{
+   pthread_mutex_lock(&g_db_pending_mutex);
+
+   if (!(*p_pressed) && g_db_pending_result_ready)
+   {
+      *p_pressed   = 1;
+      *p_device_id = g_db_pending_device;
+      *p_valid     = 1;
+      *p_event_id  = g_db_pending_event_id;
+      *p_person    = g_db_pending_person;
+      *p_conf_pct  = g_db_pending_conf_pct;
+      (void)strncpy(p_asset, g_db_pending_asset, asset_len - 1);
+      p_asset[asset_len - 1]    = '\0';
+      g_db_pending              = 0;
+      g_db_pending_result_ready = 0;
+
+      LOG("[CONTROLLER] inject_pending device_id=%d person=%d conf=%d",
+          *p_device_id, *p_person, *p_conf_pct);
+   }
+
+   pthread_mutex_unlock(&g_db_pending_mutex);
+}
+
+/******************************************************************************
  * \brief Build UART push payload from explicit slot arrays and send to STM32.
  *
  * \details Called by uart_push_thread() only. Takes pre-extracted slot
  *          arrays rather than a snapshot struct so the thread can apply
  *          its own doorbell read/clear logic before calling here.
+ *
+ *          doorbell_pressed / doorbell_device_id are the shm-sourced press
+ *          event fields (one-shot, cleared by caller after reading), or
+ *          injected from the pending slot by doorbell_inject_pending().
+ *          db_person / db_conf_pct / db_asset are the inference results —
+ *          valid only when db_inference_valid is non-zero. When valid, the
+ *          extended five-field DOORBELL frame is emitted; otherwise the
+ *          two-field fallback is used.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -590,7 +818,13 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                             const int8_t   *p_tb,
                             const uint16_t *p_ta,
                             const uint8_t  *p_tactive,
-                            int doorbell_pressed, int doorbell_device_id)
+                            int             doorbell_pressed,
+                            int             doorbell_device_id,
+                            int             db_inference_valid,
+                            uint64_t        db_event_id,
+                            uint8_t         db_person,
+                            uint8_t         db_conf_pct,
+                            const char     *db_asset)
 {
    char msg[UART_MSG_BUF_SIZE] = {0};
    int  pos                    = 0;
@@ -675,8 +909,26 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                       i + 1, p_tc[i], p_tb[i], p_ta[i]);
    }
 
-   pos += snprintf(msg + pos, sizeof(msg) - pos,
-                   "DOORBELL:%d,%d\n", doorbell_pressed, doorbell_device_id);
+   /* Emit extended DOORBELL frame when inference result is available,
+    * two-field fallback otherwise — STM32 parser handles both forms. */
+   if (doorbell_pressed && db_inference_valid)
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "DOORBELL:%d,%d,%d,%d,%s\n",
+                      doorbell_pressed, doorbell_device_id,
+                      db_person, db_conf_pct, db_asset);
+
+      LOG("[CONTROLLER] -> [UART] send event_id=" EVENT_ID_FMT
+          " device_id=%d person=%d conf=%d",
+          EVENT_ID_ARG(db_event_id), doorbell_device_id,
+          db_person, db_conf_pct);
+   }
+   else
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "DOORBELL:%d,%d\n",
+                      doorbell_pressed, doorbell_device_id);
+   }
 
    uart_push_msg(msg, pos);
 }
@@ -698,8 +950,10 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
  *          from sensor_frame_dispatch().
  *
  *          Doorbell state is read from shm_data under shm_mutex and cleared
- *          one-shot so subsequent pushes send DOORBELL:0,x until the next
- *          real press event.
+ *          one-shot. doorbell_pending_check() polls for a late-arriving
+ *          result; doorbell_inject_pending() injects it into the bundle if
+ *          ready, so the five-field frame always goes out inside the normal
+ *          complete payload — never as a standalone transmission.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -725,6 +979,11 @@ void *uart_push_thread(void *p_arg)
    int      frames_ready       = 0;
    int      doorbell_pressed   = 0;
    int      doorbell_device_id = 0;
+   int      db_inference_valid = 0;
+   uint64_t db_event_id        = 0;
+   uint8_t  db_person          = 0;
+   uint8_t  db_conf_pct        = 0;
+   char     db_asset[DOORBELL_ASSET_LEN];
    int      i                  = 0;
    UartFrame frame             = {0};
 
@@ -788,6 +1047,40 @@ void *uart_push_thread(void *p_arg)
          continue;
       }
 
+      db_inference_valid = 0;
+      db_event_id        = 0;
+      db_person          = 0;
+      db_conf_pct        = 0;
+      db_asset[0]        = '\0';
+
+      /* Check for late-arriving result from a previous press cycle */
+      doorbell_pending_check();
+
+      if (0 != doorbell_pressed)
+      {
+         db_inference_valid = doorbell_result_reader_poll(
+                                 &db_event_id, &db_person, &db_conf_pct,
+                                 db_asset, sizeof(db_asset));
+
+         if (!db_inference_valid)
+         {
+            LOG("[CONTROLLER] waiting_for_result device_id=%d",
+                doorbell_device_id);
+
+            pthread_mutex_lock(&g_db_pending_mutex);
+            g_db_pending        = 1;
+            g_db_pending_device = doorbell_device_id;
+            g_db_pending_since  = time(NULL);
+            pthread_mutex_unlock(&g_db_pending_mutex);
+         }
+      }
+
+      /* Inject pending result into bundle if ready and no new press this cycle */
+      doorbell_inject_pending(&doorbell_pressed, &doorbell_device_id,
+                              &db_inference_valid, &db_event_id,
+                              &db_person, &db_conf_pct,
+                              db_asset, DOORBELL_ASSET_LEN);
+
       get_snapshot(&snap);
 
       age_pir      = snap.age_pir;
@@ -847,7 +1140,9 @@ void *uart_push_thread(void *p_arg)
                      r_state, r_batt, r_age,
                      pir_count, p_count, p_batt, p_age, p_active, p_occ,
                      temp_count, t_decidegc, t_batt, t_age, t_active,
-                     doorbell_pressed, doorbell_device_id);
+                     doorbell_pressed, doorbell_device_id,
+                     db_inference_valid, db_event_id, db_person, db_conf_pct,
+                     db_asset);
    }
 
    LOG("[PUSH] Push thread exiting");
@@ -879,8 +1174,8 @@ void uart_sync_lock_state(int state)
  * \brief Synchronous outbound push to STM32 from TCP ingress path.
  *
  * \param p_snapshot  - Frozen read model from get_snapshot(). Not modified.
- * \param p_raw_frame - Raw wire frame from sensor pipe. Reserved for future
- *                      room event push — currently unused beyond the param.
+ * \param p_raw_frame - Raw wire frame from sensor pipe. Used for
+ *                      doorbell_slots[] (DB<n> per-cam liveness lines).
  *
  * \return void
  *
@@ -890,6 +1185,11 @@ void uart_sync_lock_state(int state)
  *          it via uart_push_msg(). Doorbell state is read from shm_data
  *          under shm_mutex and cleared one-shot.
  *
+ *          doorbell_pending_check() polls for a late-arriving result;
+ *          doorbell_inject_pending() injects it into the bundle if ready,
+ *          so the five-field DOORBELL frame always goes out inside the
+ *          normal complete payload — never as a standalone transmission.
+ *
  *          uart_push_msg() is the only send primitive — uart_write_string
  *          and uart_printf do not exist in this codebase.
  *
@@ -898,18 +1198,22 @@ void uart_sync_lock_state(int state)
 void uart_update_frame(const struct LatestData *p_snapshot,
                        const struct SensorData *p_raw_frame)
 {
-   char msg[UART_MSG_BUF_SIZE] = {0};
-   int  pos                    = 0;
-   int  i                      = 0;
-   int  reed_count             = 0;
-   int  doorbell_pressed       = 0;
-   int  doorbell_device_id     = 0;
-
-   (void)p_raw_frame; /* reserved for future room event push */
+   char    msg[UART_MSG_BUF_SIZE] = {0};
+   int     pos                    = 0;
+   int     i                      = 0;
+   int     reed_count             = 0;
+   int      doorbell_pressed       = 0;
+   int      doorbell_device_id     = 0;
+   uint64_t db_event_id            = 0;
+   int      db_inference_valid     = 0;
+   uint8_t  db_person              = 0;
+   uint8_t  db_conf_pct            = 0;
+   char     db_asset[DOORBELL_ASSET_LEN];
 
    if (!p_snapshot->valid) { return; }
+   if (0 > g_uart_fd)      { return; }
 
-   if (0 > g_uart_fd) { return; }
+   db_asset[0] = '\0';
 
    /* Compute reed_count from snapshot */
    for (i = 0; i < MAX_REEDS; i++)
@@ -1018,26 +1322,77 @@ void uart_update_frame(const struct LatestData *p_snapshot,
    }
 
    /* Doorbell per-cam liveness — mirrors TEMP<n> pattern */
-   for (i = 0; i < MAX_DOORBELL_CAMS; i++)
+   if (NULL != p_raw_frame)
    {
-       pos += snprintf(msg + pos, sizeof(msg) - pos,
-                      "DB%d:%d,%d\n",
-                      i,
-                      p_raw_frame->doorbell_slots[i].age_s,
-                      p_raw_frame->doorbell_slots[i].online);
+      for (i = 0; i < MAX_DOORBELL_CAMS; i++)
+      {
+         pos += snprintf(msg + pos, sizeof(msg) - pos,
+                         "DB%d:%d,%d\n",
+                         i,
+                         p_raw_frame->doorbell_slots[i].age_s,
+                         p_raw_frame->doorbell_slots[i].online);
+      }
    }
 
-   /* Read doorbell from shm one-shot — clear after reading */
+   /* Check for late-arriving result from a previous press cycle */
+   doorbell_pending_check();
+
+   /* Read doorbell press event from shm one-shot — clear after reading.
+    * shm_mutex released before polling inference result below.          */
    pthread_mutex_lock(&shm_data->shm_mutex);
    doorbell_pressed   = shm_data->doorbell_pressed;
    doorbell_device_id = shm_data->doorbell_device_id;
    if (doorbell_pressed) { shm_data->doorbell_pressed = 0; }
    pthread_mutex_unlock(&shm_data->shm_mutex);
 
-   pos += snprintf(msg + pos, sizeof(msg) - pos,
-                   "DOORBELL:%d,%d\n", doorbell_pressed, doorbell_device_id);
+   /* Poll inference result from doorbell_daemon's /doorbell_result shm.
+    * Called outside shm_mutex — no lock held. Only meaningful on a real
+    * press; skip entirely otherwise to avoid consuming an event_id that
+    * belongs to the next press.                                          */
+   if (0 != doorbell_pressed)
+   {
+      db_inference_valid = doorbell_result_reader_poll(
+                              &db_event_id, &db_person, &db_conf_pct,
+                              db_asset, sizeof(db_asset));
 
-   /* Inference camera liveness — derived from shm at push time */
+      if (!db_inference_valid)
+      {
+         LOG("[CONTROLLER] waiting_for_result device_id=%d", doorbell_device_id);
+         pthread_mutex_lock(&g_db_pending_mutex);
+         g_db_pending        = 1;
+         g_db_pending_device = doorbell_device_id;
+         g_db_pending_since  = time(NULL);
+         pthread_mutex_unlock(&g_db_pending_mutex);
+      }
+   }
+
+   /* Inject pending result into bundle if ready and no new press this cycle */
+   doorbell_inject_pending(&doorbell_pressed, &doorbell_device_id,
+                           &db_inference_valid, &db_event_id,
+                           &db_person, &db_conf_pct,
+                           db_asset, DOORBELL_ASSET_LEN);
+
+   /* Emit extended five-field frame when inference result is available,
+    * two-field fallback otherwise — STM32 parser handles both forms.   */
+   if (doorbell_pressed && db_inference_valid)
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "DOORBELL:%d,%d,%d,%d,%s\n",
+                      doorbell_pressed, doorbell_device_id,
+                      db_person, db_conf_pct, db_asset);
+      LOG("[CONTROLLER] -> [UART] send event_id=" EVENT_ID_FMT
+          " device_id=%d person=%d conf=%d",
+          EVENT_ID_ARG(db_event_id), doorbell_device_id,
+          db_person, db_conf_pct);
+   }
+   else
+   {
+      pos += snprintf(msg + pos, sizeof(msg) - pos,
+                      "DOORBELL:%d,%d\n",
+                      doorbell_pressed, doorbell_device_id);
+   }
+
+   /* Inference cam liveness — derived from shm at push time */
    pthread_mutex_lock(&shm_data->shm_mutex);
    for (i = 0; i < CAM_COUNT; i++)
    {

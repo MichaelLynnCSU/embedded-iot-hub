@@ -8,6 +8,12 @@
  * \details Owns the TFLite model, interpreter, and label table.
  *          All perception logic lives here; transport parsing stays in
  *          each daemon. Both daemons link this file.
+ *
+ * \note    Timestamp out-param (2026-06-14):
+ *          inference_worker_save() copies its internal timestamp string
+ *          into out_ts (if non-NULL) before returning, so callers can
+ *          publish an asset identifier guaranteed to match the saved
+ *          filename. See inference_worker.h for the contract.
  ******************************************************************************/
 
 #include "inference_worker.h"
@@ -227,7 +233,8 @@ int inference_worker_run(const uint8_t *jpeg, size_t jpeg_len,
 void inference_worker_save(const uint8_t *jpeg, size_t len,
                            const char *dir,
                            int detected, float confidence,
-                           const char *tag)
+                           const char *tag,
+                           char *out_ts, size_t out_ts_len)
 {
    char      path[320];  /**< output file path          */
    char      ts[32];     /**< timestamp string          */
@@ -265,4 +272,14 @@ void inference_worker_save(const uint8_t *jpeg, size_t len,
    fwrite(jpeg, 1, len, f);
    fclose(f);
    worker_log("Saved %s", path);
+
+   /* Return the exact timestamp string used in the filename above, so
+    * callers can publish an asset identifier that is guaranteed to match
+    * (no independent time(NULL) call, no drift). Left untouched on error
+    * paths above (caller's buffer keeps whatever it had, e.g. zeroed). */
+   if (NULL != out_ts && out_ts_len > 0)
+   {
+      strncpy(out_ts, ts, out_ts_len - 1);
+      out_ts[out_ts_len - 1] = '\0';
+   }
 }

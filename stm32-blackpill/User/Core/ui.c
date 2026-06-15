@@ -6,186 +6,85 @@
  * \author  MichaelLynnCSU
  * \date    01-01-2024
  *
- * \brief   LVGL UI layer implementation for the Smart Home Dashboard.
+ * \brief   LVGL UI layer — core init, shared state, doorbell FSM, accessors.
  *
- * \details Manages the LVGL display driver registration, tile creation,
- *          adaptive layout reflow, live sensor-state rendering, and
- *          device online/offline status dots. All HomeState mutations are
- *          performed through the accessor functions declared in ui.h so
- *          that the parser and main modules remain decoupled from the
- *          internal data structures.
+ * \details Owns all shared state (g_home, liveness arrays, view state).
+ *          View-specific rendering is delegated to:
+ *            ui_home.c     — HOME view
+ *            ui_security.c — SECURITY view
+ *            ui_system.c   — SYSTEM view
  *
- * \note    Multi-view architecture (2026-06-01):
- *          Three views: HOME, SECURITY, SYSTEM.
- *          Navigation: 28px nav bar at bottom, three tap zones.
- *          Touch handled via registered lv_indev driver.
- *
- * \note    SYSTEM view (2026-06-01):
- *          Scrollable LVGL label list. One lv_label per device.
- *          LVGL flex column handles layout. Scales to 24+ devices.
- *
- * \note    Doorbell liveness (2026-06-09):
- *          g_doorbell_last_seen[MAX_DOORBELL_CAMS] added.
- *          SYS_ROW_COUNT increased by MAX_DOORBELL_CAMS.
- *          system_list_refresh() renders DB0..DB3 rows after reed rows.
- *
- * \note    Inference camera liveness (2026-06-10):
- *          g_cam_last_seen[MAX_CAMS], g_cam_online[MAX_CAMS] added.
- *          g_cam_buf[MAX_CAMS] holds formatted row text.
- *          SYS_ROW_COUNT increased by MAX_CAMS.
- *          system_list_refresh() renders CAM1..CAM3 after doorbell rows.
- *          ui_set_cam(), ui_stamp_cam_online() added.
+ * \note    Doorbell inference FSM (2026-06-14):
+ *          g_doorbell_pending + DOORBELL_UI_TIMEOUT_MS implement a
+ *          two-phase commit model. pressed=1 opens the transaction;
+ *          timeout closes it. Inference fields (person/conf_pct/asset)
+ *          are accepted only while pending==1.
+ *          See arch spec: doorbell_ui_arch_spec.md
  ******************************************************************************/
 
-#include "ui.h"
+#include "ui_priv.h"
 #include "log.h"
 #include "ili9341.h"
 #include "xpt2046.h"
-#include "lvgl.h"
-#include <stdio.h>
-#include <string.h>
+#include "main.h"
 
-/******************************** CONSTANTS ***********************************/
+/************************ SHARED STATE DEFINITIONS ****************************/
+/* All externs declared in ui_priv.h are defined here.                        */
 
-#define C_BG              lv_color_hex(0x101010u)
-#define C_TILE            lv_color_hex(0x2C2C2Cu)
-#define C_HDR_R           0x01u
-#define C_HDR_G           0x19u
-#define C_HDR_B           0x31u
-#define C_STATUS_ON       0x00FF00u
-#define C_STATUS_OFF      0x500000u
-#define C_SUB_TEXT        0xAAAAAAu
-#define C_NAV_ACTIVE      0x00CC44u
-#define C_NAV_IDLE        0x888888u
-#define C_ROW_ONLINE      0x00FF66u
-#define C_ROW_OFFLINE     0xFF4444u
-
-#define LV_BUF_LINES      20u
-#define LV_BUF_SIZE       (240u * LV_BUF_LINES)
-#define DISP_HOR_RES      240u
-#define DISP_VER_RES      320u
-#define STATUS_DOT_SIZE     8u
-#define STATUS_DOT_OFS_X   -6
-#define STATUS_DOT_OFS_Y    5
-#define TILE_LABEL_X        8u
-#define TILE_LABEL_Y        4u
-#define TILE_VALUE_Y       22u
-#define TILE_SUB_Y         42u
-#define PIR_TITLE_BUF      16u
-#define SNPRINTF_BUF       48u
-#define AGE_UNKNOWN_VAL    0xFFFFu
-
-#define TILE_H_MIN_SEC     36
-#define TILE_H_MAX_SEC     72
-
-#define SYS_ROW_COUNT  (4u + MAX_TEMPS + MAX_PIRS + MAX_REEDS + MAX_DOORBELL_CAMS + MAX_CAMS)
-
-/************************** STRUCTURE DATA TYPES ******************************/
-
-typedef struct _TILE_X
-{
-   lv_obj_t *p_tile;
-   lv_obj_t *p_label;
-   lv_obj_t *p_value;
-   lv_obj_t *p_sub;
-   lv_obj_t *p_status;
-} TILE_X;
-
-typedef struct _HOME_STATE_X
-{
-   uint8_t  temp;
-   uint8_t  hum;
-   uint32_t pir_count;
-   uint8_t  pir_batt;
-   uint8_t  pir_occupied;
-   uint32_t pir_slot_count[MAX_PIRS];
-   int8_t   pir_slot_batt[MAX_PIRS];
-   uint16_t pir_slot_age[MAX_PIRS];
-   uint8_t  pir_slot_occupied[MAX_PIRS];
-   int16_t  temp_slot_decidegc[MAX_TEMPS];
-   int8_t   temp_slot_batt[MAX_TEMPS];
-   uint16_t temp_slot_age[MAX_TEMPS];
-   uint8_t  reed_state[MAX_REEDS];
-   int8_t   reed_batt[MAX_REEDS];
-   uint16_t reed_age[MAX_REEDS];
-   uint8_t  light;
-   uint8_t  lock;
-   int8_t   lock_batt;
-   uint8_t  motor;
-   int      motor_batt;
-   uint8_t  doorbell;
-   uint8_t  doorbell_device_id;
-   uint16_t doorbell_slot_age[MAX_DOORBELL_CAMS];
-   uint8_t  doorbell_slot_online[MAX_DOORBELL_CAMS];
-} HOME_STATE_X;
-
-/************************ STATIC (PRIVATE) DATA *****************************/
-
-static HOME_STATE_X g_home = {
-   .pir_slot_batt          = {-1, -1, -1, -1, -1},
-   .reed_batt              = {-1, -1, -1, -1, -1, -1},
-   .lock_batt              = -1,
-   .motor_batt             = -1,
-   .temp_slot_batt         = {-1, -1, -1, -1},
-   .doorbell               = 0,
-   .doorbell_device_id     = 0,
-   .doorbell_slot_age      = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
-   .doorbell_slot_online   = {0, 0, 0, 0},
+HOME_STATE_X g_home = {
+   .pir_slot_batt        = {-1, -1, -1, -1, -1},
+   .reed_batt            = {-1, -1, -1, -1, -1, -1},
+   .lock_batt            = -1,
+   .motor_batt           = -1,
+   .temp_slot_batt       = {-1, -1, -1, -1},
+   .doorbell             = 0,
+   .doorbell_device_id   = 0,
+   .doorbell_person      = 0,
+   .doorbell_conf_pct    = 0,
+   .doorbell_asset       = {0},
+   .doorbell_slot_age    = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
+   .doorbell_slot_online = {0, 0, 0, 0},
 };
 
-static uint32_t g_dev_last_seen[eDEV_COUNT];
-static uint8_t  g_dev_online[eDEV_COUNT];
-static uint32_t g_reed_last_seen[MAX_REEDS];
-static uint8_t  g_reed_online[MAX_REEDS];
-static uint32_t g_pir_last_seen[MAX_PIRS];
-static uint8_t  g_pir_online[MAX_PIRS];
-static uint8_t  g_reed_count       = 2u;
-static uint8_t  g_pir_count_slots  = 0u;
-static uint32_t g_temp_last_seen[MAX_TEMPS];
-static uint8_t  g_temp_online[MAX_TEMPS];
-static uint8_t  g_temp_count_slots = 0u;
+uint32_t g_dev_last_seen[eDEV_COUNT];
+uint8_t  g_dev_online[eDEV_COUNT];
 
-/* Doorbell per-cam online tracking */
-static uint32_t g_doorbell_last_seen[MAX_DOORBELL_CAMS];
-static uint8_t  g_doorbell_online[MAX_DOORBELL_CAMS];
+uint32_t g_reed_last_seen[MAX_REEDS];
+uint8_t  g_reed_online[MAX_REEDS];
+uint8_t  g_reed_count      = 2u;
 
-/* Inference camera liveness */
-static uint32_t g_cam_last_seen[MAX_CAMS];
-static uint8_t  g_cam_online[MAX_CAMS];
-static char     g_cam_buf[MAX_CAMS][32];
+uint32_t g_pir_last_seen[MAX_PIRS];
+uint8_t  g_pir_online[MAX_PIRS];
+uint8_t  g_pir_count_slots = 0u;
 
-static lv_disp_draw_buf_t g_draw_buf;
-static lv_color_t         g_buf1[LV_BUF_SIZE];
-static lv_color_t         g_buf2[LV_BUF_SIZE];
+uint32_t g_temp_last_seen[MAX_TEMPS];
+uint8_t  g_temp_online[MAX_TEMPS];
+uint8_t  g_temp_count_slots = 0u;
 
-static lv_style_t g_style_online;
-static lv_style_t g_style_offline;
+uint32_t g_doorbell_last_seen[MAX_DOORBELL_CAMS];
+uint8_t  g_doorbell_online[MAX_DOORBELL_CAMS];
 
-/* ---- Security view tiles ------------------------------------------------ */
-static TILE_X g_t_pir_slot[MAX_PIRS];
-static TILE_X g_t_reed[MAX_REEDS];
-static TILE_X g_t_lock;
+uint32_t g_cam_last_seen[MAX_CAMS];
+uint8_t  g_cam_online[MAX_CAMS];
+char     g_cam_buf[MAX_CAMS][32];
 
-/* ---- View state --------------------------------------------------------- */
-static UI_VIEW_E  g_current_view = eVIEW_HOME;
+UI_VIEW_E g_current_view = eVIEW_HOME;
 
-/* ---- Nav bar ------------------------------------------------------------ */
-static lv_obj_t  *g_nav_bar         = NULL;
-static lv_obj_t  *g_nav_lbl[eVIEW_COUNT];
+lv_obj_t  *g_nav_bar         = NULL;
+lv_obj_t  *g_nav_lbl[eVIEW_COUNT];
 
-/* ---- Home view labels --------------------------------------------------- */
-static lv_obj_t  *g_home_status_lbl = NULL;
-static lv_obj_t  *g_home_temp_lbl   = NULL;
-static lv_obj_t  *g_home_net_lbl    = NULL;
+lv_style_t g_style_online;
+lv_style_t g_style_offline;
 
-/* ---- System view list --------------------------------------------------- */
-static lv_obj_t  *g_sys_list                = NULL;
-static lv_obj_t  *g_sys_rows[SYS_ROW_COUNT];
+/********************* DOORBELL FSM PRIVATE STATE *****************************/
+/* g_doorbell_pending is the sole gate for inference field updates.
+ * INVARIANT: only pressed=1 sets it; only timeout clears it.
+ * No external caller may read or write these — they are private to ui.c.    */
 
-static const char *const k_nav_labels[eVIEW_COUNT] = { "HOME", "SEC", "SYS" };
+static uint8_t  g_doorbell_pending    = 0u;
+static uint32_t g_doorbell_last_rx_ms = 0u;
 
 /************************ STATIC (PRIVATE) FUNCTIONS **************************/
-static void nav_btn_event_cb(lv_event_t *p_e);
 
 static void lvgl_flush_cb(lv_disp_drv_t *p_drv,
                           const lv_area_t *p_area,
@@ -199,69 +98,47 @@ static void lvgl_flush_cb(lv_disp_drv_t *p_drv,
    lv_disp_flush_ready(p_drv);
 }
 
-static void set_status(lv_obj_t *p_box, uint8_t online)
+static void touch_read_cb(lv_indev_drv_t *p_drv, lv_indev_data_t *p_data)
 {
-   if (NULL == p_box) { return; }
-   lv_obj_remove_style_all(p_box);
-   lv_obj_add_style(p_box, (0u != online) ? &g_style_online : &g_style_offline, 0);
-   lv_obj_set_size(p_box, STATUS_DOT_SIZE, STATUS_DOT_SIZE);
-   lv_obj_align(p_box, LV_ALIGN_TOP_RIGHT, STATUS_DOT_OFS_X, STATUS_DOT_OFS_Y);
-   lv_obj_invalidate(p_box);
+   (void)p_drv;
+   if (XPT2046_IsTouched())
+   {
+      TouchPoint_t tp = XPT2046_GetTouch();
+      p_data->point.x = (lv_coord_t)tp.x;
+      p_data->point.y = (lv_coord_t)tp.y;
+      p_data->state   = LV_INDEV_STATE_PRESSED;
+   }
+   else
+   {
+      p_data->state = LV_INDEV_STATE_RELEASED;
+   }
 }
 
-static void create_tile(TILE_X *p_t, lv_obj_t *p_parent,
-                        int x, int y, int w, int h,
-                        const char *p_title)
+static void nav_btn_event_cb(lv_event_t *p_e)
 {
-   if ((NULL == p_t) || (NULL == p_parent) || (NULL == p_title)) { return; }
-
-   p_t->p_tile = lv_obj_create(p_parent);
-   lv_obj_set_pos(p_t->p_tile, x, y);
-   lv_obj_set_size(p_t->p_tile, w, h);
-   lv_obj_set_style_bg_color(p_t->p_tile, C_TILE, 0);
-   lv_obj_set_style_border_width(p_t->p_tile, 0, 0);
-   lv_obj_set_style_pad_all(p_t->p_tile, 0, 0);
-   lv_obj_clear_flag(p_t->p_tile, LV_OBJ_FLAG_SCROLLABLE);
-
-   p_t->p_label = lv_label_create(p_t->p_tile);
-   lv_label_set_text(p_t->p_label, p_title);
-   lv_obj_set_pos(p_t->p_label, (int)TILE_LABEL_X, (int)TILE_LABEL_Y);
-   lv_obj_set_style_text_color(p_t->p_label, lv_color_white(), 0);
-
-   p_t->p_value = lv_label_create(p_t->p_tile);
-   lv_label_set_text(p_t->p_value, "---");
-   lv_obj_set_pos(p_t->p_value, (int)TILE_LABEL_X, (int)TILE_VALUE_Y);
-   lv_obj_set_style_text_color(p_t->p_value, lv_color_white(), 0);
-
-   p_t->p_sub = lv_label_create(p_t->p_tile);
-   lv_label_set_text(p_t->p_sub, "");
-   lv_obj_set_pos(p_t->p_sub, (int)TILE_LABEL_X, (int)TILE_SUB_Y);
-   lv_obj_set_style_text_color(p_t->p_sub, lv_color_hex(C_SUB_TEXT), 0);
-
-   p_t->p_status = lv_obj_create(p_t->p_tile);
-   lv_obj_clear_flag(p_t->p_status, LV_OBJ_FLAG_SCROLLABLE);
-   set_status(p_t->p_status, 0u);
+   const UI_VIEW_E *p_view = (const UI_VIEW_E *)lv_event_get_user_data(p_e);
+   if (NULL != p_view) { ui_set_view(*p_view); }
 }
 
 static void init_status_styles(void)
 {
    lv_style_init(&g_style_online);
-   lv_style_set_bg_opa(&g_style_online, LV_OPA_COVER);
-   lv_style_set_bg_color(&g_style_online, lv_color_hex(C_STATUS_ON));
-   lv_style_set_radius(&g_style_online, LV_RADIUS_CIRCLE);
-   lv_style_set_border_width(&g_style_online, 0);
+   lv_style_set_bg_opa(&g_style_online,    LV_OPA_COVER);
+   lv_style_set_bg_color(&g_style_online,  lv_color_hex(C_STATUS_ON));
+   lv_style_set_radius(&g_style_online,    LV_RADIUS_CIRCLE);
+   lv_style_set_border_width(&g_style_online,  0);
    lv_style_set_outline_width(&g_style_online, 0);
-   lv_style_set_shadow_width(&g_style_online, 0);
-   lv_style_set_pad_all(&g_style_online, 0);
+   lv_style_set_shadow_width(&g_style_online,  0);
+   lv_style_set_pad_all(&g_style_online,   0);
 
    lv_style_init(&g_style_offline);
-   lv_style_set_bg_opa(&g_style_offline, LV_OPA_COVER);
+   lv_style_set_bg_opa(&g_style_offline,   LV_OPA_COVER);
    lv_style_set_bg_color(&g_style_offline, lv_color_hex(C_STATUS_OFF));
-   lv_style_set_radius(&g_style_offline, LV_RADIUS_CIRCLE);
-   lv_style_set_border_width(&g_style_offline, 0);
+   lv_style_set_radius(&g_style_offline,   LV_RADIUS_CIRCLE);
+   lv_style_set_border_width(&g_style_offline,  0);
    lv_style_set_outline_width(&g_style_offline, 0);
-   lv_style_set_shadow_width(&g_style_offline, 0);
-   lv_style_set_pad_all(&g_style_offline, 0);
+   lv_style_set_shadow_width(&g_style_offline,  0);
+   lv_style_set_pad_all(&g_style_offline,  0);
 }
 
 static void create_header(lv_obj_t *p_scr)
@@ -286,22 +163,10 @@ static void create_header(lv_obj_t *p_scr)
    lv_obj_align(p_htitle, LV_ALIGN_CENTER, 0, 0);
 }
 
-static void nav_highlight(UI_VIEW_E view)
-{
-   uint8_t i = 0u;
-   for (i = 0u; i < (uint8_t)eVIEW_COUNT; i++)
-   {
-      if (NULL == g_nav_lbl[i]) { continue; }
-      lv_obj_set_style_text_color(
-         g_nav_lbl[i],
-         ((uint8_t)view == i) ? lv_color_hex(C_NAV_ACTIVE) : lv_color_hex(C_NAV_IDLE),
-         0);
-   }
-}
-
 static void create_nav_bar(lv_obj_t *p_scr)
 {
-   static const UI_VIEW_E k_views[eVIEW_COUNT] =
+   static const char    *const k_labels[eVIEW_COUNT] = { "HOME", "SEC", "SYS" };
+   static const UI_VIEW_E      k_views[eVIEW_COUNT]  =
       { eVIEW_HOME, eVIEW_SECURITY, eVIEW_SYSTEM };
 
    lv_obj_t *p_btn = NULL;
@@ -334,7 +199,7 @@ static void create_nav_bar(lv_obj_t *p_scr)
                           (void *)&k_views[i]);
 
       p_lbl = lv_label_create(p_btn);
-      lv_label_set_text(p_lbl, k_nav_labels[i]);
+      lv_label_set_text(p_lbl, k_labels[i]);
       lv_obj_set_style_text_color(p_lbl, lv_color_hex(C_NAV_IDLE), 0);
       lv_obj_align(p_lbl, LV_ALIGN_CENTER, 0, 0);
       g_nav_lbl[i] = p_lbl;
@@ -343,122 +208,82 @@ static void create_nav_bar(lv_obj_t *p_scr)
    nav_highlight(eVIEW_HOME);
 }
 
-static void create_home_labels(lv_obj_t *p_scr)
+static void tick_doorbell_timeout(uint32_t now)
 {
-   int y = 0;
-
-   if (NULL == p_scr) { return; }
-
-   y = (int)CONTENT_TOP + 20;
-
-   g_home_status_lbl = lv_label_create(p_scr);
-   lv_label_set_text(g_home_status_lbl, "HOME SECURE");
-   lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0x00FF66u), 0);
-   lv_obj_align(g_home_status_lbl, LV_ALIGN_TOP_MID, 0, y);
-
-   y += 40;
-   g_home_temp_lbl = lv_label_create(p_scr);
-   lv_label_set_text(g_home_temp_lbl, "--C  --%");
-   lv_obj_set_style_text_color(g_home_temp_lbl, lv_color_white(), 0);
-   lv_obj_align(g_home_temp_lbl, LV_ALIGN_TOP_MID, 0, y);
-
-   y += 40;
-   g_home_net_lbl = lv_label_create(p_scr);
-   lv_label_set_text(g_home_net_lbl, "CHECKING...");
-   lv_obj_set_style_text_color(g_home_net_lbl, lv_color_hex(C_SUB_TEXT), 0);
-   lv_obj_align(g_home_net_lbl, LV_ALIGN_TOP_MID, 0, y);
+   /* Sole mechanism for closing the doorbell pending window.
+    * Clears g_doorbell_pending and g_home.doorbell so the HOME view
+    * stops rendering the alert. No external caller may do this.       */
+   if ((1u == g_doorbell_pending) &&
+       ((now - g_doorbell_last_rx_ms) >= DOORBELL_UI_TIMEOUT_MS))
+   {
+      g_doorbell_pending   = 0u;
+      g_home.doorbell      = 0u;
+      g_home.doorbell_person   = 0u;
+      g_home.doorbell_conf_pct = 0u;
+      g_home.doorbell_asset[0] = '\0';
+   }
 }
 
-static void sys_row_create(lv_obj_t *p_parent, lv_obj_t **pp_row,
-                            const char *p_text, uint8_t hidden)
+/************************** SHARED HELPERS (used by ui_*.c) *******************/
+
+void set_status(lv_obj_t *p_box, uint8_t online)
 {
-   *pp_row = lv_label_create(p_parent);
-   lv_label_set_text(*pp_row, p_text);
-   lv_obj_set_style_text_color(*pp_row, lv_color_white(), 0);
-   lv_obj_set_width(*pp_row, (lv_coord_t)FULL_TILE_WIDTH);
-   lv_label_set_long_mode(*pp_row, LV_LABEL_LONG_CLIP);
-   lv_obj_clear_flag(*pp_row, LV_OBJ_FLAG_SCROLLABLE);
-   if (0u != hidden) { lv_obj_add_flag(*pp_row, LV_OBJ_FLAG_HIDDEN); }
+   if (NULL == p_box) { return; }
+   lv_obj_remove_style_all(p_box);
+   lv_obj_add_style(p_box, (0u != online) ? &g_style_online : &g_style_offline, 0);
+   lv_obj_set_size(p_box, STATUS_DOT_SIZE, STATUS_DOT_SIZE);
+   lv_obj_align(p_box, LV_ALIGN_TOP_RIGHT, STATUS_DOT_OFS_X, STATUS_DOT_OFS_Y);
+   lv_obj_invalidate(p_box);
 }
 
-static void create_sys_list(lv_obj_t *p_scr)
+void create_tile(TILE_X *p_t, lv_obj_t *p_parent,
+                 int x, int y, int w, int h,
+                 const char *p_title)
 {
-   char    name[16];
-   uint8_t i   = 0u;
-   uint8_t row = 0u;
+   if ((NULL == p_t) || (NULL == p_parent) || (NULL == p_title)) { return; }
 
-   if (NULL == p_scr) { return; }
+   p_t->p_tile = lv_obj_create(p_parent);
+   lv_obj_set_pos(p_t->p_tile, x, y);
+   lv_obj_set_size(p_t->p_tile, w, h);
+   lv_obj_set_style_bg_color(p_t->p_tile, C_TILE, 0);
+   lv_obj_set_style_border_width(p_t->p_tile, 0, 0);
+   lv_obj_set_style_pad_all(p_t->p_tile, 0, 0);
+   lv_obj_clear_flag(p_t->p_tile, LV_OBJ_FLAG_SCROLLABLE);
 
-   g_sys_list = lv_obj_create(p_scr);
-   lv_obj_set_pos(g_sys_list, (int)TILE_LEFT_MARGIN, (int)CONTENT_TOP);
-   lv_obj_set_size(g_sys_list, (int)FULL_TILE_WIDTH, (int)CONTENT_H);
-   lv_obj_set_style_bg_opa(g_sys_list, LV_OPA_TRANSP, 0);
-   lv_obj_set_style_border_width(g_sys_list, 0, 0);
-   lv_obj_set_style_pad_all(g_sys_list, 0, 0);
-   lv_obj_set_style_pad_row(g_sys_list, 6, 0);
+   p_t->p_label = lv_label_create(p_t->p_tile);
+   lv_label_set_text(p_t->p_label, p_title);
+   lv_obj_set_pos(p_t->p_label, (int)TILE_LABEL_X, (int)TILE_LABEL_Y);
+   lv_obj_set_style_text_color(p_t->p_label, lv_color_white(), 0);
 
-   lv_obj_add_flag(g_sys_list,   LV_OBJ_FLAG_SCROLLABLE);
-   lv_obj_clear_flag(g_sys_list, LV_OBJ_FLAG_SCROLL_CHAIN);
-   lv_obj_set_scroll_dir(g_sys_list, LV_DIR_VER);
-   lv_obj_set_scrollbar_mode(g_sys_list, LV_SCROLLBAR_MODE_ACTIVE);
-   lv_obj_set_scroll_snap_y(g_sys_list, LV_SCROLL_SNAP_NONE);
-   lv_obj_set_flex_flow(g_sys_list, LV_FLEX_FLOW_COLUMN);
-   lv_obj_set_flex_align(g_sys_list, LV_FLEX_ALIGN_START,
-                                      LV_FLEX_ALIGN_START,
-                                      LV_FLEX_ALIGN_START);
+   p_t->p_value = lv_label_create(p_t->p_tile);
+   lv_label_set_text(p_t->p_value, "---");
+   lv_obj_set_pos(p_t->p_value, (int)TILE_LABEL_X, (int)TILE_VALUE_Y);
+   lv_obj_set_style_text_color(p_t->p_value, lv_color_white(), 0);
 
-   /* Fixed rows: aggregate TEMP, MOTOR, LIGHT, LOCK */
-   const char *const fixed[4] = { "TEMP", "MOTOR", "LIGHT", "LOCK" };
-   for (i = 0u; i < 4u; i++)
-   {
-      sys_row_create(g_sys_list, &g_sys_rows[row], fixed[i], 0u);
-      row++;
-   }
+   p_t->p_sub = lv_label_create(p_t->p_tile);
+   lv_label_set_text(p_t->p_sub, "");
+   lv_obj_set_pos(p_t->p_sub, (int)TILE_LABEL_X, (int)TILE_SUB_Y);
+   lv_obj_set_style_text_color(p_t->p_sub, lv_color_hex(C_SUB_TEXT), 0);
 
-   /* One row per BLE temp slot — hidden until temp_count arrives */
-   for (i = 0u; i < (uint8_t)MAX_TEMPS; i++)
-   {
-      (void)snprintf(name, sizeof(name), "TEMP %u", (unsigned int)(i + 1u));
-      sys_row_create(g_sys_list, &g_sys_rows[row], name, 1u);
-      row++;
-   }
-
-   /* One row per PIR slot */
-   for (i = 0u; i < (uint8_t)MAX_PIRS; i++)
-   {
-      (void)snprintf(name, sizeof(name), "PIR %u", (unsigned int)(i + 1u));
-      sys_row_create(g_sys_list, &g_sys_rows[row], name, 0u);
-      row++;
-   }
-
-   /* One row per reed/door slot */
-   for (i = 0u; i < (uint8_t)MAX_REEDS; i++)
-   {
-      (void)snprintf(name, sizeof(name), "DOOR %u", (unsigned int)(i + 1u));
-      sys_row_create(g_sys_list, &g_sys_rows[row], name, 0u);
-      row++;
-   }
-
-   /* One row per doorbell cam — hidden until first DB frame arrives */
-   for (i = 0u; i < (uint8_t)MAX_DOORBELL_CAMS; i++)
-   {
-      (void)snprintf(name, sizeof(name), "DB%u", (unsigned int)i);
-      sys_row_create(g_sys_list, &g_sys_rows[row], name, 1u);
-      row++;
-   }
-
-   /* One row per inference camera */
-   for (i = 0u; i < (uint8_t)MAX_CAMS; i++)
-   {
-      (void)snprintf(name, sizeof(name), "CAM%u", (unsigned int)(i + 1u));
-      sys_row_create(g_sys_list, &g_sys_rows[row], name, 0u);
-      row++;
-   }
-
-   lv_obj_add_flag(g_sys_list, LV_OBJ_FLAG_HIDDEN);
+   p_t->p_status = lv_obj_create(p_t->p_tile);
+   lv_obj_clear_flag(p_t->p_status, LV_OBJ_FLAG_SCROLLABLE);
+   set_status(p_t->p_status, 0u);
 }
 
-static void apply_view(UI_VIEW_E view)
+void nav_highlight(UI_VIEW_E view)
+{
+   uint8_t i = 0u;
+   for (i = 0u; i < (uint8_t)eVIEW_COUNT; i++)
+   {
+      if (NULL == g_nav_lbl[i]) { continue; }
+      lv_obj_set_style_text_color(
+         g_nav_lbl[i],
+         ((uint8_t)view == i) ? lv_color_hex(C_NAV_ACTIVE) : lv_color_hex(C_NAV_IDLE),
+         0);
+   }
+}
+
+void apply_view(UI_VIEW_E view)
 {
    uint8_t i = 0u;
 
@@ -502,221 +327,6 @@ static void apply_view(UI_VIEW_E view)
    nav_highlight(view);
 }
 
-static void reflow_security(void)
-{
-   int     n_pir          = (int)g_pir_count_slots;
-   int     n_reed         = (int)g_reed_count;
-   int     pir_row_count  = (n_pir  > 0) ? ((n_pir  + 1) / 2) : 0;
-   int     reed_row_count = (n_reed > 0) ? ((n_reed + 1) / 2) : 0;
-   int     total_rows     = pir_row_count + reed_row_count + 1;
-   int     usable         = (int)CONTENT_BOT - (int)CONTENT_TOP;
-   int     gap_total      = (total_rows + 1) * (int)TILE_GAP;
-   int     h_budget       = usable - gap_total;
-   int     h              = (total_rows > 0) ? (h_budget / total_rows) : 44;
-   int     y              = 0;
-   int     col            = 0;
-   int     row            = 0;
-   uint8_t i              = 0u;
-
-   if (h < TILE_H_MIN_SEC) { h = TILE_H_MIN_SEC; }
-   if (h > TILE_H_MAX_SEC) { h = TILE_H_MAX_SEC; }
-
-   y = (int)CONTENT_TOP + (int)TILE_GAP;
-
-   for (i = 0u; i < (uint8_t)MAX_PIRS; i++)
-   {
-      if (i < (uint8_t)n_pir)
-      {
-         col = (int)(i % 2u);
-         row = (int)(i / 2u);
-         lv_obj_set_pos(g_t_pir_slot[i].p_tile,
-                        (0 == col) ? (int)TILE_LEFT_MARGIN : (int)TILE_RIGHT_COL_X,
-                        y + row * (h + (int)TILE_GAP));
-         lv_obj_set_size(g_t_pir_slot[i].p_tile, (int)TILE_WIDTH, h);
-      }
-   }
-   y += pir_row_count * (h + (int)TILE_GAP);
-
-   for (i = 0u; i < (uint8_t)MAX_REEDS; i++)
-   {
-      if (i < (uint8_t)n_reed)
-      {
-         col = (int)(i % 2u);
-         row = (int)(i / 2u);
-         lv_obj_set_pos(g_t_reed[i].p_tile,
-                        (0 == col) ? (int)TILE_LEFT_MARGIN : (int)TILE_RIGHT_COL_X,
-                        y + row * (h + (int)TILE_GAP));
-         lv_obj_set_size(g_t_reed[i].p_tile, (int)TILE_WIDTH, h);
-      }
-   }
-   y += reed_row_count * (h + (int)TILE_GAP);
-
-   lv_obj_set_pos(g_t_lock.p_tile,  (int)TILE_LEFT_MARGIN, y);
-   lv_obj_set_size(g_t_lock.p_tile, (int)FULL_TILE_WIDTH, h);
-}
-
-static void sys_row_set(uint8_t row, const char *p_buf, uint8_t online)
-{
-   if (NULL == g_sys_rows[row]) { return; }
-   lv_label_set_text(g_sys_rows[row], p_buf);
-   lv_obj_set_style_text_color(g_sys_rows[row],
-      (0u != online) ? lv_color_hex(C_ROW_ONLINE) : lv_color_hex(C_ROW_OFFLINE),
-      0);
-}
-
-static void system_list_refresh(void)
-{
-   char    buf[48];
-   uint8_t row = 0u;
-   uint8_t i   = 0u;
-
-   /* Row 0 — aggregate TEMP */
-   (void)snprintf(buf, sizeof(buf), "TEMP   %s  %uC %u%%",
-                  g_dev_online[eDEV_TEMP] ? "[ON]" : "[--]",
-                  g_home.temp, g_home.hum);
-   sys_row_set(row++, buf, g_dev_online[eDEV_TEMP]);
-
-   /* Row 1 — MOTOR */
-   (void)snprintf(buf, sizeof(buf), "MOTOR  %s  B:%d%%",
-                  g_dev_online[eDEV_MOTOR] ? "[ON]" : "[--]",
-                  g_home.motor_batt);
-   sys_row_set(row++, buf, g_dev_online[eDEV_MOTOR]);
-
-   /* Row 2 — LIGHT */
-   (void)snprintf(buf, sizeof(buf), "LIGHT  %s",
-                  g_dev_online[eDEV_LIGHT] ? "[ON]" : "[--]");
-   sys_row_set(row++, buf, g_dev_online[eDEV_LIGHT]);
-
-   /* Row 3 — LOCK */
-   (void)snprintf(buf, sizeof(buf), "LOCK   %s  B:%d%%",
-                  g_dev_online[eDEV_LOCK] ? "[ON]" : "[--]",
-                  g_home.lock_batt);
-   sys_row_set(row++, buf, g_dev_online[eDEV_LOCK]);
-
-   /* BLE temp slots */
-   for (i = 0u; i < (uint8_t)MAX_TEMPS; i++)
-   {
-      if (i < g_temp_count_slots)
-      {
-         int16_t dg       = g_home.temp_slot_decidegc[i];
-         int     deg_int  = (int)(dg / 10);
-         int     deg_frac = (int)(dg % 10);
-         if (deg_frac < 0) { deg_frac = -deg_frac; }
-
-         (void)snprintf(buf, sizeof(buf), "TEMP%-2u %s  %d.%dC  B:%d%%",
-                        (unsigned int)(i + 1u),
-                        g_temp_online[i] ? "[ON]" : "[--]",
-                        deg_int, deg_frac,
-                        (int)g_home.temp_slot_batt[i]);
-         lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
-         sys_row_set(row, buf, g_temp_online[i]);
-      }
-      else
-      {
-         lv_obj_add_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
-      }
-      row++;
-   }
-
-   /* PIR slots */
-   for (i = 0u; i < (uint8_t)MAX_PIRS; i++)
-   {
-      if (i < g_pir_count_slots)
-      {
-         if (g_home.pir_slot_age[i] != AGE_UNKNOWN_VAL)
-         {
-            (void)snprintf(buf, sizeof(buf), "PIR%-2u  %s  B:%d%%  A:%us",
-                           (unsigned int)(i + 1u),
-                           g_pir_online[i] ? "[ON]" : "[--]",
-                           (int)g_home.pir_slot_batt[i],
-                           (unsigned int)g_home.pir_slot_age[i]);
-         }
-         else
-         {
-            (void)snprintf(buf, sizeof(buf), "PIR%-2u  %s  B:%d%%  A:--",
-                           (unsigned int)(i + 1u),
-                           g_pir_online[i] ? "[ON]" : "[--]",
-                           (int)g_home.pir_slot_batt[i]);
-         }
-         lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
-         sys_row_set(row, buf, g_pir_online[i]);
-      }
-      else
-      {
-         lv_obj_add_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
-      }
-      row++;
-   }
-
-   /* Reed slots */
-   for (i = 0u; i < (uint8_t)MAX_REEDS; i++)
-   {
-      if (i < g_reed_count)
-      {
-         (void)snprintf(buf, sizeof(buf), "DOOR%-2u %s  B:%d%%",
-                        (unsigned int)(i + 1u),
-                        g_reed_online[i] ? "[ON]" : "[--]",
-                        (int)g_home.reed_batt[i]);
-         lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
-         sys_row_set(row, buf, g_reed_online[i]);
-      }
-      else
-      {
-         lv_obj_add_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
-      }
-      row++;
-   }
-
-   /* Doorbell cams — hide if never seen */
-   for (i = 0u; i < (uint8_t)MAX_DOORBELL_CAMS; i++)
-   {
-      if (g_home.doorbell_slot_age[i] != AGE_UNKNOWN_VAL)
-      {
-         (void)snprintf(buf, sizeof(buf), "DB%-2u   %s  A:%us",
-                        (unsigned int)i,
-                        g_doorbell_online[i] ? "[ON]" : "[--]",
-                        (unsigned int)g_home.doorbell_slot_age[i]);
-         lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
-         sys_row_set(row, buf, g_doorbell_online[i]);
-      }
-      else
-      {
-         lv_obj_add_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
-      }
-      row++;
-   }
-
-   /* Inference cameras */
-   for (i = 0u; i < (uint8_t)MAX_CAMS; i++)
-   {
-      sys_row_set(row, g_cam_buf[i], g_cam_online[i]);
-      lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
-      row++;
-   }
-}
-
-static void touch_read_cb(lv_indev_drv_t *p_drv, lv_indev_data_t *p_data)
-{
-   (void)p_drv;
-   if (XPT2046_IsTouched())
-   {
-      TouchPoint_t tp  = XPT2046_GetTouch();
-      p_data->point.x  = (lv_coord_t)tp.x;
-      p_data->point.y  = (lv_coord_t)tp.y;
-      p_data->state    = LV_INDEV_STATE_PRESSED;
-   }
-   else
-   {
-      p_data->state = LV_INDEV_STATE_RELEASED;
-   }
-}
-
-static void nav_btn_event_cb(lv_event_t *p_e)
-{
-   const UI_VIEW_E *p_view = (const UI_VIEW_E *)lv_event_get_user_data(p_e);
-   if (NULL != p_view) { ui_set_view(*p_view); }
-}
-
 /************************** PUBLIC FUNCTIONS ***********************************/
 
 void ui_tick(void)
@@ -726,13 +336,15 @@ void ui_tick(void)
 
 void ui_create(void)
 {
-   static lv_disp_drv_t  disp_drv;
-   static lv_indev_drv_t indev_drv;
-   lv_obj_t             *p_scr     = NULL;
-   char                  title_buf[PIR_TITLE_BUF];
-   uint8_t               i         = 0u;
+   static lv_disp_draw_buf_t g_draw_buf;
+   static lv_color_t         g_buf1[LV_BUF_SIZE];
+   static lv_color_t         g_buf2[LV_BUF_SIZE];
+   static lv_disp_drv_t      disp_drv;
+   static lv_indev_drv_t     indev_drv;
 
-   /* Init cam row buffers to default text */
+   lv_obj_t *p_scr = NULL;
+   uint8_t   i     = 0u;
+
    for (i = 0u; i < (uint8_t)MAX_CAMS; i++)
    {
       (void)snprintf(g_cam_buf[i], sizeof(g_cam_buf[i]),
@@ -763,23 +375,7 @@ void ui_create(void)
    create_nav_bar(p_scr);
    create_home_labels(p_scr);
    create_sys_list(p_scr);
-
-   for (i = 0u; i < (uint8_t)MAX_PIRS; i++)
-   {
-      (void)snprintf(title_buf, sizeof(title_buf), "PIR %u", (unsigned int)(i + 1u));
-      create_tile(&g_t_pir_slot[i], p_scr, 0, 0, (int)TILE_WIDTH, 60, title_buf);
-      lv_obj_add_flag(g_t_pir_slot[i].p_tile, LV_OBJ_FLAG_HIDDEN);
-   }
-
-   for (i = 0u; i < (uint8_t)MAX_REEDS; i++)
-   {
-      (void)snprintf(title_buf, sizeof(title_buf), "DOOR %u", (unsigned int)(i + 1u));
-      create_tile(&g_t_reed[i], p_scr, 0, 0, (int)TILE_WIDTH, 60, title_buf);
-      lv_obj_add_flag(g_t_reed[i].p_tile, LV_OBJ_FLAG_HIDDEN);
-   }
-
-   create_tile(&g_t_lock, p_scr, 0, 0, (int)FULL_TILE_WIDTH, 60, "SMART LOCK");
-   lv_obj_add_flag(g_t_lock.p_tile, LV_OBJ_FLAG_HIDDEN);
+   create_security_tiles(p_scr);
 
    reflow_security();
 
@@ -789,12 +385,13 @@ void ui_create(void)
 
 void ui_update(void)
 {
-   char     buf[SNPRINTF_BUF] = {0};
-   uint32_t now               = 0ul;
-   uint8_t  i                 = 0u;
-   uint8_t  all_online        = 1u;
+   uint32_t now        = 0ul;
+   uint8_t  i          = 0u;
+   uint8_t  all_online = 1u;
 
    now = HAL_GetTick();
+
+   tick_doorbell_timeout(now);
 
    for (i = 0u; i < (uint8_t)eDEV_COUNT; i++)
    {
@@ -841,90 +438,12 @@ void ui_update(void)
                          ((now - g_cam_last_seen[i]) < HB_TIMEOUT_MS)) ? 1u : 0u;
    }
 
-   /* HOME */
-   if (g_current_view == eVIEW_HOME)
+   switch (g_current_view)
    {
-      uint8_t alert    = 0u;
-      uint8_t doorbell = g_home.doorbell;
-
-      if (0u != doorbell)
-      {
-         char db_buf[32];
-         snprintf(db_buf, sizeof(db_buf), "DOORBELL %d", g_home.doorbell_device_id);
-         lv_label_set_text(g_home_status_lbl, db_buf);
-         lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0xFFCC00u), 0);
-         g_home.doorbell = 0u;
-      }
-      else
-      {
-         for (i = 0u; i < g_pir_count_slots && i < (uint8_t)MAX_PIRS; i++)
-         {
-            if (0u != g_home.pir_slot_occupied[i]) { alert = 1u; break; }
-         }
-         for (i = 0u; i < g_reed_count && i < (uint8_t)MAX_REEDS; i++)
-         {
-            if (0u != g_home.reed_state[i]) { alert = 1u; break; }
-         }
-         if (0u != alert)
-         {
-            lv_label_set_text(g_home_status_lbl, "! ALERT !");
-            lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0xFF4444u), 0);
-         }
-         else
-         {
-            lv_label_set_text(g_home_status_lbl, "HOME SECURE");
-            lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0x00FF66u), 0);
-         }
-      }
-
-      (void)snprintf(buf, sizeof(buf), "%uC  %u%%", g_home.temp, g_home.hum);
-      lv_label_set_text(g_home_temp_lbl, buf);
-
-      if (0u != all_online)
-      {
-         lv_label_set_text(g_home_net_lbl, "ALL DEVICES ONLINE");
-         lv_obj_set_style_text_color(g_home_net_lbl, lv_color_hex(C_SUB_TEXT), 0);
-      }
-      else
-      {
-         lv_label_set_text(g_home_net_lbl, "DEVICE OFFLINE");
-         lv_obj_set_style_text_color(g_home_net_lbl, lv_color_hex(0xFF8800u), 0);
-      }
-
-      return;
-   }
-
-   /* SECURITY */
-   if (g_current_view == eVIEW_SECURITY)
-   {
-      for (i = 0u; i < g_pir_count_slots && i < (uint8_t)MAX_PIRS; i++)
-      {
-         lv_label_set_text(g_t_pir_slot[i].p_value,
-                           (0u != g_home.pir_slot_occupied[i]) ? "MOTION" : "CLEAR");
-         lv_label_set_text(g_t_pir_slot[i].p_sub, "");
-         set_status(g_t_pir_slot[i].p_status, g_pir_online[i]);
-      }
-
-      for (i = 0u; i < g_reed_count && i < (uint8_t)MAX_REEDS; i++)
-      {
-         lv_label_set_text(g_t_reed[i].p_value,
-                           (0u != g_home.reed_state[i]) ? "OPEN" : "CLOSED");
-         lv_label_set_text(g_t_reed[i].p_sub, "");
-         set_status(g_t_reed[i].p_status, g_reed_online[i]);
-      }
-
-      lv_label_set_text(g_t_lock.p_value,
-                        (0u != g_home.lock) ? "LOCKED" : "UNLOCKED");
-      lv_label_set_text(g_t_lock.p_sub, "");
-      set_status(g_t_lock.p_status, g_dev_online[eDEV_LOCK]);
-
-      return;
-   }
-
-   /* SYSTEM */
-   if (g_current_view == eVIEW_SYSTEM)
-   {
-      system_list_refresh();
+      case eVIEW_HOME:     ui_home_update(all_online);   break;
+      case eVIEW_SECURITY: ui_security_update();         break;
+      case eVIEW_SYSTEM:   system_list_refresh();        break;
+      default:                                           break;
    }
 }
 
@@ -941,22 +460,14 @@ void ui_set_view(UI_VIEW_E view)
    ui_update();
 }
 
-UI_VIEW_E ui_get_view(void)
-{
-   return g_current_view;
-}
-
-void ui_poll_touch(void)
-{
-   /* No-op: touch owned by registered lv_indev driver. */
-}
+UI_VIEW_E ui_get_view(void)    { return g_current_view; }
+void      ui_poll_touch(void)  { /* touch owned by registered lv_indev driver */ }
 
 void ui_reflow_pir(int n_pir)
 {
    if (n_pir < 0)             { n_pir = 0; }
    if (n_pir > (int)MAX_PIRS) { n_pir = (int)MAX_PIRS; }
    g_pir_count_slots = (uint8_t)n_pir;
-
    reflow_security();
    apply_view(g_current_view);
 }
@@ -971,15 +482,15 @@ void ui_reflow_temp(int n)
 {
    if (n < 0)              { n = 0; }
    if (n > (int)MAX_TEMPS) { n = (int)MAX_TEMPS; }
-
    g_temp_count_slots = (uint8_t)n;
-
    if (g_current_view == eVIEW_SYSTEM) { system_list_refresh(); }
 }
 
-/* ---- Accessor functions ------------------------------------------------- */
+/************************** ACCESSOR FUNCTIONS *********************************/
 
-uint8_t ui_get_reed_count(void) { return g_reed_count; }
+uint8_t ui_get_reed_count(void)       { return g_reed_count; }
+uint8_t ui_get_pir_count_slots(void)  { return g_pir_count_slots; }
+uint8_t ui_get_temp_count_slots(void) { return g_temp_count_slots; }
 
 void ui_set_reed_count(uint8_t count)
 {
@@ -987,13 +498,13 @@ void ui_set_reed_count(uint8_t count)
    g_reed_count = count;
 }
 
-uint8_t ui_get_pir_count_slots(void) { return g_pir_count_slots; }
-
 void ui_set_pir_count_slots(uint8_t count)
 {
    if (count > (uint8_t)MAX_PIRS) { count = (uint8_t)MAX_PIRS; }
    g_pir_count_slots = count;
 }
+
+void ui_set_temp_count_slots(uint8_t count) { g_temp_count_slots = count; }
 
 void ui_stamp_dev_online(DEVICE_ID_E dev_id, uint32_t tick)
 {
@@ -1025,31 +536,73 @@ void ui_stamp_cam_online(uint8_t slot, uint32_t tick)
    if (slot < (uint8_t)MAX_CAMS) { g_cam_last_seen[slot] = tick; }
 }
 
-void ui_set_cam(uint8_t slot, uint8_t online)
+/* ---- ui_set_cam: config/display only, no liveness authority --------------- */
+void ui_set_cam(uint8_t slot)
 {
    if (slot >= (uint8_t)MAX_CAMS) { return; }
-   g_cam_online[slot] = online;
+   /* Refresh the row label text. Online colour is applied in
+    * system_list_refresh() using g_cam_online[], which is driven
+    * exclusively by ui_stamp_cam_online() + HB_TIMEOUT_MS.           */
    (void)snprintf(g_cam_buf[slot], sizeof(g_cam_buf[slot]),
-                  "CAM%u  %s",
-                  (unsigned int)(slot + 1u),
-                  online ? "[ON]" : "[--]");
+                  "CAM%u", (unsigned int)(slot + 1u));
 }
 
-void ui_set_temp(uint8_t val)            { g_home.temp         = val; }
-void ui_set_hum(uint8_t val)             { g_home.hum          = val; }
-void ui_set_pir_count(uint32_t val)      { g_home.pir_count    = val; }
-void ui_set_pir_batt(uint8_t val)        { g_home.pir_batt     = val; }
-void ui_set_pir_occupied(uint8_t val)    { g_home.pir_occupied = val; }
-void ui_set_light(uint8_t val)           { g_home.light        = val; }
-void ui_set_lock(uint8_t val)            { g_home.lock         = val; }
-void ui_set_lock_batt(int8_t val)        { g_home.lock_batt    = val; }
-void ui_set_motor(uint8_t val)           { g_home.motor        = val; }
-void ui_set_motor_batt(int val)          { g_home.motor_batt   = val; }
+void ui_set_temp(uint8_t val)         { g_home.temp         = val; }
+void ui_set_hum(uint8_t val)          { g_home.hum          = val; }
+void ui_set_pir_count(uint32_t val)   { g_home.pir_count    = val; }
+void ui_set_pir_batt(uint8_t val)     { g_home.pir_batt     = val; }
+void ui_set_pir_occupied(uint8_t val) { g_home.pir_occupied = val; }
+void ui_set_light(uint8_t val)        { g_home.light        = val; }
+void ui_set_lock(uint8_t val)         { g_home.lock         = val; }
+void ui_set_lock_batt(int8_t val)     { g_home.lock_batt    = val; }
+void ui_set_motor(uint8_t val)        { g_home.motor        = val; }
+void ui_set_motor_batt(int val)       { g_home.motor_batt   = val; }
+
+/* ---- Doorbell FSM entry points ------------------------------------------- */
 
 void ui_set_doorbell(uint8_t pressed, uint8_t device_id)
 {
-   g_home.doorbell           = pressed;
-   g_home.doorbell_device_id = device_id;
+   /* Legacy shim — zero inference fields */
+   ui_set_doorbell_result(pressed, device_id, 0u, 0u, "");
+}
+
+void ui_set_doorbell_result(uint8_t pressed, uint8_t device_id,
+                            uint8_t person,  uint8_t conf_pct,
+                            const char *p_asset)
+{
+   uint32_t now = HAL_GetTick();
+
+   if (0u != pressed)
+   {
+      /* Open (or re-open) the pending window and snapshot trigger fields.
+       * Clear asset so ui_home_update() shows PENDING... until the
+       * five-field inference frame arrives.                            */
+      g_doorbell_pending        = 1u;
+      g_doorbell_last_rx_ms     = now;
+      g_home.doorbell           = 1u;
+      g_home.doorbell_device_id = device_id;
+      g_home.doorbell_asset[0]  = '\0';
+      g_home.doorbell_person    = 0u;
+      g_home.doorbell_conf_pct  = 0u;
+   }
+
+   if (1u == g_doorbell_pending)
+   {
+      /* Late inference binding — accepted while event window is open.
+       * press→inference delta is 1-4 s by design: the ESP32 fires
+       * pressed=1 immediately on GPIO, but the BBB inference pipeline
+       * (capture → model → SHM → UART) adds latency. person/conf_pct/
+       * asset will be zero on the first DOORBELL frame and arrive on
+       * a subsequent pressed=0 frame within the pending window.       */
+      g_home.doorbell_person   = person;
+      g_home.doorbell_conf_pct = conf_pct;
+      if (NULL != p_asset)
+      {
+         (void)strncpy(g_home.doorbell_asset, p_asset,
+                       sizeof(g_home.doorbell_asset) - 1u);
+         g_home.doorbell_asset[sizeof(g_home.doorbell_asset) - 1u] = '\0';
+      }
+   }
 }
 
 void ui_set_doorbell_slot_age(uint8_t slot, uint16_t age_s)
@@ -1102,9 +655,6 @@ void ui_set_reed_age(uint8_t slot, uint16_t age)
 {
    if (slot < (uint8_t)MAX_REEDS) { g_home.reed_age[slot] = age; }
 }
-
-void ui_set_temp_count_slots(uint8_t count) { g_temp_count_slots = count; }
-uint8_t ui_get_temp_count_slots(void)       { return g_temp_count_slots; }
 
 void ui_set_temp_slot_decidegc(uint8_t slot, int16_t val)
 {

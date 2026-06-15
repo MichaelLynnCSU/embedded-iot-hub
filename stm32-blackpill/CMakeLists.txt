@@ -43,6 +43,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "User/Core/log.c"
     "User/Core/parser.c"
     "User/Core/ui.c"
+    "User/Core/ui_home.c"
+    "User/Core/ui_security.c"
+    "User/Core/ui_system.c"
     "User/Core/ring_buffer.c"
 
     # Trinity split

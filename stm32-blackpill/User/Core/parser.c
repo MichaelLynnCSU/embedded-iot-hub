@@ -12,7 +12,7 @@
  *          follow the pattern "ID:field[,field...]". Supported IDs:
  *            REED_COUNT, DR1-DR6, PIR_COUNT, PIR1-PIR5, OCC1-OCC5, PIR,
  *            LGT, LCK, MTR, STATE, OCC, TEMP_COUNT, TEMP1-TEMP4,
- *            DB0-DB3, CAM1-CAM3, DOORBELL.
+ *            DB0-DB9, CAM1-CAM3, DOORBELL.
  *          All parsing uses strtol() rather than atoi() for error detection.
  *
  *          Online/offline pattern (all devices including MTR):
@@ -33,8 +33,28 @@
  *
  * \note    Inference camera liveness (2026-06-10):
  *          CAM<1-3>:online added. Slot is 1-based (- '1') matching
- *          uart_controller.c serialization. Calls ui_set_cam() and
- *          ui_stamp_cam_online().
+ *          uart_controller.c serialization. Calls ui_stamp_cam_online().
+ *          ui_set_cam() carries display config only — no liveness.
+ *          online==0 is intentionally a no-op: offline is time-driven
+ *          by HB_TIMEOUT_MS. See arch spec for rationale.
+ *
+ * \note    Inference-aware doorbell (2026-06-14):
+ *          DOORBELL frame extended to pressed,device_id[,person,conf_pct,asset].
+ *          asset is a 16-char ISO 8601 timestamp token (e.g. 20260614T182513Z).
+ *          press->inference delta is 1-4 s by design; person/conf/asset arrive
+ *          on subsequent pressed=0 frames while g_doorbell_pending is open.
+ *          Parser always forwards to ui_set_doorbell_result(); UI layer gates
+ *          on g_doorbell_pending.
+ *
+ * \note    DB<n> slot range widened (2026-06-15):
+ *          DB_DIGIT_OFFSET digit check widened from '0'-'3' to '0'-'9' to
+ *          match uart_controller.c, which emits DB0..DB<MAX_DOORBELL_CAMS-1>
+ *          (0-indexed). parse_doorbell_slot() already bounds-checks the slot
+ *          against MAX_DOORBELL_CAMS, matching the PIR/TEMP/CAM slot pattern
+ *          (dispatcher does coarse digit routing, handler does real bounds
+ *          enforcement). Previously, if MAX_DOORBELL_CAMS > 4, frames like
+ *          DB4:... fell through to the single-value handler and were
+ *          silently dropped.
  ******************************************************************************/
 
 #include "parser.h"
@@ -304,7 +324,11 @@ static void parse_cam_slot(int slot, const char *p_rest)
 
    now = HAL_GetTick();
 
-   ui_set_cam((uint8_t)slot, (uint8_t)online);
+   /* CAM frames are liveness-only via ui_stamp_cam_online().
+    * ui_set_cam() carries display config only — no online state.
+    * online==0 is intentionally a no-op: offline is time-driven by
+    * HB_TIMEOUT_MS. Do NOT add ui_set_cam(slot, 0) to "fix" this. */
+   ui_set_cam((uint8_t)slot);
 
    if (1 == online)
    {
@@ -434,9 +458,9 @@ static void parse_single_value(const char *p_id, int val, int batt)
  *          5.  OCC<1-5>    — occupancy slot handler, returns.
  *          6.  TEMP_COUNT  — temp count handler, returns.
  *          7.  TEMP<1-4>   — temp slot handler, returns.
- *          8.  DB<0-3>     — doorbell liveness handler, returns.
+ *          8.  DB<0-9>     — doorbell liveness handler, returns.
  *          9.  CAM<1-3>    — inference camera liveness handler, returns.
- *          10. DOORBELL    — press event handler, returns.
+ *          10. DOORBELL    — press/inference event handler, returns.
  *          11. STATE       — bulk state handler, returns.
  *          12. Everything else — single-value fallthrough (PIR, LGT, LCK,
  *              MTR, OCC).
@@ -525,9 +549,11 @@ void parser_process_line(const char *p_line)
       return;
    }
 
-   /* DB<0-3>:age_s,online — must be before DOORBELL to avoid prefix collision */
+   /* DB<0-9>:age_s,online — must be before DOORBELL to avoid prefix collision.
+    * Digit range intentionally wide (0-9); parse_doorbell_slot() bounds-checks
+    * against MAX_DOORBELL_CAMS, matching the PIR/TEMP/CAM slot pattern. */
    if (('D' == p_id[0]) && ('B' == p_id[1]) &&
-       (p_id[DB_DIGIT_OFFSET] >= '0') && (p_id[DB_DIGIT_OFFSET] <= '3') &&
+       (p_id[DB_DIGIT_OFFSET] >= '0') && (p_id[DB_DIGIT_OFFSET] <= '9') &&
        ('\0' == p_id[DB_DIGIT_OFFSET + 1u]))
    {
       slot = (int)(p_id[DB_DIGIT_OFFSET] - '0');
@@ -545,30 +571,57 @@ void parser_process_line(const char *p_line)
       return;
    }
 
-   /* DOORBELL:pressed,device_id */
+   /* DOORBELL:pressed,device_id[,person,conf_pct,asset]
+    *
+    * asset is a 16-char ISO 8601 timestamp token (e.g. 20260614T182513Z).
+    * press->inference delta is 1-4 s by design; person/conf/asset will be
+    * absent or zero on the first (pressed=1) frame and arrive on a later
+    * pressed=0 frame while g_doorbell_pending is open in ui.c.
+    * Parser always forwards regardless of pressed value — the UI layer gates
+    * on g_doorbell_pending. Parser stays a pure parser.                     */
    if (0 == strcmp(p_id, "DOORBELL"))
    {
       char  tmp[UART_LINE_LEN] = {0};
       char *p_tok              = NULL;
       int   pressed            = 0;
       int   device_id          = 0;
+      int   person             = 0;
+      int   conf_pct           = 0;
+      char  asset[20]          = {0};  /* 16-char token + null; 3 bytes margin */
 
       (void)strncpy(tmp, p_rest, sizeof(tmp) - 1u);
       tmp[sizeof(tmp) - 1u] = '\0';
 
       p_tok = strtok(tmp, ",");
-      if (NULL != p_tok) { (void)parse_int(p_tok, &pressed); }
+      if (NULL != p_tok) { (void)parse_int(p_tok, &pressed);   }
 
       p_tok = strtok(NULL, ",");
       if (NULL != p_tok) { (void)parse_int(p_tok, &device_id); }
 
+      p_tok = strtok(NULL, ",");
+      if (NULL != p_tok) { (void)parse_int(p_tok, &person);    }
+
+      p_tok = strtok(NULL, ",");
+      if (NULL != p_tok) { (void)parse_int(p_tok, &conf_pct);  }
+
+      p_tok = strtok(NULL, ",");
+      if (NULL != p_tok)
+      {
+         (void)strncpy(asset, p_tok, sizeof(asset) - 1u);
+         asset[sizeof(asset) - 1u] = '\0';
+      }
+
+      ui_set_doorbell_result((uint8_t)pressed, (uint8_t)device_id,
+                             (uint8_t)person,  (uint8_t)conf_pct,
+                             asset);
+
       if (0 != pressed)
       {
-         char dbg[48];
+         char dbg[80];
          snprintf(dbg, sizeof(dbg),
-                  "[DOORBELL] pressed dev_id=%d\r\n", device_id);
+                  "[DOORBELL] pressed dev=%d person=%d conf=%d asset=%.19s\r\n",
+                  device_id, person, conf_pct, asset);
          log_enqueue(dbg);
-         ui_set_doorbell((uint8_t)pressed, (uint8_t)device_id);
       }
 
       return;

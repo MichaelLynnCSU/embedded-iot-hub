@@ -21,8 +21,19 @@
  *          ui_set_doorbell_slot_online(), ui_stamp_doorbell_online() added.
  *
  * \note    Inference camera liveness (2026-06-10):
- *          MAX_CAMS=3 added. ui_set_cam(), ui_stamp_cam_online() added.
+ *          MAX_CAMS=3 added. ui_stamp_cam_online() added.
+ *          ui_set_cam() carries display config only — no liveness authority.
+ *          Offline transitions are driven solely by HB_TIMEOUT_MS in
+ *          ui_tick(). Do NOT add an online parameter to ui_set_cam().
  *          SYSTEM view shows CAM1..CAM3 rows with online/offline status.
+ *
+ * \note    Inference-aware doorbell (2026-06-14):
+ *          ui_set_doorbell_result() added. Extends ui_set_doorbell() with
+ *          person, conf_pct, and asset fields. asset is a 16-char ISO 8601
+ *          timestamp token (e.g. 20260614T182513Z) stored in char[20].
+ *          press->inference delta is 1-4 s by design; the UI pending window
+ *          (g_doorbell_pending + DOORBELL_UI_TIMEOUT_MS) absorbs this gap.
+ *          ui_set_doorbell() is retained as a zero-inference shim.
  ******************************************************************************/
 
 #ifndef INCLUDE_UI_H_
@@ -40,7 +51,9 @@
 #define MAX_DOORBELL_CAMS  4u    /**< Maximum number of doorbell cameras       */
 #define MAX_CAMS           3u    /**< Number of inference cameras              */
 
-#define HB_TIMEOUT_MS  30000ul  /**< ms before a device is considered offline  */
+#define HB_TIMEOUT_MS          30000ul  /**< ms before a device is considered offline (network reality model)  */
+#define DOORBELL_UI_TIMEOUT_MS 10000ul  /**< ms to hold doorbell alert on LCD (human perception window)        */
+
 #define TILE_GAP           4u   /**< Pixel gap between adjacent tiles          */
 #define TILE_LEFT_MARGIN   5u   /**< Left edge x-coordinate for left column    */
 #define TILE_RIGHT_COL_X 125u   /**< Left edge x-coordinate for right column   */
@@ -53,7 +66,7 @@
 #define DISP_VER_RES_H   320u   /**< Display vertical resolution               */
 #define DISP_HOR_RES_H   240u   /**< Display horizontal resolution             */
 
-#define CONTENT_TOP      (HDR_HEIGHT + TILE_GAP)
+#define CONTENT_TOP      (HDR_HEIGHT + TILE_GAP)   /**< Layout-static: assumes fixed HDR_HEIGHT */
 #define CONTENT_BOT      (DISP_VER_RES_H - NAV_HEIGHT)
 #define CONTENT_H        (CONTENT_BOT - CONTENT_TOP)
 
@@ -128,8 +141,12 @@ void    ui_reflow_temp(int n);
 void ui_set_doorbell_slot_age(uint8_t slot, uint16_t age_s);
 void ui_set_doorbell_slot_online(uint8_t slot, uint8_t online);
 
-/* ---- Inference camera setters ---- */
-void ui_set_cam(uint8_t slot, uint8_t online);
+/* ---- Inference camera config ---- */
+/* NOTE: ui_set_cam() is config/display metadata only. It carries NO liveness
+ * authority. Do NOT add an online parameter — doing so reintroduces
+ * dual-authority state. Liveness is driven exclusively by ui_stamp_cam_online()
+ * and the HB_TIMEOUT_MS watchdog in ui_tick().                               */
+void ui_set_cam(uint8_t slot);
 
 /* ---- Reed setters ---- */
 void ui_set_reed_state(uint8_t slot, uint8_t state);
@@ -141,7 +158,13 @@ void ui_set_lock(uint8_t val);
 void ui_set_lock_batt(int8_t val);
 void ui_set_motor(uint8_t val);
 void ui_set_motor_batt(int val);
-void ui_set_doorbell(uint8_t pressed, uint8_t device_id);
+
+/* ---- Doorbell event setters ---- */
+void ui_set_doorbell(uint8_t pressed, uint8_t device_id);  /**< Legacy shim — calls ui_set_doorbell_result() with zero inference fields */
+
+void ui_set_doorbell_result(uint8_t pressed, uint8_t device_id,
+                            uint8_t person, uint8_t conf_pct,
+                            const char *p_asset);
 
 uint8_t ui_get_dev_online(DEVICE_ID_E dev_id);
 

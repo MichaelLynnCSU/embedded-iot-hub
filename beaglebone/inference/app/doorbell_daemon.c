@@ -24,6 +24,25 @@
  *          Doorbell is low-frequency (human-initiated), so a single-threaded
  *          accept loop is sufficient. Extend to per-connection threads if
  *          simultaneous multi-cam doorbell events become a requirement.
+ *
+ * \note    Doorbell result SHM publish (2026-06-14):
+ *          New /doorbell_result segment (doorbell_result_shm.h) created
+ *          here and published after each completed inference run. This
+ *          daemon is the sole creator/owner of the segment — see
+ *          doorbell_result_shm.h for the publish/consume contract.
+ *          Reader is uart_controller (beaglebone/controller). No changes
+ *          to SharedSensorData or SensorData.
+ *
+ * \note    event_id tracing (2026-06-15):
+ *          All log lines that carry an event_id now use the shared
+ *          EVENT_ID_FMT/EVENT_ID_ARG macros from doorbell_result_shm.h,
+ *          giving a single canonical %08lx%08lx representation across
+ *          this daemon and uart_controller's data_controller.log. A new
+ *          "[INFERENCE] -> [SHM] publish ..." line is emitted alongside
+ *          the existing "Published doorbell result ..." line so the full
+ *          lifecycle of one event can be traced with:
+ *              grep <event_id_hex> /var/log/doorbell_daemon.log \
+ *                                  /var/log/data_controller.log
  ******************************************************************************/
 
 #include <stdio.h>
@@ -39,8 +58,12 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include "inference_worker.h"
 #include "inference_core.h"
+#include "doorbell_result_shm.h"
 
 /******************************** CONFIG **************************************/
 #define MODEL_PATH        "/opt/inference/models/detect.tflite"
@@ -58,6 +81,9 @@
 static volatile int  g_running   = 1;   /**< main loop run flag    */
 static FILE         *g_log       = NULL; /**< log file handle       */
 static int           g_server_fd = -1;  /**< TCP listen socket     */
+
+/**< /doorbell_result shm — created and owned by this daemon */
+static struct DoorbellResult *g_result = NULL;
 
 /******************************** LOGGING *************************************/
 static void log_msg(const char *fmt, ...)
@@ -92,6 +118,95 @@ static void sig_handler(int sig)
 {
    (void)sig;
    g_running = 0;
+}
+
+/******************************** RESULT SHM **********************************/
+
+/**
+ * \brief Create and map the /doorbell_result shared memory segment.
+ *
+ * \details This daemon is the sole creator/owner of the segment (see
+ *          doorbell_result_shm.h). Zeroes the segment on creation so
+ *          event_id starts at 0 ("no event yet") for the reader.
+ *
+ * \return 0 on success, -1 on failure (daemon continues without publish —
+ *         logged as a warning, not fatal, so inference/save still work).
+ */
+static int result_shm_init(void)
+{
+   int fd = -1;
+
+   fd = shm_open(DOORBELL_RESULT_SHM_NAME, O_CREAT | O_RDWR, 0666);
+   if (0 > fd)
+   {
+      log_msg("WARNING: shm_open(%s) failed: %s — doorbell result publish disabled",
+              DOORBELL_RESULT_SHM_NAME, strerror(errno));
+      return -1;
+   }
+
+   if (0 != ftruncate(fd, sizeof(struct DoorbellResult)))
+   {
+      log_msg("WARNING: ftruncate(%s) failed: %s — doorbell result publish disabled",
+              DOORBELL_RESULT_SHM_NAME, strerror(errno));
+      close(fd);
+      return -1;
+   }
+
+   g_result = mmap(NULL, sizeof(struct DoorbellResult),
+                    PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+   close(fd);
+
+   if (MAP_FAILED == g_result)
+   {
+      log_msg("WARNING: mmap(%s) failed: %s — doorbell result publish disabled",
+              DOORBELL_RESULT_SHM_NAME, strerror(errno));
+      g_result = NULL;
+      return -1;
+   }
+
+   memset(g_result, 0, sizeof(struct DoorbellResult));
+
+   log_msg("Doorbell result shm initialized (%s, %zu bytes)",
+           DOORBELL_RESULT_SHM_NAME, sizeof(struct DoorbellResult));
+   return 0;
+}
+
+/**
+ * \brief Publish one inference result to /doorbell_result.
+ *
+ * \details Writes payload fields, issues a memory barrier, then publishes
+ *          by setting event_id last. See doorbell_result_shm.h for the
+ *          publish/consume contract. No-op if result_shm_init() failed.
+ *
+ * \param event_id   Correlation key from cam_header_t (non-zero).
+ * \param device_id  Doorbell cam ID (0-3).
+ * \param person     1 if a person was detected, else 0.
+ * \param conf_pct   Confidence, 0-100 (represents 0.00-1.00).
+ * \param asset      Timestamp string from inference_worker_save()'s out_ts,
+ *                   "%Y%m%dT%H%M%SZ" (e.g. "20260614T182513Z"). Display
+ *                   identifier only — not a filename. See
+ *                   doorbell_result_shm.h.
+ */
+static void result_shm_publish(uint64_t event_id, uint8_t device_id,
+                                uint8_t person, uint8_t conf_pct,
+                                const char *asset)
+{
+   if (NULL == g_result) { return; }
+
+   g_result->device_id = device_id;
+   g_result->person    = person;
+   g_result->conf_pct  = conf_pct;
+   strncpy(g_result->asset, asset, sizeof(g_result->asset) - 1);
+   g_result->asset[sizeof(g_result->asset) - 1] = '\0';
+
+   __sync_synchronize();
+
+   g_result->event_id = event_id;
+
+   log_msg("Published doorbell result event_id=" EVENT_ID_FMT
+           " device_id=%d person=%d conf=%d asset=%s",
+           EVENT_ID_ARG(event_id),
+           device_id, person, conf_pct, asset);
 }
 
 /******************************** HEADER UNPACK *******************************/
@@ -152,8 +267,8 @@ static void tcp_server_init(void)
  * \brief Handle a single doorbell cam connection.
  *
  * \details Reads all complete header+JPEG frames from fd until connection
- *          closes or an error occurs. Each frame runs inference and saves
- *          to DOORBELL_DIR.
+ *          closes or an error occurs. Each frame runs inference, saves
+ *          to DOORBELL_DIR, and publishes the result to /doorbell_result.
  *
  * \param client_fd  Accepted client socket fd.
  * \param client_ip  Client IP string for logging.
@@ -169,6 +284,11 @@ static void handle_connection(int client_fd, const char *client_ip)
    float              conf     = 0.0f;          /**< detection confidence   */
    char               tag[48];                  /**< filename tag string    */
    char               event_str[32];            /**< event_id hex string    */
+   char               ts_str[20] = {0};         /**< saved-file timestamp,
+                                                   * "%Y%m%dT%H%M%SZ" (17 chars
+                                                   * + nul), from
+                                                   * inference_worker_save()  */
+   uint8_t            conf_pct = 0;             /**< confidence as 0-100    */
 
    /* keepalive */
    int keepalive = 1, keepidle = 30, keepintvl = 5, keepcnt = 3;
@@ -219,11 +339,8 @@ static void handle_connection(int client_fd, const char *client_ip)
          break;
       }
 
-      log_msg("Header: device_id=%d event_id=%08lx%08lx jpeg_size=%u",
-              hdr.device_id,
-              (unsigned long)(hdr.event_id >> 32),
-              (unsigned long)(hdr.event_id & 0xFFFFFFFFUL),
-              hdr.jpeg_size);
+      log_msg("Header: device_id=%d event_id=" EVENT_ID_FMT " jpeg_size=%u",
+              hdr.device_id, EVENT_ID_ARG(hdr.event_id), hdr.jpeg_size);
 
       /* Receive JPEG payload */
       jpeg = malloc(hdr.jpeg_size);
@@ -240,7 +357,8 @@ static void handle_connection(int client_fd, const char *client_ip)
                   hdr.jpeg_size - received, 0);
          if (n <= 0)
          {
-            log_msg("JPEG recv truncated from %s", client_ip);
+            log_msg("JPEG recv truncated from %s event_id=" EVENT_ID_FMT,
+                    client_ip, EVENT_ID_ARG(hdr.event_id));
             free(jpeg);
             jpeg = NULL;
             break;
@@ -250,24 +368,38 @@ static void handle_connection(int client_fd, const char *client_ip)
 
       if (NULL == jpeg) { break; }
 
-      log_msg("Received JPEG %zu bytes device_id=%d", received, hdr.device_id);
+      log_msg("Received JPEG %zu bytes device_id=%d event_id=" EVENT_ID_FMT,
+              received, hdr.device_id, EVENT_ID_ARG(hdr.event_id));
 
       /* Run inference via shared worker */
       detected = 0;
       conf     = 0.0f;
       inference_worker_run(jpeg, received, &detected, &conf);
-      log_msg("Result: person=%d confidence=%.2f device_id=%d",
-              detected, conf, hdr.device_id);
+      log_msg("Result: person=%d confidence=%.2f device_id=%d event_id=" EVENT_ID_FMT,
+              detected, conf, hdr.device_id, EVENT_ID_ARG(hdr.event_id));
 
       /* Build tag: dev<N>_<event_id_hex> */
-      snprintf(event_str, sizeof(event_str), "%08lx%08lx",
-               (unsigned long)(hdr.event_id >> 32),
-               (unsigned long)(hdr.event_id & 0xFFFFFFFFUL));
+      snprintf(event_str, sizeof(event_str), EVENT_ID_FMT,
+               EVENT_ID_ARG(hdr.event_id));
       snprintf(tag, sizeof(tag), "dev%d_%s", hdr.device_id, event_str);
 
-      /* Save to /data/doorbell */
+      /* Save to /data/doorbell. ts_str receives the exact timestamp
+       * string embedded in the saved filename, so the result publish
+       * below uses an asset identifier guaranteed to match the file
+       * (no independent time(NULL) call, no drift). */
       inference_worker_save(jpeg, received, DOORBELL_DIR,
-                            detected, conf, tag);
+                            detected, conf, tag,
+                            ts_str, sizeof(ts_str));
+
+      conf_pct = (uint8_t)(conf * 100.0f + 0.5f);
+
+      result_shm_publish(hdr.event_id, hdr.device_id,
+                          (uint8_t)detected, conf_pct, ts_str);
+
+      log_msg("[INFERENCE] -> [SHM] publish event_id=" EVENT_ID_FMT
+              " device_id=%d person=%d conf=%d asset=%s",
+              EVENT_ID_ARG(hdr.event_id),
+              hdr.device_id, detected, conf_pct, ts_str);
 
       free(jpeg);
       jpeg = NULL;
@@ -297,6 +429,10 @@ int main(void)
       return 1;
    }
 
+   /* Non-fatal: if this fails, daemon still ingests/saves/infers normally,
+    * just without publishing results to the STM32 path. */
+   (void)result_shm_init();
+
    tcp_server_init();
 
    while (g_running)
@@ -319,6 +455,10 @@ int main(void)
 
    log_msg("doorbell_daemon shutting down");
    if (g_server_fd >= 0) { close(g_server_fd); }
+   if (NULL != g_result)
+   {
+      munmap(g_result, sizeof(struct DoorbellResult));
+   }
    inference_worker_shutdown();
    if (NULL != g_log) { fclose(g_log); }
    return 0;
