@@ -615,11 +615,19 @@ void parser_process_line(const char *p_line)
                              (uint8_t)person,  (uint8_t)conf_pct,
                              asset);
 
+      char dbg[80];
+
       if (0 != pressed)
       {
-         char dbg[80];
          snprintf(dbg, sizeof(dbg),
-                  "[DOORBELL] pressed dev=%d person=%d conf=%d asset=%.19s\r\n",
+                  "[DOORBELL] press dev=%d\r\n", device_id);
+         log_enqueue(dbg);
+      }
+
+      if ('\0' != asset[0])
+      {
+         snprintf(dbg, sizeof(dbg),
+                  "[DOORBELL] result dev=%d person=%d conf=%d asset=%.19s\r\n",
                   device_id, person, conf_pct, asset);
          log_enqueue(dbg);
       }
