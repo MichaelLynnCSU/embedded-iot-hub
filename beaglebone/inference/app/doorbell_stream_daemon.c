@@ -94,6 +94,32 @@
  *          Result: ESP32 jitter is absorbed by the queue. ffmpeg sees a
  *          steady frame supply. mediamtx sees continuous RTP activity.
  *          The entire backpressure propagation chain is broken.
+ *
+ * \note    Logging contract (commit 1, 2026-06-15):
+ *          All lifecycle events use flat [STREAM] tags. No cross-process
+ *          boundaries exist in this daemon (TCP in, ffmpeg pipe out is
+ *          intra-process), so no directional arrow tags are used.
+ *
+ *          Transport layer (recv path):
+ *            [STREAM] connect      device_id=%u ip=%s
+ *            [STREAM] rx_frame     device_id=%u bytes=%u
+ *            [STREAM] recv_closed  ip=%s        (clean TCP FIN mid-frame)
+ *            [STREAM] recv_error   ip=%s errno=%d (transport error)
+ *            [STREAM] decode_failed ip=%s reason=bad_len|malloc_failed
+ *            [STREAM] disconnect   device_id=%u ip=%s
+ *
+ *          Pipeline layer (ffmpeg path):
+ *            [STREAM] ffmpeg_start  device_id=%u url=...
+ *            [STREAM] ffmpeg_failed device_id=%u
+ *            [STREAM] write_failed  ip=%s
+ *
+ *          Failure taxonomy is grep-deterministic:
+ *            recv_closed  = ESP32 closed socket (expected on stream end or
+ *                           send-side timeout — see truncation fix note)
+ *            recv_error   = BBB-side transport error (unexpected)
+ *            decode_failed = frame rejected before queue push (bad length
+ *                           or allocation failure)
+ *            write_failed = ffmpeg exited or pipe broken
  ******************************************************************************/
 
 #include <stdio.h>
@@ -199,7 +225,8 @@ static void sig_handler(int sig)
  *
  * \note    -2 vs -1 matters: -2 means the ESP32 closed the socket (likely
  *          due to a send-side error on its end), not a BBB-side recv fault.
- *          Callers should log these separately so the true cause is visible.
+ *          Callers log these as recv_closed vs recv_error respectively so
+ *          the true cause is visible in the grep taxonomy.
  */
 static int recv_all(int fd, void *buf, size_t n)
 {
@@ -451,8 +478,7 @@ static void *ffmpeg_thread(void *arg)
       /* Write frame to ffmpeg stdin — outside mutex */
       if (fwrite(buf, 1, len, cs->ffmpeg) != len)
       {
-         log_msg("%s: fwrite to ffmpeg failed — ffmpeg may have exited",
-                 cs->peer_ip);
+         log_msg("[STREAM] write_failed ip=%s", cs->peer_ip);
          free(buf);
          break;
       }
@@ -473,6 +499,19 @@ static void *ffmpeg_thread(void *arg)
  *          queue. Then loops receiving [len:4][jpeg] frames from the ESP32
  *          and pushing them into the queue. On exit (ESP32 disconnect or
  *          error), signals fq_done() and joins ffmpeg_thread before cleanup.
+ *
+ *          Logging contract (flat [STREAM] tags — no cross-process boundary
+ *          in this daemon so no directional arrow tags are used):
+ *            [STREAM] connect       — device_id and IP known, stream starting
+ *            [STREAM] ffmpeg_start  — ffmpeg process spawned successfully
+ *            [STREAM] ffmpeg_failed — popen() or pthread_create() failed
+ *            [STREAM] rx_frame      — frame received and queued successfully
+ *            [STREAM] decode_failed — frame rejected (bad_len, malloc_failed)
+ *            [STREAM] recv_closed   — clean TCP FIN from ESP32 mid-frame
+ *            [STREAM] recv_error    — BBB-side transport error
+ *            [STREAM] write_failed  — fwrite to ffmpeg stdin failed (in
+ *                                     ffmpeg_thread, not here)
+ *            [STREAM] disconnect    — connection fully torn down
  *
  * \param arg  Heap-allocated conn_state_t (this function frees it).
  * \return     NULL always.
@@ -496,16 +535,16 @@ static void *conn_thread(void *arg)
       setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &keepcnt,   sizeof(keepcnt));
    }
 
-   log_msg("Connection from %s", cs->peer_ip);
-
    /* --- 1. Read 1-byte device_id ------------------------------------ */
    if (recv_all(fd, &cs->device_id, 1) < 0)
    {
-      log_msg("device_id recv failed from %s: %s",
-              cs->peer_ip, strerror(errno));
+      log_msg("[STREAM] recv_error ip=%s errno=%d reason=device_id_recv_failed",
+              cs->peer_ip, errno);
       goto cleanup;
    }
-   log_msg("%s: device_id=%u", cs->peer_ip, (unsigned)cs->device_id);
+
+   log_msg("[STREAM] connect device_id=%u ip=%s",
+           (unsigned)cs->device_id, cs->peer_ip);
 
    /* --- 2. Spawn ffmpeg --------------------------------------------- */
    snprintf(cmd, sizeof(cmd),
@@ -522,17 +561,19 @@ static void *conn_thread(void *arg)
    cs->ffmpeg = popen(cmd, "w");
    if (NULL == cs->ffmpeg)
    {
-      log_msg("popen ffmpeg failed for device_id=%u: %s",
-              (unsigned)cs->device_id, strerror(errno));
+      log_msg("[STREAM] ffmpeg_failed device_id=%u reason=popen errno=%d",
+              (unsigned)cs->device_id, errno);
       goto cleanup;
    }
-   log_msg("ffmpeg started → %s%u", RTSP_BASE, (unsigned)cs->device_id);
+
+   log_msg("[STREAM] ffmpeg_start device_id=%u url=%s%u",
+           (unsigned)cs->device_id, RTSP_BASE, (unsigned)cs->device_id);
 
    /* --- 3. Spawn ffmpeg consumer thread ----------------------------- */
    if (pthread_create(&ffmpeg_tid, NULL, ffmpeg_thread, cs) != 0)
    {
-      log_msg("%s: pthread_create ffmpeg_thread failed: %s",
-              cs->peer_ip, strerror(errno));
+      log_msg("[STREAM] ffmpeg_failed device_id=%u reason=pthread_create errno=%d",
+              (unsigned)cs->device_id, errno);
       goto cleanup;
    }
    ffmpeg_tid_valid = 1;
@@ -547,8 +588,17 @@ static void *conn_thread(void *arg)
       /* 4-byte big-endian frame length */
       {
          int rc = recv_all(fd, hdr, 4);
-         if (-2 == rc) { break; }   /* clean FIN — ESP32 stopped stream   */
-         if (rc  < 0)  { break; }   /* transport error                    */
+         if (-2 == rc)
+         {
+            /* Clean FIN — ESP32 ended the stream normally */
+            break;
+         }
+         if (rc < 0)
+         {
+            log_msg("[STREAM] recv_error ip=%s errno=%d",
+                    cs->peer_ip, errno);
+            break;
+         }
       }
 
       frame_len = ((uint32_t)hdr[0] << 24) |
@@ -558,7 +608,7 @@ static void *conn_thread(void *arg)
 
       if (0u == frame_len || frame_len > MAX_FRAME_BYTES)
       {
-         log_msg("%s: bad frame_len=%u — dropping connection",
+         log_msg("[STREAM] decode_failed ip=%s reason=bad_len len=%u",
                  cs->peer_ip, frame_len);
          break;
       }
@@ -570,7 +620,8 @@ static void *conn_thread(void *arg)
          frame_buf = malloc(frame_len);
          if (NULL == frame_buf)
          {
-            log_msg("%s: malloc %u bytes failed", cs->peer_ip, frame_len);
+            log_msg("[STREAM] decode_failed ip=%s reason=malloc_failed bytes=%u",
+                    cs->peer_ip, frame_len);
             break;
          }
          frame_cap = frame_len;
@@ -580,13 +631,14 @@ static void *conn_thread(void *arg)
          int rc = recv_all(fd, frame_buf, frame_len);
          if (-2 == rc)
          {
-            log_msg("%s: connection closed mid-frame (frame incomplete)",
+            log_msg("[STREAM] recv_closed ip=%s",
                     cs->peer_ip);
             break;
          }
          if (rc < 0)
          {
-            log_msg("%s: JPEG recv truncated (transport error)", cs->peer_ip);
+            log_msg("[STREAM] recv_error ip=%s errno=%d",
+                    cs->peer_ip, errno);
             break;
          }
       }
@@ -597,11 +649,14 @@ static void *conn_thread(void *arg)
       slot_buf = malloc(frame_len);
       if (NULL == slot_buf)
       {
-         log_msg("%s: malloc queue slot %u bytes failed",
+         log_msg("[STREAM] decode_failed ip=%s reason=malloc_failed bytes=%u",
                  cs->peer_ip, frame_len);
          break;
       }
       memcpy(slot_buf, frame_buf, frame_len);
+
+      log_msg("[STREAM] rx_frame device_id=%u bytes=%u",
+              (unsigned)cs->device_id, frame_len);
 
       fq_push(&cs->queue, slot_buf, frame_len);
    }
@@ -615,8 +670,9 @@ cleanup:
    free(frame_buf);
    if (cs->ffmpeg) { pclose(cs->ffmpeg); }
    close(fd);
-   log_msg("%s: device_id=%u stream ended",
-           cs->peer_ip, (unsigned)cs->device_id);
+
+   log_msg("[STREAM] disconnect device_id=%u ip=%s",
+           (unsigned)cs->device_id, cs->peer_ip);
 
    fq_destroy(&cs->queue);
    free(cs);

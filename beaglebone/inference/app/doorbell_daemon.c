@@ -34,15 +34,24 @@
  *          to SharedSensorData or SensorData.
  *
  * \note    event_id tracing (2026-06-15):
- *          All log lines that carry an event_id now use the shared
+ *          All log lines that carry an event_id use the shared
  *          EVENT_ID_FMT/EVENT_ID_ARG macros from doorbell_result_shm.h,
  *          giving a single canonical %08lx%08lx representation across
- *          this daemon and uart_controller's data_controller.log. A new
- *          "[INFERENCE] -> [SHM] publish ..." line is emitted alongside
- *          the existing "Published doorbell result ..." line so the full
- *          lifecycle of one event can be traced with:
- *              grep <event_id_hex> /var/log/doorbell_daemon.log \
- *                                  /var/log/data_controller.log
+ *          this daemon and uart_controller's data_controller.log.
+ *
+ *          Logging contract (commit 1, 2026-06-15):
+ *          Internal lifecycle events use a flat [DOORBELL] tag:
+ *            [DOORBELL] rx          — header validated, JPEG received
+ *            [DOORBELL] infer_start — inference about to run
+ *            [DOORBELL] infer_done  — inference completed successfully
+ *            [DOORBELL] infer_failed — inference or save failed
+ *          Cross-process boundary uses a directional tag:
+ *            [DOORBELL] -> [SHM] publish       — result written to shm
+ *            [DOORBELL] -> [SHM] publish_failed — shm not available
+ *          This mirrors the consume-side contract in doorbell_result_reader.c
+ *          ([SHM] -> [CONTROLLER]) and uart_controller.c
+ *          ([CONTROLLER] -> [UART]), making the full pipeline traceable
+ *          with a single grep <event_id_hex> across all daemon logs.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -176,7 +185,11 @@ static int result_shm_init(void)
  *
  * \details Writes payload fields, issues a memory barrier, then publishes
  *          by setting event_id last. See doorbell_result_shm.h for the
- *          publish/consume contract. No-op if result_shm_init() failed.
+ *          publish/consume contract. Emits exactly one log line at the
+ *          cross-process boundary: "[DOORBELL] -> [SHM] publish ...".
+ *          If the segment is unavailable, emits "[DOORBELL] -> [SHM]
+ *          publish_failed ..." instead. Callers must not duplicate either
+ *          line — this is the single log point for the shm handoff.
  *
  * \param event_id   Correlation key from cam_header_t (non-zero).
  * \param device_id  Doorbell cam ID (0-3).
@@ -191,7 +204,12 @@ static void result_shm_publish(uint64_t event_id, uint8_t device_id,
                                 uint8_t person, uint8_t conf_pct,
                                 const char *asset)
 {
-   if (NULL == g_result) { return; }
+   if (NULL == g_result)
+   {
+      log_msg("[DOORBELL] -> [SHM] publish_failed event_id=" EVENT_ID_FMT,
+              EVENT_ID_ARG(event_id));
+      return;
+   }
 
    g_result->device_id = device_id;
    g_result->person    = person;
@@ -203,7 +221,7 @@ static void result_shm_publish(uint64_t event_id, uint8_t device_id,
 
    g_result->event_id = event_id;
 
-   log_msg("Published doorbell result event_id=" EVENT_ID_FMT
+   log_msg("[DOORBELL] -> [SHM] publish event_id=" EVENT_ID_FMT
            " device_id=%d person=%d conf=%d asset=%s",
            EVENT_ID_ARG(event_id),
            device_id, person, conf_pct, asset);
@@ -269,6 +287,14 @@ static void tcp_server_init(void)
  * \details Reads all complete header+JPEG frames from fd until connection
  *          closes or an error occurs. Each frame runs inference, saves
  *          to DOORBELL_DIR, and publishes the result to /doorbell_result.
+ *
+ *          Logging contract (flat [DOORBELL] tags for intra-process stages,
+ *          directional [DOORBELL] -> [SHM] tag for the publish boundary;
+ *          result_shm_publish() owns the boundary log — do not duplicate):
+ *            [DOORBELL] rx          — after header+JPEG validated and received
+ *            [DOORBELL] infer_start — immediately before inference_worker_run()
+ *            [DOORBELL] infer_done  — after successful inference + save
+ *            [DOORBELL] infer_failed — on JPEG recv truncation or malloc failure
  *
  * \param client_fd  Accepted client socket fd.
  * \param client_ip  Client IP string for logging.
@@ -339,14 +365,13 @@ static void handle_connection(int client_fd, const char *client_ip)
          break;
       }
 
-      log_msg("Header: device_id=%d event_id=" EVENT_ID_FMT " jpeg_size=%u",
-              hdr.device_id, EVENT_ID_ARG(hdr.event_id), hdr.jpeg_size);
-
       /* Receive JPEG payload */
       jpeg = malloc(hdr.jpeg_size);
       if (NULL == jpeg)
       {
-         log_msg("ERROR: malloc %u bytes", hdr.jpeg_size);
+         log_msg("[DOORBELL] infer_failed event_id=" EVENT_ID_FMT
+                 " reason=malloc_failed",
+                 EVENT_ID_ARG(hdr.event_id));
          break;
       }
 
@@ -357,8 +382,9 @@ static void handle_connection(int client_fd, const char *client_ip)
                   hdr.jpeg_size - received, 0);
          if (n <= 0)
          {
-            log_msg("JPEG recv truncated from %s event_id=" EVENT_ID_FMT,
-                    client_ip, EVENT_ID_ARG(hdr.event_id));
+            log_msg("[DOORBELL] infer_failed event_id=" EVENT_ID_FMT
+                    " reason=jpeg_recv_truncated",
+                    EVENT_ID_ARG(hdr.event_id));
             free(jpeg);
             jpeg = NULL;
             break;
@@ -368,15 +394,17 @@ static void handle_connection(int client_fd, const char *client_ip)
 
       if (NULL == jpeg) { break; }
 
-      log_msg("Received JPEG %zu bytes device_id=%d event_id=" EVENT_ID_FMT,
-              received, hdr.device_id, EVENT_ID_ARG(hdr.event_id));
+      log_msg("[DOORBELL] rx event_id=" EVENT_ID_FMT
+              " device_id=%d jpeg_bytes=%zu",
+              EVENT_ID_ARG(hdr.event_id), hdr.device_id, received);
 
       /* Run inference via shared worker */
       detected = 0;
       conf     = 0.0f;
+      log_msg("[DOORBELL] infer_start event_id=" EVENT_ID_FMT,
+              EVENT_ID_ARG(hdr.event_id));
+
       inference_worker_run(jpeg, received, &detected, &conf);
-      log_msg("Result: person=%d confidence=%.2f device_id=%d event_id=" EVENT_ID_FMT,
-              detected, conf, hdr.device_id, EVENT_ID_ARG(hdr.event_id));
 
       /* Build tag: dev<N>_<event_id_hex> */
       snprintf(event_str, sizeof(event_str), EVENT_ID_FMT,
@@ -393,13 +421,15 @@ static void handle_connection(int client_fd, const char *client_ip)
 
       conf_pct = (uint8_t)(conf * 100.0f + 0.5f);
 
-      result_shm_publish(hdr.event_id, hdr.device_id,
-                          (uint8_t)detected, conf_pct, ts_str);
-
-      log_msg("[INFERENCE] -> [SHM] publish event_id=" EVENT_ID_FMT
+      log_msg("[DOORBELL] infer_done event_id=" EVENT_ID_FMT
               " device_id=%d person=%d conf=%d asset=%s",
               EVENT_ID_ARG(hdr.event_id),
               hdr.device_id, detected, conf_pct, ts_str);
+
+      /* Cross-process boundary — result_shm_publish() emits the single
+       * canonical [DOORBELL] -> [SHM] publish log line. Do not log here. */
+      result_shm_publish(hdr.event_id, hdr.device_id,
+                          (uint8_t)detected, conf_pct, ts_str);
 
       free(jpeg);
       jpeg = NULL;

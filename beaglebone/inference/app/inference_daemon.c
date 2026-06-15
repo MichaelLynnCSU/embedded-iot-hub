@@ -43,7 +43,7 @@
  *             the "smooth low pixel" appearance reported in field clips.
  *
  *          2) FPS mismatch. FRAME_FPS was set to 2, but the ESP32 sends
- *             frames every CAM_CLIP_FRAME_MS = ~530ms (~1.9 fps actual).
+ *             frames every CAM_CLIP_FRAME_MS = ~530ms (~1.9fps actual).
  *             A small mismatch, but the correct value derived from the
  *             actual ESP32 config is 2 fps (floor of 1000/530), so
  *             FRAME_FPS stays at 2 — it is now explicitly documented as
@@ -61,6 +61,34 @@
  *          If FRAME_FPS ever needs to change, derive it as:
  *              FRAME_FPS = 1000 / CAM_CLIP_FRAME_MS   (from main.c)
  *          and update the constant here to match.
+ *
+ * \note    Logging contract (commit 1, 2026-06-15):
+ *          No event_id in this daemon (PIR cam uses legacy 4-byte header
+ *          with no correlation key). No cross-process shm boundaries.
+ *          Flat [INDOOR] tags are used for all lifecycle events:
+ *
+ *          Transport layer (receive_clip):
+ *            [INDOOR] clip_start               — connection accepted, clip beginning
+ *            [INDOOR] rx frame=%d bytes=%u     — single frame received
+ *            [INDOOR] recv_failed frame=%d     — recv truncated (transport error)
+ *            [INDOOR] clip_done frames=%d duration_ms=%d
+ *                                              — connection closed by ESP32
+ *
+ *          Pipeline layer (process_clip):
+ *            [INDOOR] infer_start frame=%d     — inference about to run
+ *            [INDOOR] infer_done  frame=%d person=%d conf=%.2f
+ *            [INDOOR] infer_skip  frame=%d reason=interval_gate every_n=%d
+ *            [INDOOR] clip_saved  path=%s      — ffmpeg mux succeeded
+ *            [INDOOR] clip_failed path=%s      — ffmpeg mux failed
+ *            [INDOOR] db_insert   path=%s      — DB record inserted
+ *
+ *          This mirrors the DOORBELL daemon contract structure:
+ *            clip_start  ↔ doorbell rx
+ *            infer_start ↔ doorbell infer_start
+ *            infer_done  ↔ doorbell infer_done
+ *            clip_saved  ↔ doorbell [DOORBELL] -> [SHM] publish
+ *          Without event_id the lifecycle is still grep-deterministic
+ *          per connection by timestamp and frame sequence.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -208,9 +236,13 @@ static void db_insert_clip(const char *clip_path,
    sqlite3_bind_int   (stmt, 6, duration_ms);
 
    if (SQLITE_DONE != sqlite3_step(stmt))
+   {
       log_msg("ERROR: db insert failed: %s", sqlite3_errmsg(db));
+   }
    else
-      log_msg("DB record inserted for %s", clip_path);
+   {
+      log_msg("[INDOOR] db_insert path=%s", clip_path);
+   }
 
    sqlite3_finalize(stmt);
    sqlite3_close(db);
@@ -220,6 +252,10 @@ static void db_insert_clip(const char *clip_path,
 
 /**
  * \brief Accept a connection and receive all frames until connection closes.
+ *
+ * \details Logs [INDOOR] clip_start on accept, [INDOOR] rx on each frame
+ *          received, [INDOOR] recv_failed on transport error, and
+ *          [INDOOR] clip_done on clean connection close.
  *
  * \param out_frames      Output: array of frame buffers (caller frees each).
  * \param out_lens        Output: array of frame lengths.
@@ -259,7 +295,8 @@ static int receive_clip(uint8_t ***out_frames,
 
    *out_start_ts = time(NULL);
    clock_gettime(CLOCK_MONOTONIC, &t0);
-   log_msg("ESP32-CAM connected — receiving clip");
+
+   log_msg("[INDOOR] clip_start");
 
    int keepalive = 1, keepidle = 30, keepintvl = 5, keepcnt = 3;
    setsockopt(g_client_fd, SOL_SOCKET,  SO_KEEPALIVE, &keepalive, sizeof(keepalive));
@@ -276,13 +313,23 @@ static int receive_clip(uint8_t ***out_frames,
       size_t   received;
 
       n = recv(g_client_fd, hdr, JPEG_HDR_SIZE, MSG_WAITALL);
-      if (n == 0) { log_msg("Clip complete — connection closed by ESP32"); break; }
-      if (n != JPEG_HDR_SIZE) { log_msg("Header recv error: %s", strerror(errno)); break; }
+      if (n == 0)
+      {
+         /* Clean close by ESP32 — normal end of clip */
+         break;
+      }
+      if (n != JPEG_HDR_SIZE)
+      {
+         log_msg("[INDOOR] recv_failed frame=%d reason=header_truncated",
+                 n_frames);
+         break;
+      }
 
       jpeg_len = infer_unpack_jpeg_len(hdr);
       if (!infer_jpeg_len_valid(jpeg_len))
       {
-         log_msg("Bad jpeg_len %u — dropping connection", jpeg_len);
+         log_msg("[INDOOR] recv_failed frame=%d reason=bad_jpeg_len len=%u",
+                 n_frames, jpeg_len);
          break;
       }
 
@@ -303,7 +350,12 @@ static int receive_clip(uint8_t ***out_frames,
       }
 
       buf = malloc(jpeg_len);
-      if (NULL == buf) { log_msg("ERROR: malloc frame"); break; }
+      if (NULL == buf)
+      {
+         log_msg("[INDOOR] recv_failed frame=%d reason=malloc_failed bytes=%u",
+                 n_frames, jpeg_len);
+         break;
+      }
 
       received = 0;
       while (received < jpeg_len)
@@ -311,7 +363,8 @@ static int receive_clip(uint8_t ***out_frames,
          n = recv(g_client_fd, buf + received, jpeg_len - received, 0);
          if (n <= 0)
          {
-            log_msg("Frame recv truncated at frame %d", n_frames);
+            log_msg("[INDOOR] recv_failed frame=%d reason=payload_truncated",
+                    n_frames);
             free(buf); buf = NULL; break;
          }
          received += (size_t)n;
@@ -321,7 +374,8 @@ static int receive_clip(uint8_t ***out_frames,
       frames[n_frames] = buf;
       lens[n_frames]   = jpeg_len;
       n_frames++;
-      log_msg("Frame %d received (%u bytes)", n_frames, jpeg_len);
+
+      log_msg("[INDOOR] rx frame=%d bytes=%u", n_frames, jpeg_len);
    }
 
    clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -330,6 +384,9 @@ static int receive_clip(uint8_t ***out_frames,
 
    close(g_client_fd);
    g_client_fd = -1;
+
+   log_msg("[INDOOR] clip_done frames=%d duration_ms=%d",
+           n_frames, *out_duration_ms);
 
    *out_frames   = frames;
    *out_lens     = lens;
@@ -341,6 +398,12 @@ static int receive_clip(uint8_t ***out_frames,
 
 /**
  * \brief Save frames, run inference, encode .avi via ffmpeg, insert DB record.
+ *
+ * \details Logs [INDOOR] infer_start before each inference call,
+ *          [INDOOR] infer_done after a result, [INDOOR] infer_skip for
+ *          gated frames. Logs [INDOOR] clip_saved or [INDOOR] clip_failed
+ *          after ffmpeg, and [INDOOR] db_insert after DB write (via
+ *          db_insert_clip).
  *
  * \param frames      Array of JPEG frame buffers.
  * \param lens        Array of frame lengths.
@@ -412,15 +475,19 @@ static void process_clip(uint8_t **frames,
       /* Run inference on every Nth frame */
       if (i % infer_every_n == 0)
       {
+         log_msg("[INDOOR] infer_start frame=%d", i + 1);
          inference_worker_run(frames[i], lens[i], &detected, &conf);
-         log_msg("Frame %d: person=%d confidence=%.2f", i + 1, detected, conf);
+         log_msg("[INDOOR] infer_done frame=%d person=%d conf=%.2f",
+                 i + 1, detected, conf);
          if (detected && conf > best_conf) { best_detected = 1; best_conf = conf; }
       }
       else
       {
-         log_msg("Frame %d: skipped inference (every_n=%d)", i + 1, infer_every_n);
+         log_msg("[INDOOR] infer_skip frame=%d reason=interval_gate every_n=%d",
+                 i + 1, infer_every_n);
       }
    }
+
    /* Encode .avi via ffmpeg.
     *
     * -c:v copy: mux source JPEGs directly into the AVI container with no
@@ -431,6 +498,7 @@ static void process_clip(uint8_t **frames,
     *
     * -framerate %d: set to FRAME_FPS (2), matching the ~530ms inter-frame
     * interval from CAM_CLIP_FRAME_MS on the ESP32 side. */
+   snprintf(avi_path, sizeof(avi_path), "%s/%s.avi", CLIPS_DIR, ts_str);
    snprintf(cmd, sizeof(cmd),
             "ffmpeg -y -framerate %d -i %s/frame_%%03d.jpg "
             "-c:v copy %s 2>/dev/null",
@@ -438,11 +506,11 @@ static void process_clip(uint8_t **frames,
 
    if (system(cmd) != 0)
    {
-      log_msg("ERROR: ffmpeg failed for clip %s", avi_path);
+      log_msg("[INDOOR] clip_failed path=%s", avi_path);
    }
    else
    {
-      log_msg("Clip saved: %s", avi_path);
+      log_msg("[INDOOR] clip_saved path=%s", avi_path);
       db_insert_clip(avi_path, start_ts, n_frames,
                      best_detected, best_conf, duration_ms);
    }
