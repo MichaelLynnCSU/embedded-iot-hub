@@ -40,6 +40,7 @@
 #include "uart_manager.h"
 #include "vroom_bus.h"
 #include "trinity_log.h"
+#include "event_aggregator.h"
 
 #define UART_BAUD_RATE          115200   /**< STM32 UART baud rate             */
 #define STATS_INTERVAL_MS       60000u   /**< heap/task stats interval          */
@@ -206,6 +207,8 @@ void app_main(void)
    tcp_manager_init();
 
    create_tasks();
+
+   event_aggregator_start();
 
    (void)xEventGroupSetBits(g_system_eg, ALL_TASKS_CREATED_BIT);
    ESP_LOGI(TAG, "System ready - tasks starting");
