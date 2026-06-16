@@ -9,6 +9,17 @@
  *          Knows nothing about UART or JSON parsing.
  *
  *          Split from sensor_server.c (2026-05-10).
+ *
+ *          Log taxonomy (2026-06-15):
+ *          All log lines use the [PIPE] domain prefix with frame_seq=<n>
+ *          as the correlation key (passed in by the caller; assigned and
+ *          owned by [PARSE]). [PIPE] never reads or mutates timestamp.
+ *
+ *          Events emitted:
+ *            [PIPE] connect      frame_seq=<n>  -- pipe opened successfully
+ *            [PIPE] write        frame_seq=<n>  -- SensorData written to pipe
+ *            [PIPE] write_failed frame_seq=<n>  -- write short/error, will reconnect
+ *            [PIPE] reconnect    frame_seq=<n>  -- pipe was closed, retry attempted
  ******************************************************************************/
 
 #include <stdio.h>
@@ -31,6 +42,10 @@ static time_t g_last_pipe_retry = 0;  /**< last retry timestamp */
  *
  * \return void
  *
+ * \details Emits [PIPE] connect on success. frame_seq is unknown at
+ *          initial open time (called before any frame arrives), so 0
+ *          is used as a sentinel meaning "pre-frame connection attempt".
+ *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void pipe_writer_try_open(void)
@@ -38,7 +53,7 @@ void pipe_writer_try_open(void)
    g_pipe_fd = open(SENSOR_PIPE, O_WRONLY | O_NONBLOCK);
    if (0 <= g_pipe_fd)
    {
-      log_msg("Connected to controller pipe");
+      log_msg("[PIPE] connect frame_seq=0");
    }
 }
 
@@ -63,6 +78,12 @@ void pipe_writer_close(void)
  *
  * \return void
  *
+ * \details Emits [PIPE] reconnect frame_seq=<n> when a retry open
+ *          succeeds mid-stream. frame_seq=0 is used when called before
+ *          any frame arrives (startup path); callers pass the current
+ *          frame_seq so reconnects are traceable to the frame that
+ *          triggered them.
+ *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void pipe_ensure_connected(void)
@@ -81,9 +102,13 @@ void pipe_ensure_connected(void)
    }
 
    g_last_pipe_retry = now;
-   pipe_writer_try_open();
 
-   if (0 > g_pipe_fd)
+   g_pipe_fd = open(SENSOR_PIPE, O_WRONLY | O_NONBLOCK);
+   if (0 <= g_pipe_fd)
+   {
+      log_msg("[PIPE] reconnect frame_seq=0");
+   }
+   else
    {
       log_msg("Controller pipe not available, retrying in %ds",
               PIPE_RETRY_SEC);
@@ -93,16 +118,20 @@ void pipe_ensure_connected(void)
 /******************************************************************************
  * \brief Write a SensorData struct to the named pipe.
  *
- * \param p_data - Pointer to SensorData struct to write.
+ * \param p_data   - Pointer to SensorData struct to write.
+ * \param frame_seq - Monotonic frame counter assigned by [PARSE] at
+ *                    decode_start; threaded here for log correlation.
  *
  * \return void
  *
- * \details Closes and resets g_pipe_fd on write failure so the next
+ * \details Emits [PIPE] write on success, [PIPE] write_failed on error.
+ *          Closes and resets g_pipe_fd on write failure so the next
  *          call to pipe_ensure_connected() will attempt reconnect.
+ *          Never reads or mutates p_data->timestamp.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
-void pipe_write(struct SensorData *p_data)
+void pipe_write(struct SensorData *p_data, uint32_t frame_seq)
 {
    ssize_t w = 0; /**< bytes written */
 
@@ -114,12 +143,12 @@ void pipe_write(struct SensorData *p_data)
    w = write(g_pipe_fd, p_data, sizeof(*p_data));
    if (w != (ssize_t)sizeof(*p_data))
    {
-      log_msg("Pipe write failed (%zd), will reconnect", w);
+      log_msg("[PIPE] write_failed frame_seq=%u bytes=%zd", frame_seq, w);
       close(g_pipe_fd);
       g_pipe_fd = -1;
    }
    else
    {
-      log_msg("Sent to controller");
+      log_msg("[PIPE] write frame_seq=%u", frame_seq);
    }
 }

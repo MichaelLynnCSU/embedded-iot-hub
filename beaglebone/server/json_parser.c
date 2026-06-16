@@ -32,6 +32,19 @@
  *          serialization). Initializes all slots to AGE_UNKNOWN/offline
  *          before parse. Per-cam log block added after Reed log.
  *
+ *          Log taxonomy (2026-06-15):
+ *          All log lines in process_json() use the [PARSE] domain prefix
+ *          with frame_seq=<n> as the correlation key. frame_seq is a
+ *          monotonic counter incremented at decode_start and threaded
+ *          through every subsequent [PARSE] line for that frame.
+ *          timestamp is unconditionally assigned here (system time) and
+ *          is never read or mutated by [UART] or [PIPE].
+ *
+ *          Events emitted:
+ *            [PARSE] decode_start  frame_seq=<n>  -- entry, before tokener_parse
+ *            [PARSE] decode_ok     frame_seq=<n>  -- parse succeeded, data populated
+ *            [PARSE] decode_failed frame_seq=<n>  -- json_tokener_parse returned NULL
+ *
  *          Dependency direction:
  *            json_parser.c -> pipe_writer.c -> named pipe -> controller
  ******************************************************************************/
@@ -46,6 +59,11 @@
 #include "pipe_writer.h"
 #include "sensor_types.h"
 #include "server_log.h"
+
+/** Monotonic frame counter. Assigned at decode_start, threaded through all
+ *  [PARSE] and [PIPE] log lines for the same frame. Never wraps in practice
+ *  (uint32 at one frame per second overflows in ~136 years). */
+static uint32_t g_frame_seq = 0;
 
 /******************************************************************************
  * \brief Extract age value from JSON object with range clamping.
@@ -447,18 +465,30 @@ static void parse_rooms(struct json_object *p_rooms_arr,
  * \param p_json_body - Null-terminated JSON string to parse.
  *                      Must point into a stable buffer (g_process[]) --
  *                      never pass a pointer into the active UART buffer.
+ *
+ * \details frame_seq is incremented unconditionally at entry (decode_start)
+ *          and threaded through all subsequent [PARSE] log lines for this
+ *          frame. timestamp is assigned here as system time and is never
+ *          read or mutated by [UART] or [PIPE].
  ******************************************************************************/
 void process_json(const char *p_json_body)
 {
-   struct json_object *p_root = NULL;
-   struct json_object *p_obj  = NULL;
+   struct json_object *p_root    = NULL;
+   struct json_object *p_obj     = NULL;
    struct SensorData   data;
-   int                 i      = 0;
+   int                 i         = 0;
+   uint32_t            frame_seq = 0; /**< local copy of seq for this frame */
+
+   /* Assign seq before any early return so decode_failed carries the same
+    * seq as decode_start even when parse fails immediately. */
+   frame_seq = ++g_frame_seq;
+
+   log_msg("[PARSE] decode_start frame_seq=%u", frame_seq);
 
    p_root = json_tokener_parse(p_json_body);
    if (NULL == p_root)
    {
-      log_msg("Invalid JSON");
+      log_msg("[PARSE] decode_failed frame_seq=%u", frame_seq);
       return;
    }
 
@@ -466,6 +496,8 @@ void process_json(const char *p_json_body)
    log_msg("RAW: %s", p_json_body);
 
    (void)memset(&data, 0, sizeof(data));
+
+   /* timestamp is owned here; [UART] and [PIPE] never touch it. */
    data.timestamp  = time(NULL);
    data.age_pir    = AGE_UNKNOWN;
    data.age_lgt    = AGE_UNKNOWN;
@@ -608,34 +640,42 @@ void process_json(const char *p_json_body)
 
    json_object_put(p_root);
 
+   log_msg("[PARSE] decode_ok frame_seq=%u", frame_seq);
+
    pipe_ensure_connected();
-   pipe_write(&data);
+   pipe_write(&data, frame_seq);
 
    /* ---- Summary log ---- */
-   log_msg("Parsed avg_temp=%.2f motion=%u light=%d lock=%d "
-           "pirs=%d pir_occ=%d motor_online=%d doorbell=%d dev=%d",
+   log_msg("[PARSE] avg_temp=%.2f motion=%u light=%d lock=%d "
+           "pirs=%d pir_occ=%d motor_online=%d doorbell=%d dev=%d "
+           "frame_seq=%u",
            data.avg_temp, data.motion_count,
            data.light_state, data.lock_state,
-           data.doorbell_pressed, data.doorbell_device_id,
            data.pir_count, data.pir_occupied,
-           data.motor_online);
+           data.motor_online,
+           data.doorbell_pressed, data.doorbell_device_id,
+           frame_seq);
 
-   log_msg("Ages pir=%d lgt=%d lck=%d | Batt pir=%d%% lck=%d%% mtr=%d%%",
+   log_msg("[PARSE] ages pir=%d lgt=%d lck=%d batt pir=%d%% lck=%d%% mtr=%d%% "
+           "frame_seq=%u",
            data.age_pir, data.age_lgt, data.age_lck,
-           data.batt_pir, data.batt_lck, data.batt_motor);
+           data.batt_pir, data.batt_lck, data.batt_motor,
+           frame_seq);
 
    /* Per-slot PIR — matches ESP32 drain_queues format */
    for (i = 0; i < MAX_PIRS; i++)
    {
       if (data.pir_slots[i].active)
       {
-         log_msg("  PIR slot=%d count=%u batt=%d age=%d offline=%d occ=%d",
+         log_msg("[PARSE] PIR slot=%d count=%u batt=%d age=%d offline=%d occ=%d "
+                 "frame_seq=%u",
                  i + 1,
                  data.pir_slots[i].count,
                  data.pir_slots[i].batt,
                  data.pir_slots[i].age,
                  data.pir_slots[i].offline,
-                 data.pir_slots[i].occupied);
+                 data.pir_slots[i].occupied,
+                 frame_seq);
       }
    }
 
@@ -644,7 +684,8 @@ void process_json(const char *p_json_body)
    {
       if (data.reed_slots[i].active)
       {
-         log_msg("  Reed slot=%d (%s) state=%s batt=%d age=%d offline=%d gen=%u",
+         log_msg("[PARSE] Reed slot=%d (%s) state=%s batt=%d age=%d offline=%d gen=%u "
+                 "frame_seq=%u",
                  i + 1,
                  data.reed_slots[i].name,
                  (1 == data.reed_slots[i].state) ? "open"    :
@@ -652,34 +693,38 @@ void process_json(const char *p_json_body)
                  data.reed_slots[i].batt,
                  data.reed_slots[i].age,
                  data.reed_slots[i].offline,
-                 data.reed_slots[i].gen);
+                 data.reed_slots[i].gen,
+                 frame_seq);
       }
    }
 
    /* Per-cam doorbell liveness */
    for (i = 0; i < MAX_DOORBELL_CAMS; i++)
    {
-      log_msg("  Doorbell id=%d age_s=%d online=%d",
+      log_msg("[PARSE] Doorbell id=%d age_s=%d online=%d frame_seq=%u",
               i,
               data.doorbell_slots[i].age_s,
-              data.doorbell_slots[i].online);
+              data.doorbell_slots[i].online,
+              frame_seq);
    }
 
    for (i = 0; i < MAX_CAMS; i++)
    {
-      log_msg("  Cam slot=%d age_s=%d online=%d",
+      log_msg("[PARSE] Cam slot=%d age_s=%d online=%d frame_seq=%u",
               i,
               data.cam_slots[i].age_s,
-              data.cam_slots[i].online);
+              data.cam_slots[i].online,
+              frame_seq);
    }
 
    /* Per-room log */
    for (i = 0; i < data.room_count; i++)
    {
-      log_msg("  Room id=%d %s/%s = %s",
+      log_msg("[PARSE] Room id=%d %s/%s = %s frame_seq=%u",
               data.rooms[i].sensor_id,
               data.rooms[i].room_name,
               data.rooms[i].location,
-              data.rooms[i].state);
+              data.rooms[i].state,
+              frame_seq);
    }
 }

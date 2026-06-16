@@ -12,6 +12,7 @@
 #ifndef PIPE_WRITER_H
 #define PIPE_WRITER_H
 
+#include <stdint.h>
 #include "sensor_types.h"
 
 /******************************************************************************
@@ -42,6 +43,6 @@ void pipe_ensure_connected(void);
  *
  * \return void
  ******************************************************************************/
-void pipe_write(struct SensorData *p_data);
+void pipe_write(struct SensorData *p_data, uint32_t frame_seq);
 
 #endif /* PIPE_WRITER_H */

@@ -72,6 +72,12 @@
  *            - sensor_server.c -- main(), signal handler, log, wiring
  *          sensor_types.h holds shared wire format structs (SensorData,
  *          ReedSlotData). server_log.h exposes log_msg() to all modules.
+ *
+ * \note    Log taxonomy (2026-06-15):
+ *          sensor_server.c emits [SERVER] lines only for orchestration
+ *          events (start, shutdown). It never logs data-stage events;
+ *          those belong to [UART], [PARSE], and [PIPE] respectively.
+ *          See each module's file header for its event taxonomy.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -163,7 +169,7 @@ static void signal_handler(int sig)
 {
    (void)sig;
 
-   log_msg("Shutdown signal received");
+   log_msg("[SERVER] shutdown");
    g_running = 0;
 
    uart_io_close();
@@ -195,7 +201,7 @@ int main(void)
 
    log_init();
    log_msg("=========================================");
-   log_msg("Sensor Server Starting");
+   log_msg("[SERVER] start");
    log_msg("=========================================");
 
    (void)signal(SIGINT,  signal_handler);
@@ -225,6 +231,6 @@ int main(void)
       usleep(READ_SLEEP_US);
    }
 
-   log_msg("Server exiting");
+   log_msg("[SERVER] shutdown complete");
    return 0;
 }

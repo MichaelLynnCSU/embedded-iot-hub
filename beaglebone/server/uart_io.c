@@ -22,6 +22,17 @@
  *          - pipe IPC (pipe_writer.c)
  *          - global run flag or signal handling (sensor_server.c)
  *
+ *          Log taxonomy (2026-06-15):
+ *          All log lines use the [UART] domain prefix with bytes=<n>
+ *          as the correlation key. Timestamp and frame_seq are never
+ *          read or mutated here; those are [PARSE]'s responsibility.
+ *
+ *          Events emitted:
+ *            [UART] rx_frame        bytes=<n>  -- complete frame passed upstream
+ *            [UART] overflow        bytes=<n>  -- active buffer reset after overrun
+ *            [UART] frame_too_large bytes=<n>  -- frame exceeds out buf, discarded
+ *            [UART] disconnect      bytes=<n>  -- read returned 0 or error
+ *
  *          Pattern stack (four levels, each at a different abstraction):
  *
  *          Double buffer   g_active[] accumulates (producer side);
@@ -179,7 +190,9 @@ void uart_io_close(void)
  * \return void
  *
  * \details Appends up to READ_BUF_SIZE bytes per call. Resets active
- *          buffer on overflow and logs a warning.
+ *          buffer on overflow and emits [UART] overflow bytes=<n>.
+ *          Emits [UART] disconnect bytes=<n> when read returns <= 0
+ *          and bytes were buffered at the time (fd went silent mid-frame).
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -196,6 +209,12 @@ void uart_io_read(void)
    n = (int)read(g_uart_fd, tmp, sizeof(tmp) - 1);
    if (n <= 0)
    {
+      if (g_active_pos > 0)
+      {
+         /* Bytes were buffered when the fd went silent -- log how many
+          * were in flight so the disconnect is traceable. */
+         log_msg("[UART] disconnect bytes=%d", g_active_pos);
+      }
       return;
    }
 
@@ -203,7 +222,7 @@ void uart_io_read(void)
 
    if ((g_active_pos + n) >= BUFFER_SIZE)
    {
-      log_msg("Active buffer overflow, reset");
+      log_msg("[UART] overflow bytes=%d", g_active_pos + n);
       g_active_pos = 0;
       g_active[0]  = '\0';
       return;
@@ -223,8 +242,9 @@ void uart_io_read(void)
  * \return bool - true if a complete frame was found and copied into p_out.
  *
  * \details Finds frame boundaries without modifying g_active[]. Copies
- *          the frame into p_out (stable copy), then compacts g_active[]
- *          with memmove to preserve any bytes belonging to the next frame.
+ *          the frame into p_out (stable copy), emits [UART] rx_frame
+ *          bytes=<n>, then compacts g_active[] with memmove to preserve
+ *          any bytes belonging to the next frame.
  *          Call in a loop until false to drain back-to-back frames.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
@@ -248,7 +268,7 @@ bool uart_io_next_frame(char *p_out, int out_sz)
 
    if (frame_len >= out_sz)
    {
-      log_msg("Frame too large (%d bytes), discarding", frame_len);
+      log_msg("[UART] frame_too_large bytes=%d", frame_len);
       g_active_pos = 0;
       g_active[0]  = '\0';
       return false;
@@ -258,6 +278,8 @@ bool uart_io_next_frame(char *p_out, int out_sz)
     * memmove compacts g_active[], as p_start points into g_active[]. */
    (void)memcpy(p_out, p_start, frame_len);
    p_out[frame_len] = '\0';
+
+   log_msg("[UART] rx_frame bytes=%d", frame_len);
 
    /* Compact active buffer -- preserve bytes after the frame */
    if (tail_len > 0)
