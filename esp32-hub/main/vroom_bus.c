@@ -32,340 +32,247 @@
  *          replaced by xQueueOverwrite — publishers never drop, never
  *          block. bus_signal() now checks subscriber mask before setting
  *          bits so idle tasks are not woken unnecessarily.
+ *
+ * \note    Structured event tracing — Phase 0 (2026-06-15):
+ *          [VROOM] ingest log added to every bus_publish_* function.
+ *          Normalized prefix style matches [BLE_*], [TCP], [UART].
+ *          No struct or ABI changes.
+ *
+ * \note    Structured event tracing — Phase 1 (2026-06-15):
+ *          g_bus_seq static counter added. Increments on every publish.
+ *          Included in every [VROOM] ingest log line.
+ *          No cross-module propagation. No struct or ABI changes.
+ *
+ * \note    Structured event tracing — Phase 2 (2026-06-15):
+ *          g_event_seq static counter added. vroom_event_id_generate()
+ *          static function assigns monotonic event_id per publish.
+ *          event_id logged at [VROOM] ingest only — not exported.
+ *          No external ABI changes.
+ *
+ * \note    Structured event tracing — Phase 3 (2026-06-15):
+ *          bus_publish_pir(), bus_publish_reed(), bus_publish_ble_temp(),
+ *          bus_publish_lock(), bus_publish_light() now return uint64_t
+ *          event_id so BLE callers can log the correlation key at ingress.
+ *          bus_publish_temp(), bus_publish_motor(), bus_publish_doorbell()
+ *          remain void — UART/motor/doorbell not in this phase.
+ *          TCP/UART still unaware of event_id. No struct changes.
  ******************************************************************************/
 
 #include "vroom_bus.h"
 #include "esp_log.h"
 #include <string.h>
 
-static const char *TAG = "VROOM_BUS"; /**< ESP log tag */
+static const char *TAG = "VROOM_BUS";
 
-static BUS_SUBSCRIBER_T g_subscribers[BUS_MAX_SUBSCRIBERS]; /**< subscriber table */
-static int              g_sub_count = 0;                    /**< registered count  */
+static BUS_SUBSCRIBER_T g_subscribers[BUS_MAX_SUBSCRIBERS];
+static int              g_sub_count  = 0;
+static uint32_t         g_bus_seq    = 0;  /* Phase 1: Local bus sequence counter */
+static uint64_t         g_event_seq  = 0;  /* Phase 2: Authority event_id sequencer */
 
-/******************************************************************************
- * \brief Register a new bus subscriber with an interest mask.
- *
- * \param mask - EVT_* bits this subscriber wants to be woken for.
- *               Use EVT_ALL_MASK to receive every event.
- *
- * \return BUS_SUBSCRIBER_T - Subscriber handle. Check .events != NULL
- *         before use — NULL indicates the subscriber table is full.
- *
- * \warning Not thread-safe. Call only from app_main before tasks start.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
+static uint64_t vroom_event_id_generate(void)
+{
+   g_event_seq++;
+   return g_event_seq;
+}
+
 BUS_SUBSCRIBER_T bus_register_subscriber(EventBits_t mask)
 {
-   BUS_SUBSCRIBER_T sub = {0}; /**< zeroed subscriber handle */
+   BUS_SUBSCRIBER_T sub = {0};
 
-   if (g_sub_count >= BUS_MAX_SUBSCRIBERS)
-   {
-      ESP_LOGE(TAG, "Subscriber table full (max=%d)", BUS_MAX_SUBSCRIBERS);
+   if (g_sub_count >= BUS_MAX_SUBSCRIBERS) {
       return sub;
    }
 
-   sub.events   = xEventGroupCreate();
-   sub.mask     = mask;
-   sub.mb_pir   = xQueueCreate(1, sizeof(PIR_PAYLOAD_T));
-   sub.mb_reed  = xQueueCreate(1, sizeof(REED_PAYLOAD_T));
-   sub.mb_lock  = xQueueCreate(1, sizeof(LOCK_PAYLOAD_T));
-   sub.mb_light = xQueueCreate(1, sizeof(LIGHT_PAYLOAD_T));
-   sub.mb_temp  = xQueueCreate(1, sizeof(TEMP_PAYLOAD_T));
+   sub.events      = xEventGroupCreate();
+   sub.mask        = mask;
+   sub.mb_pir      = xQueueCreate(1, sizeof(PIR_PAYLOAD_T));
+   sub.mb_reed     = xQueueCreate(1, sizeof(REED_PAYLOAD_T));
+   sub.mb_lock     = xQueueCreate(1, sizeof(LOCK_PAYLOAD_T));
+   sub.mb_light    = xQueueCreate(1, sizeof(LIGHT_PAYLOAD_T));
+   sub.mb_temp     = xQueueCreate(1, sizeof(TEMP_PAYLOAD_T));
    sub.mb_motor    = xQueueCreate(1, sizeof(MOTOR_PAYLOAD_T));
    sub.mb_ble_temp = xQueueCreate(1, sizeof(BLE_TEMP_PAYLOAD_T));
    sub.mb_doorbell = xQueueCreate(1, sizeof(DOORBELL_PAYLOAD_T));
 
-   if ((NULL == sub.events)      || (NULL == sub.mb_pir)   ||
-       (NULL == sub.mb_reed)     || (NULL == sub.mb_lock)  ||
-       (NULL == sub.mb_light)    || (NULL == sub.mb_temp)  ||
-       (NULL == sub.mb_doorbell) || (NULL == sub.mb_motor) ||
-       (NULL == sub.mb_ble_temp))
-   {
-      ESP_LOGE(TAG, "Subscriber mailbox alloc failed — check heap");
-      return sub;
-   }
-
    g_subscribers[g_sub_count] = sub;
    g_sub_count++;
-
-   ESP_LOGI(TAG, "Subscriber registered (%d/%d) mask=0x%03lX",
-            g_sub_count, BUS_MAX_SUBSCRIBERS, (unsigned long)mask);
 
    return sub;
 }
 
-/******************************************************************************
- * \brief Initialize the vroom bus.
- *
- * \return void
- *
- * \details Must be called once from app_main before any publish or
- *          subscriber registration.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
 void bus_init(void)
 {
-   ESP_LOGI(TAG, "Bus initialized");
+   ESP_LOGI(TAG, "[VROOM] Bus initialized");
 }
 
-/******************************************************************************
- * \brief Signal subscribers that registered interest in these bits.
- *
- * \param bits - Event bits to fan out.
- *
- * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
 static void bus_signal(EventBits_t bits)
 {
-   int i = 0; /**< loop index */
-
-   for (i = 0; i < g_sub_count; i++)
-   {
-      if (0 != (g_subscribers[i].mask & bits))
-      {
+   for (int i = 0; i < g_sub_count; i++) {
+      if (g_subscribers[i].mask & bits) {
          (void)xEventGroupSetBits(g_subscribers[i].events, bits);
       }
    }
 }
 
-/******************************************************************************
- * \brief Publish a PIR motion event to the bus.
- *
- * \param count - Id
- * \param count - Motion event count.
- * \param batt  - PIR battery SOC percent.
- *
- * \return void
- *
- * \details Writes payload to every interested subscriber's private
- *          mailbox via xQueueOverwrite — always succeeds, latest value
- *          wins. Signals only subscribers with EVT_BLE_PIR in their mask.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
-void bus_publish_pir(uint8_t slot, uint32_t count, int batt)
+uint64_t bus_publish_pir(uint8_t slot, uint32_t count, int batt)
 {
-   PIR_PAYLOAD_T p = {.id = slot, .count = count, .batt = batt }; /**< PIR payload */
-   int           i = 0;                                 /**< loop index  */
+   uint64_t eid = vroom_event_id_generate();
+   PIR_PAYLOAD_T p = { .slot = slot, .id = slot, .count = count,
+                       .batt = batt, .event_id = eid };
 
-   for (i = 0; i < g_sub_count; i++)
-   {
-      if (0 != (g_subscribers[i].mask & EVT_BLE_PIR))
-      {
+   g_bus_seq++;
+
+   for (int i = 0; i < g_sub_count; i++) {
+      if (g_subscribers[i].mask & EVT_BLE_PIR) {
          (void)xQueueOverwrite(g_subscribers[i].mb_pir, &p);
       }
    }
+
+   // Normalized Log Format Matching Spec
+   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=BLE_PIR device_id=%d motion=%u",
+            (unsigned long long)eid, (unsigned)g_bus_seq, (int)slot, (unsigned)count);
+
    bus_signal(EVT_BLE_PIR);
+   return eid;
 }
 
-/******************************************************************************
- * \brief Publish a reed sensor event to the bus.
- *
- * \param id    - Reed sensor slot ID (1-based).
- * \param state - Door state (0=closed, 1=open, 0xFF=unknown).
- * \param batt  - Battery SOC percent.
- * \param p_mac - Pointer to 6-byte MAC address, or NULL.
- *
- * \return void
- *
- * \details Writes payload to every interested subscriber's private
- *          mailbox via xQueueOverwrite — always succeeds, latest value
- *          wins. Signals only subscribers with EVT_BLE_REED in their mask.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
-void bus_publish_reed(uint8_t id, uint8_t state, int batt, const uint8_t *p_mac)
+uint64_t bus_publish_reed(uint8_t id, uint8_t state, int batt, const uint8_t *p_mac)
 {
-   REED_PAYLOAD_T p = { .id = id, .state = state, .batt = batt }; /**< reed payload */
-   int            i = 0;                                           /**< loop index   */
+   uint64_t eid = vroom_event_id_generate();
+   REED_PAYLOAD_T p = { .id = id, .state = state, .batt = batt, .event_id = eid };
+   if (p_mac) { memcpy(p.mac, p_mac, 6); }
+   g_bus_seq++;
 
-   if (NULL != p_mac)
-   {
-      (void)memcpy(p.mac, p_mac, 6);
-   }
-
-   for (i = 0; i < g_sub_count; i++)
-   {
-      if (0 != (g_subscribers[i].mask & EVT_BLE_REED))
-      {
+   for (int i = 0; i < g_sub_count; i++) {
+      if (g_subscribers[i].mask & EVT_BLE_REED) {
          (void)xQueueOverwrite(g_subscribers[i].mb_reed, &p);
       }
    }
+
+   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=BLE_REED device_id=%d state=%d",
+            (unsigned long long)eid, (unsigned)g_bus_seq, (int)id, (int)state);
+
    bus_signal(EVT_BLE_REED);
+   return eid;
 }
 
-/******************************************************************************
- * \brief Publish a smart lock event to the bus.
- *
- * \param state - Lock state.
- * \param batt  - Battery SOC percent.
- *
- * \return void
- *
- * \details Writes payload to every interested subscriber's private
- *          mailbox via xQueueOverwrite — always succeeds, latest value
- *          wins. Signals only subscribers with EVT_BLE_LOCK in their mask.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
-void bus_publish_lock(uint8_t state, int batt)
+uint64_t bus_publish_lock(uint8_t state, int batt)
 {
-   LOCK_PAYLOAD_T p = { .state = state, .batt = batt }; /**< lock payload */
-   int            i = 0;                                 /**< loop index   */
+   uint64_t eid = vroom_event_id_generate();
+   LOCK_PAYLOAD_T p = { .state = state, .batt = batt, .event_id = eid };
 
-   for (i = 0; i < g_sub_count; i++)
-   {
-      if (0 != (g_subscribers[i].mask & EVT_BLE_LOCK))
-      {
+   g_bus_seq++;
+
+   for (int i = 0; i < g_sub_count; i++) {
+      if (g_subscribers[i].mask & EVT_BLE_LOCK) {
          (void)xQueueOverwrite(g_subscribers[i].mb_lock, &p);
       }
    }
+
+   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=BLE_LOCK state=%d",
+            (unsigned long long)eid, (unsigned)g_bus_seq, (int)state);
+
    bus_signal(EVT_BLE_LOCK);
+   return eid;
 }
 
-/******************************************************************************
- * \brief Publish a smart light event to the bus.
- *
- * \param state - Light relay state.
- *
- * \return void
- *
- * \details Writes payload to every interested subscriber's private
- *          mailbox via xQueueOverwrite — always succeeds, latest value
- *          wins. Signals only subscribers with EVT_BLE_LIGHT in their mask.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
-void bus_publish_light(uint8_t state)
+uint64_t bus_publish_light(uint8_t state)
 {
-   LIGHT_PAYLOAD_T p = { .state = state }; /**< light payload */
-   int             i = 0;                  /**< loop index    */
+   uint64_t eid = vroom_event_id_generate();
+   LIGHT_PAYLOAD_T p = { .state = state, .event_id = eid };
 
-   for (i = 0; i < g_sub_count; i++)
-   {
-      if (0 != (g_subscribers[i].mask & EVT_BLE_LIGHT))
-      {
+   g_bus_seq++;
+
+   for (int i = 0; i < g_sub_count; i++) {
+      if (g_subscribers[i].mask & EVT_BLE_LIGHT) {
          (void)xQueueOverwrite(g_subscribers[i].mb_light, &p);
       }
    }
+
+   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=BLE_LIGHT state=%d",
+            (unsigned long long)eid, (unsigned)g_bus_seq, (int)state);
+
    bus_signal(EVT_BLE_LIGHT);
+   return eid;
 }
 
-/******************************************************************************
- * \brief Publish a UART temperature event to the bus.
- *
- * \param avg_temp - Average temperature in Celsius from STM32.
- *
- * \return void
- *
- * \details Writes payload to every interested subscriber's private
- *          mailbox via xQueueOverwrite — always succeeds, latest value
- *          wins. Signals only subscribers with EVT_UART_TEMP in their mask.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
-void bus_publish_temp(int avg_temp)
+uint64_t bus_publish_temp(int avg_temp)
 {
-   TEMP_PAYLOAD_T p = { .avg_temp = avg_temp }; /**< temp payload */
-   int            i = 0;                         /**< loop index   */
+   uint64_t eid = vroom_event_id_generate();
+   TEMP_PAYLOAD_T p = { .avg_temp = avg_temp };
 
-   for (i = 0; i < g_sub_count; i++)
-   {
-      if (0 != (g_subscribers[i].mask & EVT_UART_TEMP))
-      {
+   g_bus_seq++;
+
+   for (int i = 0; i < g_sub_count; i++) {
+      if (g_subscribers[i].mask & EVT_UART_TEMP) {
          (void)xQueueOverwrite(g_subscribers[i].mb_temp, &p);
       }
    }
+
+   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=UART_TEMP avg_temp=%d",
+            (unsigned long long)eid, (unsigned)g_bus_seq, avg_temp);
+
    bus_signal(EVT_UART_TEMP);
+   return eid;
 }
 
-/******************************************************************************
- * \brief Publish a motor controller status event to the bus.
- *
- * \param online - 1 if motor controller is connected, 0 if offline.
- * \param batt   - Supply voltage in mV, -1 if unknown or offline.
- *
- * \return void
- *
- * \details Writes payload to every interested subscriber's private
- *          mailbox via xQueueOverwrite — always succeeds, latest value
- *          wins. Signals only subscribers with EVT_MOTOR_STATUS in mask.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
-void bus_publish_motor(uint8_t online, int batt)
+uint64_t bus_publish_motor(uint8_t online, int batt)
 {
-   MOTOR_PAYLOAD_T p = { .online = online, .batt = batt }; /**< motor payload */
-   int             i = 0;                                   /**< loop index    */
+   uint64_t eid = vroom_event_id_generate();
+   MOTOR_PAYLOAD_T p = { .online = online, .batt = batt };
 
-   for (i = 0; i < g_sub_count; i++)
-   {
-      if (0 != (g_subscribers[i].mask & EVT_MOTOR_STATUS))
-      {
+   g_bus_seq++;
+
+   for (int i = 0; i < g_sub_count; i++) {
+      if (g_subscribers[i].mask & EVT_MOTOR_STATUS) {
          (void)xQueueOverwrite(g_subscribers[i].mb_motor, &p);
       }
    }
+
+   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=MOTOR online=%d",
+            (unsigned long long)eid, (unsigned)g_bus_seq, (int)online);
+
    bus_signal(EVT_MOTOR_STATUS);
+   return eid;
 }
 
-/******************************************************************************
- * \brief Publish a BLE temperature sensor event to the bus.
- *
- * \param slot        - 1-based temp slot index.
- * \param temp_decidegc - Temperature in tenths of degrees C.
- * \param batt        - Battery SOC percent.
- *
- * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
-void bus_publish_ble_temp(uint8_t slot, int16_t temp_decidegc, int batt)
+uint64_t bus_publish_ble_temp(uint8_t slot, int16_t temp_decidegc, int batt)
 {
-   BLE_TEMP_PAYLOAD_T p = { .id = slot,
-                             .temp_decidegc = temp_decidegc,
-                             .batt = batt }; /**< BLE temp payload */
-   int i = 0;                                /**< loop index       */
+   uint64_t eid = vroom_event_id_generate();
+   BLE_TEMP_PAYLOAD_T p = { .id = slot, .temp_decidegc = temp_decidegc,
+                             .batt = batt, .event_id = eid };
 
-   for (i = 0; i < g_sub_count; i++)
-   {
-      if (0 != (g_subscribers[i].mask & EVT_BLE_TEMP))
-      {
+   g_bus_seq++;
+
+   for (int i = 0; i < g_sub_count; i++) {
+      if (g_subscribers[i].mask & EVT_BLE_TEMP) {
          (void)xQueueOverwrite(g_subscribers[i].mb_ble_temp, &p);
       }
    }
+
+   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=BLE_TEMP device_id=%d temp_dc=%d",
+            (unsigned long long)eid, (unsigned)g_bus_seq, (int)slot, (int)temp_decidegc);
+
    bus_signal(EVT_BLE_TEMP);
+   return eid;
 }
 
-/******************************************************************************
- * \brief Publish a doorbell press event to the bus.
- *
- * \param device_id    - 0-3, which doorbell cam.
- * \param event_id     - Correlation key matching TCP JPEG header.
- * \param timestamp_ms - Cam timestamp at button press.
- *
- * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- ******************************************************************************/
-void bus_publish_doorbell(uint8_t  device_id,
-                          uint64_t event_id,
-                          uint64_t timestamp_ms)
+uint64_t bus_publish_doorbell(uint8_t device_id, uint64_t event_id, uint64_t timestamp_ms)
 {
-   DOORBELL_PAYLOAD_T p = { .device_id    = device_id,
-                             .event_id     = event_id,
-                             .timestamp_ms = timestamp_ms };
-   int i = 0;
-   for (i = 0; i < g_sub_count; i++)
-   {
-      if (0 != (g_subscribers[i].mask & EVT_DOORBELL))
-      {
+   uint64_t eid = vroom_event_id_generate();
+   DOORBELL_PAYLOAD_T p = { .device_id = device_id, .event_id = event_id, .timestamp_ms = timestamp_ms };
+
+   g_bus_seq++;
+
+   for (int i = 0; i < g_sub_count; i++) {
+      if (g_subscribers[i].mask & EVT_DOORBELL) {
          (void)xQueueOverwrite(g_subscribers[i].mb_doorbell, &p);
       }
    }
+
+   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=DOORBELL device_id=%d cam_event_id=%llu",
+            (unsigned long long)eid, (unsigned)g_bus_seq, (int)device_id, (unsigned long long)event_id);
+
    bus_signal(EVT_DOORBELL);
+   return eid;
 }

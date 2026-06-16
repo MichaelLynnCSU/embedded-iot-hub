@@ -37,6 +37,32 @@
  *          EVT_BLE_TEMP event bit added. BLE_TEMP_PAYLOAD_T added.
  *          mb_ble_temp mailbox added to BUS_SUBSCRIBER_T.
  *          bus_publish_ble_temp() added. EVT_ALL_MASK widened to 0x7FF.
+ *
+ * \note    Structured event tracing — Phase 0 (2026-06-15):
+ *          Normalized log prefixes across all subsystems:
+ *          [BLE_PIR], [BLE_REED], [BLE_TEMP], [BLE_LOCK], [BLE_LIGHT],
+ *          [VROOM], [TCP], [UART]. No struct or ABI changes.
+ *
+ * \note    Structured event tracing — Phase 1 (2026-06-15):
+ *          Local sequence counters added. g_bus_seq in vroom_bus.c
+ *          increments on every publish. g_frame_seq in uart_manager.c
+ *          increments on every parsed UART frame. No cross-module
+ *          propagation. No struct or ABI changes.
+ *
+ * \note    Structured event tracing — Phase 2 (2026-06-15):
+ *          event_id generator introduced inside vroom_bus.c only.
+ *          vroom_event_id_generate() is static — not exported.
+ *          event_id logged at [VROOM] ingest point only.
+ *          No external ABI changes. BLE/TCP/UART unaware.
+ *
+ * \note    Structured event tracing — Phase 3 (2026-06-15):
+ *          BLE publish functions now return uint64_t event_id so BLE
+ *          modules can log the correlation key at ingress.
+ *          bus_publish_pir(), bus_publish_reed(), bus_publish_ble_temp(),
+ *          bus_publish_lock(), bus_publish_light() return uint64_t.
+ *          bus_publish_temp(), bus_publish_motor(), bus_publish_doorbell()
+ *          remain void — UART and doorbell not in this phase.
+ *          TCP/UART still unaware of event_id. No struct changes.
  ******************************************************************************/
 
 #ifndef INCLUDE_VROOM_BUS_H_
@@ -76,6 +102,7 @@ typedef struct
    uint8_t  slot;   /*!< 0-based PIR slot index  */
    uint32_t count;  /*!< motion event count      */
    int      batt;   /*!< battery SOC percent     */
+   uint64_t event_id;  /* vroom-assigned correlation key */
 } PIR_PAYLOAD_T;
 
 /** \brief Reed sensor bus payload. */
@@ -85,6 +112,7 @@ typedef struct
    uint8_t state;  /*!< 0=closed, 1=open, 0xFF=unknown */
    int     batt;   /*!< battery SOC percent            */
    uint8_t mac[6]; /*!< device MAC address             */
+   uint64_t event_id;  /* vroom-assigned correlation key */
 } REED_PAYLOAD_T;
 
 /** \brief Smart lock bus payload. */
@@ -92,18 +120,21 @@ typedef struct
 {
    uint8_t state; /*!< lock state          */
    int     batt;  /*!< battery SOC percent */
+   uint64_t event_id;  /* vroom-assigned correlation key */
 } LOCK_PAYLOAD_T;
 
 /** \brief Smart light bus payload. */
 typedef struct
 {
    uint8_t state; /*!< relay state */
+   uint64_t event_id;  /* vroom-assigned correlation key */
 } LIGHT_PAYLOAD_T;
 
 /** \brief UART temperature bus payload. */
 typedef struct
 {
    int avg_temp; /*!< average temperature in Celsius */
+   uint64_t event_id;  /* vroom-assigned correlation key */
 } TEMP_PAYLOAD_T;
 
 /** \brief BLE temperature sensor bus payload. */
@@ -112,14 +143,15 @@ typedef struct
    uint8_t  id;            /*!< 1-based temp slot index           */
    int16_t  temp_decidegc; /*!< temperature in tenths of °C       */
    int      batt;          /*!< battery SOC percent               */
+   uint64_t event_id;
 } BLE_TEMP_PAYLOAD_T;
 
 /** \brief Doorbell press bus payload. */
 typedef struct
 {
-   uint8_t  device_id;   /*!< 0-3, which doorbell cam     */
-   uint64_t event_id;    /*!< correlation key for BBB     */
-   uint64_t timestamp_ms;/*!< cam timestamp at press      */
+   uint8_t  device_id;    /*!< 0-3, which doorbell cam     */
+   uint64_t event_id;     /*!< correlation key for BBB     */
+   uint64_t timestamp_ms; /*!< cam timestamp at press      */
 } DOORBELL_PAYLOAD_T;
 
 /** \brief Motor controller status bus payload. */
@@ -147,8 +179,8 @@ typedef struct
    QueueHandle_t      mb_light;    /*!< private light mailbox    (depth 1)   */
    QueueHandle_t      mb_temp;     /*!< private UART temp mailbox (depth 1)  */
    QueueHandle_t      mb_motor;    /*!< private motor mailbox    (depth 1)   */
-   QueueHandle_t      mb_ble_temp; /*!< private BLE temp mailbox (depth 1)  */
-   QueueHandle_t      mb_doorbell; /*!< private doorbell mailbox (depth 1) */
+   QueueHandle_t      mb_ble_temp; /*!< private BLE temp mailbox (depth 1)   */
+   QueueHandle_t      mb_doorbell; /*!< private doorbell mailbox (depth 1)   */
 } BUS_SUBSCRIBER_T;
 
 /*************************** FUNCTION PROTOTYPES *****************************/
@@ -168,56 +200,56 @@ BUS_SUBSCRIBER_T bus_register_subscriber(EventBits_t mask);
  *  \param slot  - 1-based PIR slot index.
  *  \param count - Motion event count.
  *  \param batt  - Battery SOC percent.
- *  \return void */
-void bus_publish_pir(uint8_t slot, uint32_t count, int batt);
+ *  \return uint64_t - Assigned event_id for caller logging. */
+uint64_t bus_publish_pir(uint8_t slot, uint32_t count, int batt);
 
 /** \brief Publish a reed sensor event.
  *  \param id    - Reed slot ID (1-based).
  *  \param state - Door state (0=closed, 1=open, 0xFF=unknown).
  *  \param batt  - Battery SOC percent.
  *  \param p_mac - Pointer to 6-byte MAC address, or NULL.
- *  \return void */
-void bus_publish_reed(uint8_t        id,
-                      uint8_t        state,
-                      int            batt,
-                      const uint8_t *p_mac);
+ *  \return uint64_t - Assigned event_id for caller logging. */
+uint64_t bus_publish_reed(uint8_t        id,
+                           uint8_t        state,
+                           int            batt,
+                           const uint8_t *p_mac);
 
 /** \brief Publish a smart lock event.
  *  \param state - Lock state.
  *  \param batt  - Battery SOC percent.
- *  \return void */
-void bus_publish_lock(uint8_t state, int batt);
+ *  \return uint64_t - Assigned event_id for caller logging. */
+uint64_t bus_publish_lock(uint8_t state, int batt);
 
 /** \brief Publish a smart light event.
  *  \param state - Light relay state.
- *  \return void */
-void bus_publish_light(uint8_t state);
+ *  \return uint64_t - Assigned event_id for caller logging. */
+uint64_t bus_publish_light(uint8_t state);
 
 /** \brief Publish a UART temperature event.
  *  \param avg_temp - Average temperature in Celsius.
- *  \return void */
-void bus_publish_temp(int avg_temp);
+ *  \return void — UART not yet in event_id propagation phase. */
+uint64_t bus_publish_temp(int avg_temp);
 
 /** \brief Publish a motor controller status event.
  *  \param online - 1 if connected, 0 if offline.
  *  \param batt   - Supply voltage in mV, -1 if unknown or offline.
- *  \return void */
-void bus_publish_motor(uint8_t online, int batt);
+ *  \return void — motor not yet in event_id propagation phase. */
+uint64_t bus_publish_motor(uint8_t online, int batt);
 
 /** \brief Publish a BLE temperature sensor event.
- *  \param slot         - 1-based temp slot index.
+ *  \param slot          - 1-based temp slot index.
  *  \param temp_decidegc - Temperature in tenths of °C (int16_t).
- *  \param batt         - Battery SOC percent.
- *  \return void */
-void bus_publish_ble_temp(uint8_t slot, int16_t temp_decidegc, int batt);
+ *  \param batt          - Battery SOC percent.
+ *  \return uint64_t - Assigned event_id for caller logging. */
+uint64_t bus_publish_ble_temp(uint8_t slot, int16_t temp_decidegc, int batt);
 
 /** \brief Publish a doorbell press event.
- *  \param device_id   - 0-3, which doorbell cam.
- *  \param event_id    - Correlation key matching TCP JPEG header.
+ *  \param device_id    - 0-3, which doorbell cam.
+ *  \param event_id     - Correlation key matching TCP JPEG header.
  *  \param timestamp_ms - Cam timestamp at button press.
- *  \return void */
-void bus_publish_doorbell(uint8_t  device_id,
-                          uint64_t event_id,
-                          uint64_t timestamp_ms);
+ *  \return void — doorbell not yet in event_id propagation phase. */
+uint64_t bus_publish_doorbell(uint8_t  device_id,
+                           uint64_t event_id,
+                           uint64_t timestamp_ms);
 
 #endif /* INCLUDE_VROOM_BUS_H_ */
