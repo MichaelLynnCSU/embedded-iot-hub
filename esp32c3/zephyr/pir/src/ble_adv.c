@@ -6,14 +6,15 @@
  * \brief   BLE advertising for ESP32-C3 PIR motion sensor node.
  *
  * \details Non-connectable broadcaster. Manufacturer data payload carries
- *          motion count (4 bytes), battery SOC (1 byte), and occupied flag
- *          (1 byte). Device advertises a single burst per wake then sleeps.
+ *          motion count (4 bytes), battery SOC (1 byte), occupied flag
+ *          (1 byte), and tx_id (2 bytes). Device advertises a single burst
+ *          per wake then sleeps.
  *
  *          Occupancy window and timeout logic live entirely on the hub.
  *          motion_count is monotonic (RTC-persistent) -- hub uses delta
  *          between packets to detect missed events during BLE lossy periods.
  *
- *          MFG data layout (8 bytes):
+ *          MFG data layout (10 bytes):
  *          [0]   = 0xFF  (company ID low  -- no registered ID, sentinel)
  *          [1]   = 0xFF  (company ID high)
  *          [2]   = motion_count >> 24
@@ -22,6 +23,8 @@
  *          [5]   = motion_count & 0xFF
  *          [6]   = batt_soc (0-100%)
  *          [7]   = occupied (0=empty, 1=occupied)
+ *          [8]   = tx_id low byte  (little-endian)
+ *          [9]   = tx_id high byte (little-endian)
  *
  * \note    BT_SMP disabled (2026-03-23):
  *          CONFIG_BT_SMP=n -- PIR is broadcaster-only, no pairing needed.
@@ -32,6 +35,27 @@
  *          BT_LE_AD_GENERAL removed -- General Discoverable Mode implies
  *          a connectable GAP role and violates the BT spec for a
  *          non-connectable broadcaster. BT_LE_AD_NO_BREDR (0x04) only.
+ *
+ * \note    Structured event tracing -- tx_id (2026-06-16):
+ *          s_tx_id counter added. Incremented on every ble_adv_init() call
+ *          (one per wake cycle). Stamped into mfg_data[8..9] little-endian
+ *          before advertising starts. Hub reads it from mfg_data[8..9] with
+ *          mfg_len >= 10 guard. Older hub firmware ignores extra bytes.
+ *
+ *          tx_id is a per-wake-session counter (RAM only, resets each boot).
+ *          Correlation key is (MAC + tx_id) within a bounded time window.
+ *          It is NOT a global unique message ID -- do not use for dedup or
+ *          audit. Log lines on both sides share the same key:
+ *
+ *            [ble_adv] tx_id=1 count=42 batt=87%
+ *            [BLE_PIR] tx_id=1 event_id=101 slot=0 count=42 batt=87%
+ *
+ *          To apply this pattern to the next device type:
+ *          1. Add MFG_TX_ID_LO_IDX / HI_IDX defines in main.h.
+ *          2. Grow MFG_DATA_SIZE by 2 in main.h.
+ *          3. Add s_tx_id static here, increment before payload write.
+ *          4. Stamp [LO] and [HI] bytes, LOG_INF tx_id=.
+ *          5. Hub side: guard on mfg_len >= (HI_IDX + 1), default 0.
  ******************************************************************************/
 #include "ble_adv.h"
 #include "main.h"
@@ -43,12 +67,17 @@
 
 LOG_MODULE_REGISTER(ble_adv, LOG_LEVEL_INF);
 
+static uint16_t s_tx_id = 0; /**< per-wake-session broadcast counter; RAM only,
+                               *   resets each boot. Not a global unique ID.   */
+
 static uint8_t mfg_data[MFG_DATA_SIZE] = {
     MFG_COMPANY_ID_0,
     MFG_COMPANY_ID_1,
-    0x00, 0x00, 0x00, 0x00,  /* motion count -- zeroed until ble_adv_update() */
-    0x00,                     /* batt soc     */
-    0x00                      /* occupied     */
+    0x00, 0x00, 0x00, 0x00,  /* motion count -- zeroed until ble_adv_init()   */
+    0x00,                     /* batt soc                                       */
+    0x00,                     /* occupied                                       */
+    0x00,                     /* tx_id low byte                                 */
+    0x00                      /* tx_id high byte                                */
 };
 
 static struct bt_data adv_data[] = {
@@ -99,6 +128,11 @@ int ble_adv_init(uint32_t motion_count, uint8_t batt_soc, uint8_t occupied)
     mfg_data[MFG_BATT_IDX]     = batt_soc;
     mfg_data[MFG_OCCUPIED_IDX] = occupied;
 
+    s_tx_id++;
+    mfg_data[MFG_TX_ID_LO_IDX] = (uint8_t)(s_tx_id & 0xFF);
+    mfg_data[MFG_TX_ID_HI_IDX] = (uint8_t)(s_tx_id >> 8);
+    LOG_INF("tx_id=%u count=%u batt=%u%%", s_tx_id, motion_count, batt_soc);
+
     int ret = bt_enable(NULL);
     if (0 != ret)
     {
@@ -113,7 +147,7 @@ int ble_adv_init(uint32_t motion_count, uint8_t batt_soc, uint8_t occupied)
         LOG_ERR("Advertising failed (%d)", ret);
         return ret;
     }
-    LOG_INF("Advertising started (payload zeroed -- call ble_adv_update() to populate)");
+    LOG_INF("Advertising started");
     print_mac();
     return 0;
 }

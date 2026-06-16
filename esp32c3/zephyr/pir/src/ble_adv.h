@@ -14,7 +14,12 @@
 /**
  * \brief  Initialise and start BLE advertising.
  *         Enables BT stack, starts slow-interval broadcaster advertisement.
- *         Logs MAC address on success.
+ *         Increments s_tx_id (per-wake-session counter, RAM only) and stamps
+ *         it into mfg_data[8..9] little-endian before advertising starts.
+ *         Logs tx_id, motion count, and battery SOC on success.
+ *
+ *         tx_id is NOT a global unique message ID. Correlation key is
+ *         (MAC + tx_id) within a bounded time window.
  *
  * \return 0 on success, negative errno on failure.
  */

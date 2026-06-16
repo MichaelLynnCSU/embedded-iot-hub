@@ -34,7 +34,27 @@
 /* WDT timeout -- burst sleep kicks before AND mid-burst if >= this value */
 #define WDT_TIMEOUT_MS        3000U
 
-#define MFG_DATA_SIZE           8
+/*
+ * MFG data layout (10 bytes):
+ * [0]   = 0xFF  company ID low
+ * [1]   = 0xFF  company ID high
+ * [2]   = motion_count >> 24
+ * [3]   = motion_count >> 16
+ * [4]   = motion_count >>  8
+ * [5]   = motion_count & 0xFF
+ * [6]   = batt_soc (0-100%)
+ * [7]   = occupied (0=empty, 1=occupied)
+ * [8]   = tx_id low byte  (little-endian, per-wake-session counter)
+ * [9]   = tx_id high byte (little-endian, per-wake-session counter)
+ *
+ * tx_id is a per-wake-session counter (RAM only, resets each boot).
+ * Correlation key is (MAC + tx_id) within a bounded time window.
+ * It is NOT a global unique message ID -- do not use for dedup or audit.
+ *
+ * Graceful degradation: hub checks mfg_len >= 10 before reading [8..9].
+ * Old firmware (8-byte payload) produces tx_id=0 on the hub -- no crash.
+ */
+#define MFG_DATA_SIZE           10
 #define MFG_COMPANY_ID_0     0xFF
 #define MFG_COMPANY_ID_1     0xFF
 #define MFG_MOTION_MSB_IDX      2
@@ -42,7 +62,9 @@
 #define MFG_MOTION_B1_IDX       4
 #define MFG_MOTION_LSB_IDX      5
 #define MFG_BATT_IDX            6
-#define MFG_OCCUPIED_IDX        7    /* 0=empty, 1=occupied */
+#define MFG_OCCUPIED_IDX        7    /* 0=empty, 1=occupied              */
+#define MFG_TX_ID_LO_IDX        8    /* tx_id low byte  (little-endian)  */
+#define MFG_TX_ID_HI_IDX        9    /* tx_id high byte (little-endian)  */
 
 static inline void pack_motion_count(uint8_t *mfg, uint32_t count)
 {
