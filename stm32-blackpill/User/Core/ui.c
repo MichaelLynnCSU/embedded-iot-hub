@@ -589,18 +589,18 @@ void ui_set_doorbell_result(uint8_t pressed, uint8_t device_id,
    if (1u == g_doorbell_pending)
    {
       /* Late inference binding — accepted while event window is open.
-       * press→inference delta is 1-4 s by design: the ESP32 fires
-       * pressed=1 immediately on GPIO, but the BBB inference pipeline
-       * (capture → model → SHM → UART) adds latency. person/conf_pct/
-       * asset will be zero on the first DOORBELL frame and arrive on
-       * a subsequent pressed=0 frame within the pending window.       */
+       * press→inference delta is ~6 s: the STM32 fires pressed=1 immediately
+       * but the BBB inference pipeline (capture → model → SHM → UART) adds
+       * latency. Result arrives in the same bundle as pressed=1 via
+       * doorbell_inject_pending(). Timeout restarts from result arrival. */
       g_home.doorbell_person   = person;
       g_home.doorbell_conf_pct = conf_pct;
-      if (NULL != p_asset)
+      if (NULL != p_asset && '\0' != p_asset[0])
       {
          (void)strncpy(g_home.doorbell_asset, p_asset,
                        sizeof(g_home.doorbell_asset) - 1u);
          g_home.doorbell_asset[sizeof(g_home.doorbell_asset) - 1u] = '\0';
+         g_doorbell_last_rx_ms = now;  /* restart timeout from result arrival */
       }
    }
 }

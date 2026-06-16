@@ -28,8 +28,8 @@
 #include <stdint.h>
 
 /******************************** CONSTANTS ***********************************/
-
-#define UART_QUEUE_DEPTH  32u    /**< Maximum number of pending UART lines     */
+/* UART_QUEUE_DEPTH must match LOG_QUEUE_DEPTH in log.h */
+#define UART_QUEUE_DEPTH  48u    /**< Maximum number of pending UART lines     */
 #define UART_LINE_LEN     128u  /**< Maximum characters per line (incl NUL)   */
 
 /*===========================================================================*

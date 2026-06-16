@@ -80,6 +80,8 @@ void ui_home_update(uint8_t all_online)
                         (unsigned int)g_home.doorbell_conf_pct,
                         g_home.doorbell_asset);
       }
+      lv_label_set_long_mode(g_home_status_lbl, LV_LABEL_LONG_WRAP);
+      lv_obj_set_width(g_home_status_lbl, lv_pct(100));
       lv_label_set_text(g_home_status_lbl, db_buf);
       lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0xFFCC00u), 0);
    }
@@ -96,11 +98,15 @@ void ui_home_update(uint8_t all_online)
 
       if (0u != alert)
       {
+         lv_label_set_long_mode(g_home_status_lbl, LV_LABEL_LONG_CLIP);
+         lv_obj_set_width(g_home_status_lbl, LV_SIZE_CONTENT);
          lv_label_set_text(g_home_status_lbl, "! ALERT !");
          lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0xFF4444u), 0);
       }
       else
       {
+         lv_label_set_long_mode(g_home_status_lbl, LV_LABEL_LONG_CLIP);
+         lv_obj_set_width(g_home_status_lbl, LV_SIZE_CONTENT);
          lv_label_set_text(g_home_status_lbl, "HOME SECURE");
          lv_obj_set_style_text_color(g_home_status_lbl, lv_color_hex(0x00FF66u), 0);
       }

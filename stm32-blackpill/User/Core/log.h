@@ -18,8 +18,8 @@
 
 /******************************** CONSTANTS ***********************************/
 
-#define LOG_QUEUE_DEPTH  6u   /**< Maximum number of pending log lines       */
-#define LOG_LINE_LEN    64u   /**< Maximum characters per log line (incl NUL)*/
+#define LOG_QUEUE_DEPTH  48u   /**< Maximum number of pending log lines       */
+#define LOG_LINE_LEN     96u   /**< Maximum characters per log line (incl NUL)*/
 
 /*************************** FUNCTION PROTOTYPES ******************************/
 

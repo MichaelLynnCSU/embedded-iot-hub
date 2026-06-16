@@ -476,6 +476,10 @@ void parser_process_line(const char *p_line)
    int     batt               = -1;
    int     slot               = 0;
 
+   char raw[UART_LINE_LEN + 16];
+   snprintf(raw, sizeof(raw), "[RX] %.40s\r\n", p_line);
+   log_enqueue(raw);
+
    if (NULL == p_line) { return; }
 
    (void)strncpy(buf, p_line, sizeof(buf) - 1u);

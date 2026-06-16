@@ -374,6 +374,8 @@ void uart_push_msg(const char *p_msg, int len)
 {
    ssize_t w = 0;
 
+   LOG("[PUSH] bundle len=%d:\n%.*s", len, len, p_msg);
+
    pthread_mutex_lock(&g_uart_write_mutex);
    w = write(g_uart_fd, p_msg, len);
    pthread_mutex_unlock(&g_uart_write_mutex);

@@ -29,6 +29,13 @@
  *
  * \note    See the original uart_controller.c header (pre-split) for the
  *          full design rationale, protocol format, and change history.
+ *
+ * \note    Rate-limit to 2 per second max.
+ *          Bundle size grows with doorbell/cam count (~280 bytes at 3DB/4CAM,
+ *          ~24ms at 115200 baud). Back-to-back TCP frames from simultaneous
+ *          camera triggers can saturate the STM32 ring buffer before
+ *          drain_uart_queue() drains it. 500ms gives ~100 drain cycles.
+ *
  ******************************************************************************/
 
 #include <pthread.h>
@@ -291,6 +298,22 @@ void *uart_push_thread(void *p_arg)
       /* uart_transport_is_open() replaces the old direct g_uart_fd check */
       if (!uart_transport_is_open()) { continue; }
 
+      /* Rate-limit outbound bundles to 2 per second max.
+       * STM32 main loop runs at 5ms; a 20-line bundle takes ~22ms to
+       * transmit at 115200 baud. Back-to-back bundles saturate the
+       * STM32 ring buffer before drain_uart_queue() can consume them,
+       * causing deterministic tail-field loss (OCC/DB/DOORBELL/CAM).
+       * 500ms spacing gives ~100 drain cycles between bundles.        */
+      {
+         static struct timespec s_last;
+         struct timespec        now;
+         clock_gettime(CLOCK_MONOTONIC, &now);
+         long elapsed_ms = (now.tv_sec  - s_last.tv_sec)  * 1000L
+                         + (now.tv_nsec - s_last.tv_nsec) / 1000000L;
+         if (elapsed_ms < 500L) { continue; }
+         s_last = now;
+      }
+
       frames_ready = 0;
       if (uart_ring_pop(&frame)) { frames_ready = 1; }
       while (sem_trywait(&g_uart_frame_sem) == 0)
@@ -451,6 +474,19 @@ void uart_update_frame(const struct LatestData *p_snapshot,
    uint8_t  db_person              = 0;
    uint8_t  db_conf_pct            = 0;
    char     db_asset[DOORBELL_ASSET_LEN];
+
+
+    /* Rate-limit to 2 per second max — matches uart_push_thread limit.
+    * Prevents STM32 queue saturation from back-to-back TCP frames.   */
+   {
+      static struct timespec s_last;
+      struct timespec        now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      long elapsed_ms = (now.tv_sec  - s_last.tv_sec)  * 1000L
+                      + (now.tv_nsec - s_last.tv_nsec) / 1000000L;
+      if (elapsed_ms < 500L) { return; }
+      s_last = now;
+   }
 
    if (!p_snapshot->valid)        { return; }
    if (!uart_transport_is_open()) { return; }  /* replaces: 0 > g_uart_fd */
