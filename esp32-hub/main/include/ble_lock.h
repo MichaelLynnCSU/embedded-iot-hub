@@ -4,9 +4,12 @@
 #include <stdint.h>
 #include "esp_ble/esp_gattc_api.h"
 
+/* GATT write payload indices — must match device-side config.h */
+#define LOCK_WRITE_LEN          3
+
 void    ble_lock_update_adv(uint8_t state, uint8_t batt);
-int     ble_lock_get_batt(void);
 uint8_t ble_lock_get_state(void);
+int     ble_lock_get_batt(void);
 void    ble_lock_try_connect(void);
 void    ble_lock_handle_event(esp_gattc_cb_event_t event,
                               esp_gatt_if_t gattc_if,

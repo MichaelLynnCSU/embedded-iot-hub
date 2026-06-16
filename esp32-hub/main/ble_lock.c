@@ -27,6 +27,14 @@
  *          state or battery to BeagleBone. Fixed by publishing at all
  *          three receive points: advertisement, GATT state read, and
  *          GATT battery read.
+ *
+ * \note    Structured event tracing -- tx_id (2026-06-16):
+ *          s_rx_seq removed. s_tx_id added. Incremented before every
+ *          GATT write. Stamped into payload[1..2] little-endian.
+ *          Device extracts and logs tx_id=. Hub logs tx_id= + event_id=
+ *          after bus_publish_lock(). Same two-phase identity pattern as
+ *          smart-light (ble_light.c).
+ *
  ******************************************************************************/
 
 #include "config.h"
@@ -50,6 +58,10 @@
 #define LOCK_NOTIFY_ENABLE     1       /**< CCCD value to enable notifications */
 #define LOCK_STATE_LEN         1       /**< expected state characteristic length */
 
+#define LOCK_WRITE_STATE_IDX    0   /**< state byte index in write payload    */
+#define LOCK_WRITE_TX_ID_LO_IDX 1   /**< tx_id low byte index                */
+#define LOCK_WRITE_TX_ID_HI_IDX 2   /**< tx_id high byte index               */
+
 static const char *TAG = "BLE_LOCK"; /**< ESP log tag */
 
 static uint8_t g_current_lock_state = 0;   /**< last known lock state */
@@ -64,6 +76,15 @@ static bool     g_lock_connected      = false; /**< connection active flag */
 static bool     g_lock_connecting     = false; /**< connection in progress flag */
 
 static portMUX_TYPE g_lock_mux = portMUX_INITIALIZER_UNLOCKED; /**< state mutex */
+static uint16_t s_tx_id = 0; /**< per-session command counter; RAM only,
+                               *   resets on hub reboot. Not a global unique
+                               *   ID. Correlation key is (MAC + tx_id)
+                               *   within a bounded time window.
+                               *
+                               *   Two-phase identity:
+                               *   tx_id    = generated BEFORE write
+                               *   event_id = generated AFTER bus_publish_lock()
+                               *   Device logs tx_id only. Hub logs both.   */
 
 static esp_bt_uuid_t g_lock_service_uuid =
 {
@@ -127,10 +148,13 @@ static void do_connect_lock(void)
  ******************************************************************************/
 void ble_lock_update_adv(uint8_t state, uint8_t batt)
 {
+   uint64_t eid = 0;  /**< correlation event ID */
+
    g_current_lock_state = state;
    g_lock_batt          = (int)batt;
-   ESP_LOGI(TAG, "[LOCK] Adv rx: state=%d batt=%d%%", state, batt);
-   bus_publish_lock(state, (int)batt);
+   eid = bus_publish_lock(state, (int)batt);
+   ESP_LOGI(TAG, "[BLE_LOCK] adv state=%d batt=%d%% event_id=%llu",
+            (int)state, (int)batt, (unsigned long long)eid);
 }
 
 /******************************************************************************
@@ -596,11 +620,19 @@ void ble_lock_handle_event(esp_gattc_cb_event_t event,
  ******************************************************************************/
 void ble_send_lock_command(uint8_t state)
 {
-   esp_err_t ret = ESP_OK; /**< esp return value */
+   esp_err_t ret        = ESP_OK;
+   uint8_t   payload[3] = {0};   /**< [state][tx_id_lo][tx_id_hi] */
+   uint64_t  eid        = 0;     /**< vroom event_id after bus commit */
+
+   s_tx_id++;
+   payload[LOCK_WRITE_STATE_IDX]    = state;
+   payload[LOCK_WRITE_TX_ID_LO_IDX] = (uint8_t)(s_tx_id & 0xFF);
+   payload[LOCK_WRITE_TX_ID_HI_IDX] = (uint8_t)(s_tx_id >> 8);
 
    if (!g_lock_connected || (0 == g_lock_char_handle))
    {
-      ESP_LOGW(TAG, "[LOCK] Not connected, queuing state=%d", state);
+      ESP_LOGW(TAG, "[LOCK] Not connected, queuing state=%d tx_id=%u",
+               state, (unsigned)s_tx_id);
       g_pending_lock_state = (int)state;
       return;
    }
@@ -608,18 +640,21 @@ void ble_send_lock_command(uint8_t state)
    ret = esp_ble_gattc_write_char(g_ble_gattc_if,
                                    g_lock_conn_id,
                                    g_lock_char_handle,
-                                   LOCK_STATE_LEN,
-                                   &state,
+                                   sizeof(payload),
+                                   payload,
                                    ESP_GATT_WRITE_TYPE_RSP,
                                    ESP_GATT_AUTH_REQ_NONE);
    if (ESP_OK == ret)
    {
-      ESP_LOGI(TAG, "[LOCK] Command sent: state=%d", state);
+      eid = bus_publish_lock(state, g_lock_batt);
+      ESP_LOGI(TAG, "[BLE_LOCK] write state=%d tx_id=%u event_id=%llu",
+               state, (unsigned)s_tx_id, (unsigned long long)eid);
       g_pending_lock_state = -1;
    }
    else
    {
-      ESP_LOGE(TAG, "[LOCK] Write failed: %s", esp_err_to_name(ret));
+      ESP_LOGE(TAG, "[LOCK] Write failed: %s tx_id=%u",
+               esp_err_to_name(ret), (unsigned)s_tx_id);
       g_pending_lock_state = (int)state;
    }
 }

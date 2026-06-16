@@ -33,6 +33,7 @@
 #include "trinity_log.h"
 #include <string.h>
 #include <stdlib.h>
+#include "vroom_bus.h"
 
 #define LIGHT_CONN_ID_INVALID  0xFFFF /**< sentinel for no active connection */
 #define LIGHT_HB_CHAR_UUID     0xAB02 /**< heartbeat characteristic UUID */
@@ -50,6 +51,15 @@ static uint16_t g_light_char_handle    = 0;   /**< control char handle */
 static uint16_t g_light_hb_handle      = 0;   /**< heartbeat char handle */
 static bool     g_light_connected      = false; /**< connection active flag */
 static bool     g_light_connecting     = false; /**< connection in progress flag */
+static uint16_t s_tx_id = 0; /**< per-session command counter; RAM only,
+                               *   resets on hub reboot. Not a global unique
+                               *   ID. Correlation key is (MAC + tx_id)
+                               *   within a bounded time window.
+                               *
+                               *   Two-phase identity:
+                               *   tx_id    = generated BEFORE write
+                               *   event_id = generated AFTER bus_publish_light()
+                               *   Device logs tx_id only. Hub logs both.   */
 
 static portMUX_TYPE g_light_mux = portMUX_INITIALIZER_UNLOCKED; /**< state mutex */
 
@@ -113,8 +123,14 @@ static void do_connect_light(void)
  ******************************************************************************/
 void ble_light_update_adv(uint8_t state)
 {
+   uint64_t eid = 0;
+
    g_current_light_state = state;
+   eid = bus_publish_light(state);
+   ESP_LOGI(TAG, "[BLE_LIGHT] adv state=%d event_id=%llu",
+            (int)state, (unsigned long long)eid);
 }
+
 
 /******************************************************************************
  * \brief Get last known light relay state.
@@ -413,9 +429,12 @@ void ble_light_handle_event(esp_gattc_cb_event_t event,
          if ((ESP_GATT_OK == p_param->read.status) &&
              (LIGHT_STATE_LEN == p_param->read.value_len))
          {
+            uint64_t eid = 0;
             g_current_light_state = p_param->read.value[0];
             stamp_device(DEV_IDX_LIGHT);
-            ESP_LOGI(TAG, "[LIGHT] State=%d", g_current_light_state);
+
+            eid = bus_publish_light(g_current_light_state);
+            ESP_LOGI(TAG, "[LIGHT] GATT state rx: event_id=%llu state=%d", (unsigned long long)eid, g_current_light_state);
          }
 
          if (-1 != g_pending_light_state)
@@ -442,9 +461,12 @@ void ble_light_handle_event(esp_gattc_cb_event_t event,
          }
          else if (LIGHT_STATE_LEN == p_param->notify.value_len)
          {
+            uint64_t eid = 0;
             g_current_light_state = p_param->notify.value[0];
-            ESP_LOGI(TAG, "[LIGHT] State notified=%d",
-                     g_current_light_state);
+
+            eid = bus_publish_light(g_current_light_state);
+            ESP_LOGI(TAG, "[LIGHT] GATT notify rx: event_id=%llu state=%d",
+                     (unsigned long long)eid, g_current_light_state);
          }
          else
          {
@@ -547,11 +569,19 @@ void ble_light_handle_event(esp_gattc_cb_event_t event,
  ******************************************************************************/
 void ble_send_light_command(uint8_t state)
 {
-   esp_err_t ret = ESP_OK; /**< esp return value */
+   esp_err_t ret     = ESP_OK;    /**< esp return value  */
+   uint8_t   payload[3] = {0};   /**< [state][tx_id_lo][tx_id_hi] */
+   uint64_t  eid     = 0;        /**< vroom event_id after bus commit */
+
+   s_tx_id++;
+   payload[0] = state;
+   payload[1] = (uint8_t)(s_tx_id & 0xFF);
+   payload[2] = (uint8_t)(s_tx_id >> 8);
 
    if (!g_light_connected || (0 == g_light_char_handle))
    {
-      ESP_LOGW(TAG, "[LIGHT] Not connected, queuing state=%d", state);
+      ESP_LOGW(TAG, "[LIGHT] Not connected, queuing state=%d tx_id=%u",
+               state, (unsigned)s_tx_id);
       g_pending_light_state = (int)state;
       return;
    }
@@ -559,18 +589,21 @@ void ble_send_light_command(uint8_t state)
    ret = esp_ble_gattc_write_char(g_ble_gattc_if,
                                    g_light_conn_id,
                                    g_light_char_handle,
-                                   LIGHT_STATE_LEN,
-                                   &state,
+                                   sizeof(payload),
+                                   payload,
                                    ESP_GATT_WRITE_TYPE_RSP,
                                    ESP_GATT_AUTH_REQ_NONE);
    if (ESP_OK == ret)
    {
-      ESP_LOGI(TAG, "[LIGHT] Command sent: %d", state);
+      eid = bus_publish_light(state);
+      ESP_LOGI(TAG, "[BLE_LIGHT] write state=%d tx_id=%u event_id=%llu",
+               state, (unsigned)s_tx_id, (unsigned long long)eid);
       g_pending_light_state = -1;
    }
    else
    {
-      ESP_LOGE(TAG, "[LIGHT] Write failed: %s", esp_err_to_name(ret));
+      ESP_LOGE(TAG, "[LIGHT] Write failed: %s tx_id=%u",
+               esp_err_to_name(ret), (unsigned)s_tx_id);
       g_pending_light_state = (int)state;
    }
 }

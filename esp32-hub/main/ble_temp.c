@@ -8,11 +8,13 @@
  * \details Implements dynamic slot table for TempSensor* devices.
  *          Mirrors the reed sensor pattern in ble_scan.c.
  *
- *          MFG data layout (4 bytes, company ID 0xAE):
+ *          MFG data layout (6 bytes, company ID 0xAE):
  *          [0] = 0xAE  (MFG_COMPANY_ID, consumed by find_mfg_data)
  *          [1] = temp_decidegc low byte   (int16 little-endian)
  *          [2] = temp_decidegc high byte
  *          [3] = batt_soc                 (0-100%)
+ *          [4] = tx_id low byte           (little-endian)
+ *          [5] = tx_id high byte          (little-endian)
  *
  *          Slot state machine:
  *          SLOT_EMPTY   — never seen or expired after TEMP_REMOVE_MS
@@ -21,6 +23,24 @@
  *
  * \note    Temperature is stored as int16_t tenths of °C (decidegC).
  *          Divide by 10 for display. e.g. 253 → 25.3°C, -100 → -10.0°C.
+ *
+ * \note    Structured event tracing — Phase 0 (2026-06-15):
+ *          Log prefix normalized to [BLE_TEMP]. Removed ">>>" style.
+ *
+ * \note    Structured event tracing — Phase 3 (2026-06-15):
+ *          bus_publish_ble_temp() now returns uint64_t event_id.
+ *          Caller captures and logs event_id at BLE ingress for
+ *          end-to-end correlation with [VROOM] ingest log.
+ *
+ * \note    Structured event tracing -- tx_id (2026-06-16):
+ *          s_rx_seq removed. tx_id extracted from mfg_data[4..5]
+ *          (little-endian) with mfg_len >= 6 guard. Defaults to 0 for
+ *          old firmware (4-byte payload). Both log lines now emit tx_id=
+ *          instead of rx_id=. Correlation key is (MAC + tx_id) within a
+ *          bounded time window. Not a global unique message ID.
+ *
+ *            [BLE] tx_id=5 temp=25.3°C batt=87%
+ *            [BLE_TEMP] tx_id=5 event_id=101 slot=0 temp=25.3°C batt=87%
  ******************************************************************************/
 
 #include "ble_temp.h"
@@ -35,12 +55,14 @@
 
 static const char *TAG = "BLE_TEMP"; /**< ESP log tag */
 
-#define MFG_TEMP_LO_IDX    1   /**< temp low byte index in mfg payload  */
-#define MFG_TEMP_HI_IDX    2   /**< temp high byte index in mfg payload */
-#define MFG_TEMP_BATT_IDX  3   /**< battery SOC byte index              */
-#define MFG_TEMP_MIN_LEN   4   /**< minimum mfg payload length          */
+#define MFG_TEMP_LO_IDX       1   /**< temp low byte index in mfg payload  */
+#define MFG_TEMP_HI_IDX       2   /**< temp high byte index in mfg payload */
+#define MFG_TEMP_BATT_IDX     3   /**< battery SOC byte index              */
+#define MFG_TEMP_MIN_LEN      4   /**< minimum mfg payload length          */
+#define MFG_TEMP_TX_ID_LO_IDX 4   /**< tx_id low byte index                */
+#define MFG_TEMP_TX_ID_HI_IDX 5   /**< tx_id high byte index               */
 
-#define AGE_MAX_VALUE      0xFFFE  /**< max reportable age value        */
+#define AGE_MAX_VALUE      0xFFFE  /**< max reportable age value            */
 
 /******************************* ENUMERATIONS *********************************/
 
@@ -114,11 +136,14 @@ void ble_temp_handle(const uint8_t *p_mfg,
 {
    int16_t  temp_decidegc = 0;    /**< decoded temperature tenths °C */
    int      batt          = -1;   /**< battery SOC percent           */
+   uint16_t tx_id         = 0;    /**< device-stamped sequence counter;
+                                   *   0 = old firmware, no tx_id in payload */
    uint32_t now           = 0;    /**< current tick in ms            */
    int      slot          = -1;   /**< matched or allocated slot idx */
    bool     was_offline   = false; /**< slot was offline flag        */
    bool     changed       = false; /**< data changed flag            */
    uint16_t gen           = 0;    /**< slot generation counter       */
+   uint64_t eid           = 0;    /**< vroom bus event id            */
    int      i             = 0;    /**< loop index                    */
 
    if ((NULL == p_mfg) || (mfg_len < MFG_TEMP_MIN_LEN))
@@ -130,6 +155,14 @@ void ble_temp_handle(const uint8_t *p_mfg,
    temp_decidegc = (int16_t)((uint16_t)p_mfg[MFG_TEMP_LO_IDX] |
                              ((uint16_t)p_mfg[MFG_TEMP_HI_IDX] << 8));
    batt          = (int)p_mfg[MFG_TEMP_BATT_IDX];
+
+   /* Extract device-stamped tx_id if payload is new format (6 bytes).
+    * Older devices send 4 bytes — tx_id stays 0, hub continues normally. */
+   if (mfg_len >= (MFG_TEMP_TX_ID_HI_IDX + 1))
+   {
+      tx_id = (uint16_t)p_mfg[MFG_TEMP_TX_ID_LO_IDX] |
+              ((uint16_t)p_mfg[MFG_TEMP_TX_ID_HI_IDX] << 8);
+   }
 
    now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
@@ -166,18 +199,25 @@ void ble_temp_handle(const uint8_t *p_mfg,
 
       if (was_offline)
       {
-         ESP_LOGI(TAG, "Temp slot %d (%s) -> ACTIVE (recovered)", slot, p_name);
+         ESP_LOGI(TAG, "[BLE_TEMP] slot=%d name=%s -> ACTIVE (recovered)",
+                  slot, p_name);
       }
 
       if (changed)
       {
-         bus_publish_ble_temp((uint8_t)(slot + 1), temp_decidegc, batt);
-         ESP_LOGI(TAG, ">>> TEMP slot %d %d.%d°C batt=%d%%",
-                  slot,
+         eid = bus_publish_ble_temp((uint8_t)(slot + 1), temp_decidegc, batt);
+         ESP_LOGI(TAG, "[BLE_TEMP] tx_id=%u event_id=%llu slot=%d "
+                       "temp=%d.%d°C batt=%d%%",
+                  (unsigned)tx_id, (unsigned long long)eid, slot,
                   (int)(temp_decidegc / 10),
                   (int)(temp_decidegc < 0 ?
                         -(temp_decidegc % 10) : temp_decidegc % 10),
                   batt);
+      }
+      else
+      {
+         ESP_LOGD(TAG, "[BLE_TEMP] tx_id=%u no_change slot=%d batt=%d",
+                  (unsigned)tx_id, slot, batt);
       }
 
       return;
@@ -196,7 +236,7 @@ void ble_temp_handle(const uint8_t *p_mfg,
    if (0 > slot)
    {
       (void)xSemaphoreGive(g_temp_mutex);
-      ESP_LOGW(TAG, "Temp table full (%d), ignoring %s", MAX_TEMPS, p_name);
+      ESP_LOGW(TAG, "[BLE_TEMP] table full (%d), ignoring %s", MAX_TEMPS, p_name);
       return;
    }
 
@@ -213,10 +253,11 @@ void ble_temp_handle(const uint8_t *p_mfg,
 
    (void)xSemaphoreGive(g_temp_mutex);
 
-   ESP_LOGI(TAG, "Temp slot %d assigned to %s (gen=%u)", slot, p_name, gen);
-   bus_publish_ble_temp((uint8_t)(slot + 1), temp_decidegc, batt);
-   ESP_LOGI(TAG, ">>> TEMP slot %d %d.%d°C batt=%d%%",
-            slot,
+   ESP_LOGI(TAG, "[BLE_TEMP] slot=%d assigned name=%s gen=%u", slot, p_name, gen);
+   eid = bus_publish_ble_temp((uint8_t)(slot + 1), temp_decidegc, batt);
+   ESP_LOGI(TAG, "[BLE_TEMP] tx_id=%u event_id=%llu slot=%d "
+                 "temp=%d.%d°C batt=%d%%",
+            (unsigned)tx_id, (unsigned long long)eid, slot,
             (int)(temp_decidegc / 10),
             (int)(temp_decidegc < 0 ?
                   -(temp_decidegc % 10) : temp_decidegc % 10),

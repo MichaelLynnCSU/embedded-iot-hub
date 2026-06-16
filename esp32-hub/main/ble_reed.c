@@ -12,6 +12,8 @@
  *          [0] = company ID  (consumed by find_mfg_data in ble_scan.c)
  *          [1] = door state  (0=closed, 1=open, 0xFF=unknown)
  *          [2] = batt_soc    (0-100%)
+ *          [3] = tx_id low byte
+ *          [4] = tx_id high byte
  *
  *          Slot state machine:
  *          SLOT_EMPTY   — never seen or expired after REED_REMOVE_MS
@@ -24,6 +26,40 @@
  *
  *          Cooldown window (BLE_COOLDOWN_MS) prevents a removed device
  *          from immediately re-claiming a slot on its next advertisement.
+ *
+ * \note    Structured event tracing — Phase 0 (2026-06-15):
+ *          Log prefix normalized to [BLE_REED].
+ *
+ * \note    Structured event tracing — Phase 3 (2026-06-15):
+ *          bus_publish_reed() now returns uint64_t event_id.
+ *          Caller captures and logs event_id at BLE ingress for
+ *          end-to-end correlation with [VROOM] ingest log.
+ *
+ * \note    Structured event tracing — Phase 3.5 (2026-06-16):
+ *          s_rx_seq added. BLE adv ingress sequence counter logged as
+ *          rx_id at every publish site. No struct or ABI changes.
+ *
+ * \note    Structured event tracing — tx_id (2026-06-16):
+ *          s_rx_seq replaced by tx_id extracted from mfg_data[3..4].
+ *          tx_id is stamped by the device on every broadcast so both
+ *          device-side and hub-side logs share the same correlation key:
+ *
+ *            [DEVICE]   tx_id=1844 state=1 batt=87%
+ *            [BLE_REED] tx_id=1844 event_id=101 slot=1 state=1 batt=87%
+ *
+ *          Graceful degradation: devices sending a 3-byte payload (old
+ *          firmware without tx_id) produce tx_id=0 in the hub log.
+ *          No crash, no behavior change — hub checks mfg_len >= 5 before
+ *          reading bytes [3..4].
+ *
+ *          Template note for other device types:
+ *          1. Add MFG_<TYPE>_TX_ID_LO_IDX and HI_IDX defines matching
+ *             the byte positions chosen in that device's payload.
+ *          2. Extract with the same mfg_len guard (>= HI_IDX + 1).
+ *          3. Declare tx_id as uint16_t, default 0.
+ *          4. Replace any s_rx_seq log reference with tx_id=.
+ *          5. Remove s_rx_seq entirely — it is no longer needed once
+ *             tx_id is available from the payload.
  ******************************************************************************/
 
 #include "ble_reed.h"
@@ -39,8 +75,10 @@
 
 static const char *TAG = "BLE_REED"; /**< ESP log tag */
 
-#define MFG_REED_STATE_IDX  1  /**< door state byte index in mfg payload */
-#define MFG_REED_BATT_IDX   2  /**< battery SOC byte index               */
+#define MFG_REED_STATE_IDX      1  /**< door state byte index in mfg payload */
+#define MFG_REED_BATT_IDX       2  /**< battery SOC byte index               */
+#define MFG_REED_TX_ID_LO_IDX   3  /**< tx_id low byte index                 */
+#define MFG_REED_TX_ID_HI_IDX   4  /**< tx_id high byte index                */
 
 
 /******************************* ENUMERATIONS *********************************/
@@ -102,8 +140,7 @@ static void cooldown_add(const uint8_t *p_mac)
 
    for (i = 1; i < COOLDOWN_COUNT; i++)
    {
-      if (g_cooldown_table[i].removed_at_ms <
-          g_cooldown_table[oldest].removed_at_ms)
+      if (g_cooldown_table[i].removed_at_ms < g_cooldown_table[oldest].removed_at_ms)
       {
          oldest = i;
       }
@@ -269,7 +306,13 @@ void ble_reed_preinit(void)
  *
  * \details Implements reed slot state machine. Known MACs update their
  *          slot. New MACs are allocated a slot if not in cooldown and
- *          table is not full.
+ *          table is not full. Captures returned event_id from
+ *          bus_publish_reed() and logs it at BLE ingress for
+ *          end-to-end correlation with [VROOM] ingest log.
+ *
+ *          tx_id is extracted from mfg_data[3..4] (little-endian) if
+ *          present (mfg_len >= 5). Old devices sending 3-byte payloads
+ *          produce tx_id=0 — no error, no behavior change.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -278,12 +321,15 @@ void ble_reed_handle(const uint8_t *p_mfg,
                      const uint8_t *p_mac,
                      const char    *p_name)
 {
-   uint8_t  door_state  = 0xFF; /**< door state byte           */
-   int      batt        = -1;   /**< battery SOC percent       */
-   uint32_t now         = 0;    /**< current tick in ms        */
-   int      slot        = -1;   /**< slot index                */
-   bool     was_offline = false; /**< slot was offline flag    */
-   uint16_t gen         = 0;    /**< slot generation counter   */
+   uint8_t  door_state  = 0xFF;   /**< door state byte                        */
+   int      batt        = -1;     /**< battery SOC percent                    */
+   uint16_t tx_id       = 0;      /**< device-stamped sequence counter;
+                                   *   0 = old firmware, no tx_id in payload  */
+   uint32_t now         = 0;      /**< current tick in ms                     */
+   int      slot        = -1;     /**< slot index                             */
+   bool     was_offline = false;  /**< slot was offline flag                  */
+   uint16_t gen         = 0;      /**< slot generation counter                */
+   uint64_t eid         = 0;      /**< correlation event ID                   */
 
    if ((NULL != p_mfg) && (mfg_len >= (MFG_REED_STATE_IDX + 1)))
    {
@@ -293,6 +339,14 @@ void ble_reed_handle(const uint8_t *p_mfg,
    if ((NULL != p_mfg) && (mfg_len >= (MFG_REED_BATT_IDX + 1)))
    {
       batt = (int)p_mfg[MFG_REED_BATT_IDX];
+   }
+
+   /* Extract device-stamped tx_id if payload is new format (5 bytes).
+    * Older devices send 3 bytes — tx_id stays 0, hub continues normally. */
+   if ((NULL != p_mfg) && (mfg_len >= (MFG_REED_TX_ID_HI_IDX + 1)))
+   {
+      tx_id = (uint16_t)p_mfg[MFG_REED_TX_ID_LO_IDX] |
+              ((uint16_t)p_mfg[MFG_REED_TX_ID_HI_IDX] << 8);
    }
 
    now = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -317,12 +371,14 @@ void ble_reed_handle(const uint8_t *p_mfg,
 
       if (was_offline)
       {
-         ESP_LOGI(TAG, "Reed slot %d (%s) -> ACTIVE (recovered)",
+         ESP_LOGI(TAG, "[BLE_REED] slot=%d name=%s -> ACTIVE (recovered)",
                   slot, p_name);
       }
 
       update_room_for_slot(slot, door_state);
-      bus_publish_reed((uint8_t)(slot + 1), door_state, batt, p_mac);
+      eid = bus_publish_reed((uint8_t)(slot + 1), door_state, batt, p_mac);
+      ESP_LOGI(TAG, "[BLE_REED] tx_id=%u event_id=%llu slot=%d state=%d batt=%d%%",
+               tx_id, (unsigned long long)eid, slot, (int)door_state, batt);
       return;
    }
 
@@ -336,7 +392,7 @@ void ble_reed_handle(const uint8_t *p_mfg,
    if (0 > slot)
    {
       (void)xSemaphoreGive(g_reed_mutex);
-      ESP_LOGW(TAG, "Reed table full (%d), ignoring %s", MAX_REEDS, p_name);
+      ESP_LOGW(TAG, "[BLE_REED] table full (%d), ignoring %s", MAX_REEDS, p_name);
       return;
    }
 
@@ -353,9 +409,11 @@ void ble_reed_handle(const uint8_t *p_mfg,
 
    (void)xSemaphoreGive(g_reed_mutex);
 
-   ESP_LOGI(TAG, "Reed slot %d assigned to %s (gen=%u)", slot, p_name, gen);
+   ESP_LOGI(TAG, "[BLE_REED] slot=%d assigned name=%s gen=%u", slot, p_name, gen);
    update_room_for_slot(slot, door_state);
-   bus_publish_reed((uint8_t)(slot + 1), door_state, batt, p_mac);
+   eid = bus_publish_reed((uint8_t)(slot + 1), door_state, batt, p_mac);
+   ESP_LOGI(TAG, "[BLE_REED] tx_id=%u event_id=%llu slot=%d state=%d batt=%d%%",
+            tx_id, (unsigned long long)eid, slot, (int)door_state, batt);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -397,7 +455,7 @@ void ble_expire_reed_slots(void)
 
       if (age > REED_REMOVE_MS)
       {
-         ESP_LOGW(TAG, "Reed slot %d (%s gen=%u) expired — clearing",
+         ESP_LOGW(TAG, "[BLE_REED] slot=%d name=%s gen=%u expired — clearing",
                   i, g_reed_table[i].name, g_reed_table[i].generation);
          cooldown_add(g_reed_table[i].mac);
          (void)memset(&g_reed_table[i], 0, sizeof(REED_SLOT_T));
@@ -406,7 +464,7 @@ void ble_expire_reed_slots(void)
                (SLOT_ACTIVE == g_reed_table[i].state))
       {
          g_reed_table[i].state = SLOT_OFFLINE;
-         ESP_LOGI(TAG, "Reed slot %d (%s) -> OFFLINE",
+         ESP_LOGI(TAG, "[BLE_REED] slot=%d name=%s -> OFFLINE",
                   i, g_reed_table[i].name);
       }
       else
@@ -424,10 +482,6 @@ void ble_expire_reed_slots(void)
  * \brief Get count of active or offline reed sensor slots.
  *
  * \return int - Highest non-empty slot index + 1, or 0 if none.
- *
- * \details Returns the count such that all slots 0..count-1 are visible
- *          on the dashboard. SLOT_EMPTY slots beyond the last active
- *          slot cause the count to stop.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
