@@ -161,17 +161,23 @@ static ssize_t lock_write(struct bt_conn *conn,
                            const void *buf, uint16_t len,
                            uint16_t offset, uint8_t flags)
 {
-    uint8_t      val       = 0;           /**< requested lock value */
-    LOCK_STATE_E old_state = LOCK_STATE_LOCKED; /**< previous state */
-    LOCK_STATE_E new_state = LOCK_STATE_LOCKED; /**< new state */
-    const char  *p_ev      = NULL;        /**< trinity event string */
+    const uint8_t *p_buf   = (const uint8_t *)buf;
+    uint8_t        val       = 0;
+    uint16_t       tx_id     = 0; /**< hub-stamped command counter;
+                                   *   0 = old hub firmware, 1-byte write */
+    LOCK_STATE_E old_state = LOCK_STATE_LOCKED;
+    LOCK_STATE_E new_state = LOCK_STATE_LOCKED;
+    const char  *p_ev      = NULL;
 
     if (LOCK_WRITE_LEN != len)
     {
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
 
-    val       = ((const uint8_t *)buf)[0];
+    val   = p_buf[LOCK_WRITE_STATE_IDX];
+    tx_id = (uint16_t)p_buf[LOCK_WRITE_TX_ID_LO_IDX] |
+            ((uint16_t)p_buf[LOCK_WRITE_TX_ID_HI_IDX] << 8);
+
     old_state = g_lock_state;
     new_state = lock_state_transition(old_state, val);
 
@@ -179,14 +185,14 @@ static ssize_t lock_write(struct bt_conn *conn,
     {
         if (lock_state_is_busy(old_state))
         {
-            printk("[LOCK] Command rejected — motor moving (%s)\n",
-                   lock_state_label(old_state));
+            printk("[LOCK] tx_id=%u command rejected — motor moving (%s)\n",
+                   (unsigned)tx_id, lock_state_label(old_state));
             trinity_log_event("EVENT: LOCK_CMD_REJECTED\n");
         }
         else
         {
-            printk("[LOCK] Command ignored — already in state %s\n",
-                   lock_state_label(old_state));
+            printk("[LOCK] tx_id=%u command ignored — already in state %s\n",
+                   (unsigned)tx_id, lock_state_label(old_state));
         }
         return len;
     }
@@ -200,24 +206,21 @@ static ssize_t lock_write(struct bt_conn *conn,
         trinity_log_event(p_ev);
     }
 
-    printk("[LOCK] %s -> %s (cmd=%d)\n",
+    printk("[LOCK] tx_id=%u %s -> %s (cmd=%d)\n",
+           (unsigned)tx_id,
            lock_state_label(old_state),
            lock_state_label(new_state),
            val);
 
-    /* Update adv with transitional state — settled adv done in ble_lock_settle() */
     ble_adv_update();
 
-    /* Notify connected client of transitional state */
     uint8_t ble_val = lock_state_to_ble(new_state);
     bt_gatt_notify(NULL, &smartlock_svc.attrs[2], &ble_val, sizeof(ble_val));
 
-    /* Drive motor — settle callback fires when motor_off_timer expires */
     motor_drive(val);
 
     return len;
 }
-
 /*----------------------------------------------------------------------------*/
 
 /******************************************************************************

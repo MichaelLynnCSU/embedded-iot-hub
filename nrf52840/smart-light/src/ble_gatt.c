@@ -27,6 +27,19 @@
  * \note    settings_load() fix (2026-03-24):
  *          Called after bt_enable() so BLE stack has a valid identity
  *          address and bt_le_adv_start() does not hang.
+ *
+ * \note    Structured event tracing -- tx_id (2026-06-16):
+ *          write_light_control() now accepts a 3-byte payload:
+ *          [state:1][tx_id_lo:1][tx_id_hi:1]. tx_id is extracted and
+ *          logged alongside state. Old 1-byte writes produce tx_id=0
+ *          (graceful degradation via LIGHT_WRITE_LEN guard).
+ *
+ *          tx_id is a per-session command counter (RAM only on hub).
+ *          Correlation key is (MAC + tx_id) within a bounded time window.
+ *          It is NOT a global unique message ID.
+ *
+ *          Two-phase identity (see main.h layout comment):
+ *          Device logs tx_id only. Hub logs tx_id + event_id mapping.
  ******************************************************************************/
 
 #include "ble_gatt.h"
@@ -137,19 +150,25 @@ static ssize_t write_light_control(struct bt_conn *conn,
                                     const void *buf, uint16_t len,
                                     uint16_t offset, uint8_t flags)
 {
-    uint8_t new_state = 0;
+    const uint8_t *p_buf   = (const uint8_t *)buf;
+    uint8_t        new_state = 0;
+    uint16_t       tx_id    = 0; /**< hub-stamped command counter;
+                                  *   0 = old hub firmware, 1-byte write */
 
     if (LIGHT_WRITE_LEN != len)
     {
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
 
-    new_state = *((const uint8_t *)buf);
+    new_state = p_buf[LIGHT_WRITE_STATE_IDX];
 
     if (new_state > LIGHT_STATE_MAX)
     {
         return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
     }
+
+    tx_id = (uint16_t)p_buf[LIGHT_WRITE_TX_ID_LO_IDX] |
+            ((uint16_t)p_buf[LIGHT_WRITE_TX_ID_HI_IDX] << 8);
 
     light_state        = new_state;
     last_activity_time = k_uptime_get();
@@ -157,7 +176,8 @@ static ssize_t write_light_control(struct bt_conn *conn,
     relay_set(light_state);
     ble_adv_update();
 
-    printk("[LIGHT] State changed to: %s\n", light_state ? "ON" : "OFF");
+    printk("[LIGHT] tx_id=%u state=%s\n",
+           (unsigned)tx_id, light_state ? "ON" : "OFF");
     trinity_log_event(light_state ? "EVENT: LIGHT_ON\n" : "EVENT: LIGHT_OFF\n");
 
     return len;
