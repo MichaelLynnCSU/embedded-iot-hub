@@ -36,6 +36,17 @@
 #define INCLUDE_CONFIG_H_
 
 #include <stdint.h>
+#include <inttypes.h>
+
+/******************************** LOGGGING ***********************************/
+// Clean formatting wrappers for Phase 4 Traceability
+#define PRI_EVENT_ID PRIx64
+
+#define LOG_TCP_TRACE(evt_id, bytes) \
+    ESP_LOGI("TCP", "[TCP] event_id=%016" PRI_EVENT_ID " publish bytes=%d", (evt_id), (bytes))
+
+#define LOG_UART_TRACE(evt_id, f_seq) \
+    ESP_LOGI("UART", "[UART] event_id=%016" PRI_EVENT_ID " tx frame_seq=%u", (evt_id), (f_seq))
 
 /******************************** CONSTANTS ***********************************/
 

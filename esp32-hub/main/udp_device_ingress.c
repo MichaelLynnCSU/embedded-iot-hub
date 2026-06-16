@@ -48,6 +48,7 @@
 static EventGroupHandle_t g_wifi_eg = NULL;
 
 static const char *TAG = "UDP_DEV_INGRESS";
+static uint32_t    rx_seq = 0;
 
 #define INGRESS_RX_BUF_SIZE   256
 #define INGRESS_TASK_STACK   4096
@@ -213,18 +214,28 @@ static void udp_device_ingress_task(void *p_arg)
 
       if (NULL != strstr(rx_buf, "\"event_type\":\"press\""))
       {
+         uint64_t pipeline_eid = 0;
+
          device_id = (uint8_t)parse_uint_field(rx_buf, "device_id");
          event_id  = parse_hex_field(rx_buf,            "event_id");
          ts_ms     = parse_u64_field(rx_buf,            "timestamp_ms");
 
          if (device_id >= MAX_DOORBELL_CAMS) { continue; }
 
+         // Increment pipeline sequence counter on verified reception
+         rx_seq++;
+
          doorbell_stamp(device_id);
 
-         ESP_LOGI(TAG, ">>> DOORBELL press device_id=%d event_id=%08lx%08lx",
-                  device_id,
-                  (unsigned long)(event_id >> 32),
-                  (unsigned long)(event_id & 0xFFFFFFFFUL));
+         // Publish and extract returned tracking ID from vroom_bus
+         pipeline_eid = bus_publish_doorbell(device_id, event_id, ts_ms);
+
+         ESP_LOGI(TAG, "[DOORBELL] rx_id=%u event_id=%llu device_id=%d cam_event_id=%llu",
+                  (unsigned)rx_seq,
+                  (unsigned long long)pipeline_eid,
+                  (int)device_id,
+                  (unsigned long long)event_id);
+
 
          snprintf(log_buf, sizeof(log_buf),
                   "EVENT: DOORBELL_PRESS device_id=%d\n", device_id);

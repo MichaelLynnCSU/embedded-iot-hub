@@ -36,6 +36,7 @@
 
 static const char *TAG        = "UART_MGR";       /**< ESP log tag              */
 static int         g_avg_temp = DEFAULT_AVG_TEMP; /**< last received avg temp   */
+static uint32_t g_frame_seq = 0; /**< monotonic UART frame counter */
 
 void uart_manager_init(void)
 {
@@ -90,8 +91,11 @@ void uart_manager_task(void)
                      trinity_log_event("EVENT: TEMP_HIGH\n");
                   }
 
-                  bus_publish_temp(g_avg_temp);
-                  ESP_LOGI(TAG, "Received avg_temp from STM32: %d", g_avg_temp);
+                  uint64_t eid = bus_publish_temp(g_avg_temp);
+                  g_frame_seq++;
+                  ESP_LOGI(TAG, "[UART] frame_seq=%u event_id=%llu avg_temp=%d",
+                            (unsigned)g_frame_seq, (unsigned long long)eid, g_avg_temp);
+
                }
 
                cJSON_Delete(p_json);
@@ -99,7 +103,7 @@ void uart_manager_task(void)
             }
             else
             {
-               ESP_LOGW(TAG, "Failed to parse JSON from STM32: %s", buf);
+               ESP_LOGW(TAG, "[UART] parse_fail buf=%s", buf);
                trinity_log_event("EVENT: UART_PARSE_FAIL\n");
             }
 
