@@ -7,8 +7,9 @@
  *
  * \details Replaces tcp_server.c. The motor node is now the TCP *client* --
  *          it connects outbound to the hub's motor listen port on each wake
- *          cycle, receives a {"pwm": X} command, sends back {"batt_motor":Y},
- *          then returns so motor_task can apply the duty and deep sleep.
+ *          cycle, receives a {"pwm": X} command, sends back {"batt_motor":Y,
+ *          "tx_id":N}, then returns so motor_task can apply the duty and
+ *          deep sleep.
  *
  *          There is no persistent accept loop and no g_client_sock global.
  *          The connection is opened and closed entirely within
@@ -28,6 +29,24 @@
  * \note    TX sweep / reconnect fix (2026-05-04, carried forward):
  *          wifi_service_reconnect() and wifi_service_tx_sweep() called from
  *          task context only -- never from ISR / event handler.
+ *
+ * \note    Structured event tracing -- tx_id (2026-06-16):
+ *          s_tx_id counter added. Incremented once per wake cycle before
+ *          the batt reply is sent. Appended to the JSON frame as "tx_id".
+ *          Hub reads it in motor_server.c and logs it alongside batt_motor.
+ *
+ *          tx_id is a per-wake-session counter (RAM only, resets each boot).
+ *          Correlation key is (IP + tx_id) within a bounded time window.
+ *          It is NOT a global unique message ID -- do not use for dedup or
+ *          audit. Log lines on both sides share the same key:
+ *
+ *            [TCP_CLIENT] TX: {"batt_motor":87,"tx_id":3} tx_id=3
+ *            [MOTOR_SRV]  batt_motor=87 tx_id=3
+ *
+ *          To apply this pattern to another TCP device:
+ *          1. Add s_tx_id static, increment before send.
+ *          2. Append "tx_id" field to outbound JSON frame.
+ *          3. Hub side: cJSON_GetObjectItem "tx_id", log it.
  ******************************************************************************/
 
 #include "tcp_client.h"
@@ -48,6 +67,11 @@
 #include "network_config.h"
 
 static const char *TAG = "TCP_CLIENT";
+
+static uint16_t s_tx_id = 0; /**< per-wake-session counter; RAM only,
+                               *   resets each boot. Not a global unique ID.
+                               *   Correlation key is (IP + tx_id) within a
+                               *   bounded time window.                       */
 
 #define CONNECT_TIMEOUT_MS   5000
 /* RECV_TIMEOUT_MS defined in main.h (30000u) -- used as-is for hub reply wait */
@@ -199,20 +223,21 @@ static int recv_frame(int sock, char *p_buf, int buf_size)
  * \brief  Single wake-cycle exchange with the hub.
  *
  * \details Connects, receives {"pwm": X}, applies duty via parse_tcp_json(),
- *          sends back current battery SOC, then closes the socket.
+ *          increments s_tx_id, sends back {"batt_motor":Y,"tx_id":N},
+ *          then closes the socket.
  *          Called once from motor_task() after WiFi is up.
  *
  * \return Duty value applied (0 if connection failed or pwm=0 received).
  */
 uint32_t tcp_client_exchange(void)
 {
-    int   sock     = -1;
-    char  rx[RX_BUF_SIZE] = {0};
-    char  tx[32]   = {0};
-    int   rlen     = 0;
-    int   batt_mv  = -1;
-    int   batt_pct = -1;
-    uint32_t duty  = 0u;
+    int      sock     = -1;
+    char     rx[RX_BUF_SIZE] = {0};
+    char     tx[48]   = {0};
+    int      rlen     = 0;
+    int      batt_mv  = -1;
+    int      batt_pct = -1;
+    uint32_t duty     = 0u;
 
     sock = open_connection();
     if (0 > sock)
@@ -241,12 +266,15 @@ uint32_t tcp_client_exchange(void)
         motor_enable();
     }
 
-    /* Report battery SOC back to hub */
+    /* Report battery SOC and tx_id back to hub */
+    s_tx_id++;
     batt_mv  = battery_read_mv();
     batt_pct = (batt_mv > 0) ? (int)mv_to_soc(batt_mv) : -1;
-    (void)snprintf(tx, sizeof(tx), "{\"batt_motor\":%d}", batt_pct);
+    (void)snprintf(tx, sizeof(tx), "{\"batt_motor\":%d,\"tx_id\":%u}",
+                   batt_pct, (unsigned)s_tx_id);
     (void)send(sock, tx, strlen(tx), 0);
-    ESP_LOGI(TAG, "TX: %s (duty=%lu)", tx, (unsigned long)duty);
+    ESP_LOGI(TAG, "TX: %s (duty=%lu) tx_id=%u",
+             tx, (unsigned long)duty, (unsigned)s_tx_id);
 
     close(sock);
     trinity_log_event("EVENT: TCP_MOTOR_DONE\n");

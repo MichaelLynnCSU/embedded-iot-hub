@@ -3,6 +3,13 @@
  * \brief Hub-side TCP server for the ESP32-C3 motor controller.
  *
  * \note  Motor server flip (2026-05-XX): see motor_server.h for full history.
+ *
+ * \note  Structured event tracing -- tx_id (2026-06-16):
+ *        tx_id extracted from motor batt reply JSON. Logged alongside
+ *        batt_motor. Defaults to 0 if field absent (old firmware).
+ *        tx_id is a per-wake-session counter (RAM only on device, resets
+ *        each boot). Correlation key is (IP + tx_id) within a bounded
+ *        time window. It is NOT a global unique message ID.
  ******************************************************************************/
 
 #include "motor_server.h"
@@ -100,11 +107,14 @@ void send_pwm_to_c3(int client_sock, float pwm_pct,
     cJSON      *p_root    = NULL;
     cJSON      *p_rx_json = NULL;
     cJSON      *p_batt    = NULL;
+    cJSON      *p_tx_id   = NULL;
     char       *p_msg     = NULL;
     char        rx[64]    = {0};
     int         duty      = 0;
     int         sent      = 0;
     int         rlen      = 0;
+    uint16_t    tx_id     = 0u; /**< device-stamped sequence counter;
+                                 *   0 = old firmware, no tx_id in payload */
     fd_set      fds;
     struct timeval tv;
 
@@ -158,11 +168,17 @@ void send_pwm_to_c3(int client_sock, float pwm_pct,
             p_rx_json = cJSON_Parse(rx);
             if (NULL != p_rx_json)
             {
-                p_batt = cJSON_GetObjectItem(p_rx_json, "batt_motor");
+                p_batt  = cJSON_GetObjectItem(p_rx_json, "batt_motor");
+                p_tx_id = cJSON_GetObjectItem(p_rx_json, "tx_id");
+
+                tx_id = (NULL != p_tx_id) ?
+                        (uint16_t)p_tx_id->valueint : 0u;
+
                 if ((NULL != p_batt) && (p_batt->valueint >= 0))
                 {
                     *p_motor_batt = p_batt->valueint;
-                    ESP_LOGI(TAG, "batt_motor=%d%%", *p_motor_batt);
+                    ESP_LOGI(TAG, "batt_motor=%d%% tx_id=%u",
+                             *p_motor_batt, (unsigned)tx_id);
                 }
                 cJSON_Delete(p_rx_json);
             }
