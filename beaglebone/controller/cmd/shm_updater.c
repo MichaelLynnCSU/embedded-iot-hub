@@ -1,8 +1,3 @@
-#include "log.h"
-#include "heartbeat.h"
-#include "db_manager.h"
-#include <string.h>
-#include <stdio.h>
 /******************************************************************************
  * \file shm_updater.c
  * \brief Shared memory projection — consumes frozen snapshot, writes shm.
@@ -14,9 +9,18 @@
  *          p_data is used directly (not via snapshot) because doorbell
  *          liveness is not part of LatestData — it lives only in the
  *          raw SensorData wire frame.
+ *
+ * \note    Logging taxonomy (2026-06-16):
+ *          [SHM] update, get_latest, get_device_status, get_room_status,
+ *          doorbell_press
  ******************************************************************************/
 
 #include "shm_updater.h"
+#include "log.h"
+#include "heartbeat.h"
+#include "db_manager.h"
+#include <string.h>
+#include <stdio.h>
 
 static void update_shm_rooms(const struct SensorData *p_data)
 {
@@ -90,7 +94,7 @@ void handle_get_latest(const struct LatestData *p_snapshot)
       shm_data->doorbell_pressed   = 1;
       shm_data->doorbell_device_id = p_snapshot->doorbell_device_id;
       shm_data->doorbell_timestamp = p_snapshot->timestamp;
-      LOG("Doorbell press device_id=%d — shm updated",
+      LOG("[SHM] doorbell_press device_id=%d",
           p_snapshot->doorbell_device_id);
    }
 
@@ -99,9 +103,11 @@ void handle_get_latest(const struct LatestData *p_snapshot)
 
    pthread_mutex_unlock(&shm_data->shm_mutex);
 
-   LOG("CMD_GET_LATEST: %.1fC %d motions",
+   LOG("[SHM] update temp=%.1fC motion=%d valid=%d seq=%u",
        shm_data->current_temp,
-       shm_data->current_motion);
+       shm_data->current_motion,
+       shm_data->data_valid,
+       shm_data->sequence);
 }
 
 void handle_get_device_status(struct CommandMsg *p_cmd)
@@ -115,7 +121,7 @@ void handle_get_device_status(struct CommandMsg *p_cmd)
    shm_data->sequence++;
    pthread_mutex_unlock(&shm_data->shm_mutex);
 
-   LOG("CMD_GET_DEVICE_STATUS served");
+   LOG("[SHM] get_device_status seq=%u", shm_data->sequence);
 }
 
 void handle_get_room_status(struct CommandMsg *p_cmd)
@@ -160,7 +166,7 @@ void handle_get_room_status(struct CommandMsg *p_cmd)
 
    pthread_mutex_unlock(&shm_data->shm_mutex);
 
-   LOG("CMD_GET_ROOM_STATUS complete (%d rooms)", count);
+   LOG("[SHM] get_room_status count=%d", count);
 }
 
 void shm_update_frame(const struct LatestData *p_snapshot,

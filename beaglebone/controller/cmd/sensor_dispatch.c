@@ -22,6 +22,9 @@
  *
  *          Dependency direction:
  *            pipe_reader.c -> sensor_dispatch.c -> shm/db/uart subsystems
+ *
+ * \note    Logging taxonomy (2026-06-16):
+ *          [DISPATCH] receive, heartbeat_stamped, fanout_complete
  ******************************************************************************/
 
 #include "config.h"
@@ -51,26 +54,8 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
 {
    struct LatestData snapshot;
 
-   if (p_data->motor_online)
-   {
-      heartbeat_stamp(DEV_MOTOR);
-      LOG("Motor online — heartbeat stamped");
-   }
-
-   /* Mutate canonical state registry */
-   update_snapshot(p_data);
-
-   /* Freeze read model — atomic struct copy */
-   get_snapshot(&snapshot);
-
-   /* Fan out to all subsystems */
-   shm_update_frame(&snapshot, p_data);
-   db_persist_frame(p_data);
-   uart_update_frame(&snapshot, p_data);
-
-   LOG("Sensor: temp=%.1f motion=%d occ=%d lgt=%d lck=%d mtr=%d "
-       "ages pir=%d lgt=%d lck=%d "
-       "batt pir=%d%% lck=%d%% motor=%d%% pirs=%d",
+   LOG("[DISPATCH] receive temp=%.1f motion=%d occ=%d lgt=%d lck=%d mtr=%d "
+       "ages pir=%d lgt=%d lck=%d batt pir=%d%% lck=%d%% motor=%d%% pirs=%d",
        p_data->avg_temp,
        p_data->motion_count,
        p_data->pir_occupied,
@@ -84,4 +69,23 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
        p_data->batt_lck,
        p_data->batt_motor,
        p_data->pir_count);
+
+   if (p_data->motor_online)
+   {
+      heartbeat_stamp(DEV_MOTOR);
+      LOG("[DISPATCH] heartbeat_stamped dev=motor");
+   }
+
+   /* Mutate canonical state registry */
+   update_snapshot(p_data);
+
+   /* Freeze read model — atomic struct copy */
+   get_snapshot(&snapshot);
+
+   /* Fan out to all subsystems */
+   shm_update_frame(&snapshot, p_data);
+   db_persist_frame(p_data);
+   uart_update_frame(&snapshot, p_data);
+
+   LOG("[DISPATCH] fanout_complete");
 }
