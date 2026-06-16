@@ -8,10 +8,12 @@
  * \details Slow-interval broadcaster advertisement. Manufacturer data
  *          payload carries lock state (1 byte) and battery SOC (1 byte).
  *
- *          MFG data layout (3 bytes):
+ *          MFG data layout (5 bytes):
  *          [0] = MFG_COMPANY_ID  (0xAB)
  *          [1] = door state      (0=closed, 1=open)
  *          [2] = batt_soc        (0-100%)
+ *          [3] = tx_id low byte
+ *          [4] = tx_id high byte
  *
  * \note    BLE adv race fix (2026-03-23):
  *          Uses bt_le_adv_update_data() instead of stop/start pattern.
@@ -23,6 +25,24 @@
  *          ble_thread while(1) uses bounded K_TIMEOUT_ABS_TICKS instead
  *          of K_FOREVER. trinity_wdt_kick() called at top of loop so
  *          WDT is fed even during periods of reed inactivity.
+ *
+ * \note    Structured event tracing — tx_id (2026-06-16):
+ *          s_tx_id is a uint16_t sequence counter incremented on every
+ *          call to ble_broadcast(). It is stamped into mfg_data[3..4]
+ *          (little-endian) before each advertisement update so the hub
+ *          can read it out of the raw payload and log it as tx_id=.
+ *
+ *          This gives both sides a shared correlation key:
+ *            [DEVICE]   tx_id=1844 state=1 batt=87%
+ *            [BLE_REED] tx_id=1844 event_id=101 slot=1 state=1 batt=87%
+ *
+ *          Template note for other device types:
+ *          1. Add s_tx_id counter to ble_adv.c (or equivalent).
+ *          2. Increment before payload write, not after.
+ *          3. Write lo byte to [N], hi byte to [N+1] at end of payload.
+ *          4. Log tx_id= in the broadcast log line.
+ *          5. Update MFG_DATA_SIZE in main.h (or equivalent header).
+ *          6. Hub side: extract with mfg_len >= (N+2) guard, default 0.
  ******************************************************************************/
 
 #include "ble_adv.h"
@@ -39,8 +59,9 @@ LOG_MODULE_REGISTER(ble_adv, LOG_LEVEL_INF);
 
 K_MSGQ_DEFINE(g_ble_msgq, sizeof(uint8_t), 8, 4);
 
-static uint8_t g_mfg_data[MFG_DATA_SIZE] =
-    {MFG_COMPANY_ID, 0x00, 0x00};
+static uint8_t   g_mfg_data[MFG_DATA_SIZE] =
+    {MFG_COMPANY_ID, 0x00, 0x00, 0x00, 0x00};  /**< [0]=company_id [1]=state [2]=batt [3]=tx_id_lo [4]=tx_id_hi */
+static uint16_t  s_tx_id = 0;                   /**< per-broadcast sequence counter — stamped into mfg_data[3..4] */
 
 static struct bt_data g_adv_data[] =
 {
@@ -82,12 +103,33 @@ K_TIMER_DEFINE(g_heartbeat_timer, heartbeat_handler, NULL);
 
 /*----------------------------------------------------------------------------*/
 
+/******************************************************************************
+ * \brief Write state and battery SOC into manufacturer data and refresh
+ *        advertisement atomically via bt_le_adv_update_data().
+ *        Does NOT stop/restart advertiser -- avoids prepare_cb race.
+ *
+ * \param state     Door state (0=closed, 1=open).
+ * \param batt_soc  Battery SOC percent (0-100).
+ *
+ * \return 0 on success, negative errno on failure.
+ *
+ * \details Increments s_tx_id before writing payload so every broadcast
+ *          carries a unique sequence number. The hub extracts tx_id from
+ *          mfg_data[3..4] (little-endian) and logs it alongside event_id
+ *          for end-to-end correlation. s_tx_id wraps at 65535 — the hub
+ *          treats wrap-around as a new sequence, not an error.
+ *
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ ******************************************************************************/
 int ble_broadcast(uint8_t state, uint8_t batt_soc)
 {
     int err = 0;
 
+    s_tx_id++;
     g_mfg_data[1] = state;
     g_mfg_data[2] = batt_soc;
+    g_mfg_data[3] = (uint8_t)(s_tx_id & 0x00FF);
+    g_mfg_data[4] = (uint8_t)(s_tx_id >> 8);
 
     err = bt_le_adv_update_data(g_adv_data, ARRAY_SIZE(g_adv_data), NULL, 0);
     if (0 != err)
@@ -96,7 +138,7 @@ int ble_broadcast(uint8_t state, uint8_t batt_soc)
     }
     else
     {
-        LOG_INF("[BLE] Broadcasting state=%d batt=%d%%", state, batt_soc);
+        LOG_INF("[BLE] tx_id=%u state=%d batt=%d%%", s_tx_id, state, batt_soc);
     }
 
     return err;
