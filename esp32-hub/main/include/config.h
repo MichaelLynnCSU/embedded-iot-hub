@@ -105,8 +105,8 @@
 /** \brief FreeRTOS task stack sizes in bytes */
 #define STACK_SIZE_WIFI_INIT        6144  /**< WiFi init task stack */
 #define STACK_SIZE_BLE_INIT         6144  /**< BLE init task stack */
-#define STACK_SIZE_UART_RX          2048  /**< UART receive task stack */
-#define STACK_SIZE_TCP_SEND         3072  /**< TCP send task stack */
+#define STACK_SIZE_UART_RX          4096  /**< UART receive task stack */
+#define STACK_SIZE_TCP_SEND         4096  /**< TCP send task stack */
 #define STACK_SIZE_AWS_SEND         6144  /**< AWS send task stack */
 
 /** \brief Default sensor values on startup */
