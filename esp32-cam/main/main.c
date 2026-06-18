@@ -8,8 +8,10 @@
  *          Pinout from board silkscreen diagram.
  *
  *          Flow:
- *          boot -> wifi up -> listen for UDP "CAPTURE" on UDP_TRIGGER_PORT
- *          trigger received -> connect to BBB -> stream frames for CAM_CLIP_DURATION_MS -> close
+ *          boot -> wifi up -> listen for UDP trigger on UDP_TRIGGER_PORT
+ *          trigger received -> parse -> enqueue cam_trigger_t ->
+ *          capture_task dequeues -> connect to BBB -> stream frames for
+ *          CAM_CLIP_DURATION_MS -> close
  *
  *          TCP connection is opened per-trigger and closed after send.
  *          No persistent connection; BBB never times out waiting for data.
@@ -18,8 +20,8 @@
  *          BBB recv timeout caused connection loss before trigger fired.
  *
  * \note    Connect-per-trigger fix (2026-05-31):
- *          tcp_connect() moved inside capture loop, called after semaphore
- *          take and successful fb_get. Socket closed after each send.
+ *          tcp_connect() moved inside capture loop, called after queue
+ *          receive and successful fb_get. Socket closed after each send.
  *          Eliminates BBB-side timeout on long inter-trigger intervals.
  *
  * \note    Resolution bump (2026-05-31):
@@ -42,7 +44,7 @@
  *          trinity_wdt / canary / panic / nvs / stats added.
  *          udp_trigger_task: recv() given a 2s SO_RCVTIMEO so the loop can
  *          kick the WDT while idle.
- *          capture_task: blocking xSemaphoreTake(portMAX_DELAY) replaced
+ *          capture_task: blocking xQueueReceive(portMAX_DELAY) replaced
  *          with bounded 2s wait so the WDT can be kicked while idle.
  *          heartbeat_task: CAM_HEARTBEAT_MS + jitter delay chunked into 2s
  *          kicks (WDT timeout is 5s).
@@ -139,11 +141,6 @@
  *              capture_task (idle-keepalive and end-of-clip) now use
  *              this instead of calling camera_recover() directly.
  *
- *          A PWDN power-cycle step was tried as part of this fix but
- *          removed again -- esp_camera_deinit()+camera_init() alone was
- *          sufficient to recover from NO-SOI in testing (see boot log
- *          2026-06-13: "Camera subsystem recovered" + clean 10s clip).
- *
  * \note    Image quality (2026-06-13):
  *          Field image was reported as too grainy to make out a face.
  *          QVGA + jpeg_quality 12 with default (uncapped) AGC gain was
@@ -153,93 +150,35 @@
  *          ceiling (GAINCEILING_2X) to eliminate AGC-driven speckle, and
  *          enabled advanced AEC (aec2) + pixel correction (bpc/wpc).
  *
- *          Diagnostic framing: if the image is now clean but dark, the
- *          bottleneck is ambient light (add illumination). If it's still
- *          blurry under bright/direct light, the fixed-focus lens on this
- *          board (OV3660, FORIOT ESP32-S3-CAM) is simply mismatched to
- *          the deployment distance -- no software fix for that.
- *
- *          These settings are applied once in camera_init() and persist
- *          across the whole session (idle keepalive + every clip) until
- *          the next camera_recover()/re-init, at which point camera_init()
- *          re-applies them automatically.
- *
- * \note    Known cosmetic issue / TODO (not yet fixed):
- *          Boot log shows:
- *              E (..) gpio: gpio_set_direction(308): GPIO number error
- *              E (..) gpio: gpio_set_level(238): GPIO output gpio_num error
- *          on every camera_init()/camera_recover() call. This is because
- *          CAM_PIN_PWDN and/or CAM_PIN_RESET (defined in cam_logic.h /
- *          board pin header) are set to a non-(-1) value for pins that
- *          aren't actually wired on this board. The esp32-camera driver
- *          then tries to drive those GPIOs and fails. Functionally
- *          harmless (driver still inits/recovers correctly), but should
- *          be cleaned up by setting CAM_PIN_PWDN / CAM_PIN_RESET to -1 in
- *          the pin header if those lines aren't connected.
- *
  * \note    VGA send-loop WDT fix (2026-06-13):
- *          Bumping to FRAMESIZE_VGA (per the image-quality tuning above)
- *          increased JPEG size from ~3.4KB to ~9.8KB/frame. send_jpeg_to_bbb()
- *          had no WDT kicks inside its send loop; under network congestion
- *          this blocked long enough (combined with FB-OVF backpressure from
- *          the camera producing frames faster than they were sent) to trip
- *          the 5s task_wdt and abort/reboot mid-clip.
+ *          Bumping to FRAMESIZE_VGA increased JPEG size from ~3.4KB to
+ *          ~9.8KB/frame. send_jpeg_to_bbb() had no WDT kicks inside its
+ *          send loop; under network congestion this blocked long enough to
+ *          trip the 5s task_wdt. Fix: trinity_wdt_kick() added inside the
+ *          send loop after each send() call.
  *
- *          Fix: trinity_wdt_kick() added inside the send loop in
- *          send_jpeg_to_bbb(), after each send() call.
+ * \note    Trigger identity model (2026-06-18):
+ *          g_trigger_sem (counting semaphore) replaced with g_capture_queue
+ *          (queue of cam_trigger_t). A semaphore was correct when the trigger
+ *          contained no information ("CAPTURE" — bare signal). Once the
+ *          trigger carries event_id, cam_tx_id, and zone it is a message,
+ *          not a signal — a queue is the correct primitive.
  *
- *          Remaining tuning TODO: FB-OVF warnings still indicate the
- *          producer (camera DMA) is outpacing the consumer (network send)
- *          at VGA + current CAM_CLIP_FRAME_MS. If this persists, consider
- *          a smaller frame size (e.g. FRAMESIZE_HVGA/CIF) or increasing
- *          CAM_CLIP_FRAME_MS to give more time per frame.
+ *          udp_trigger_task parses the incoming payload via cam_parse_trigger(),
+ *          logs [UDP_CAM_RX], and enqueues the cam_trigger_t.
+ *          capture_task dequeues it and logs event_id at every capture stage
+ *          so the full camera lifecycle shares the originating PIR identity:
  *
- * \note    XGA diagnostic block removed (2026-06-13):
- *          Root cause identified and diagnostic no longer needed.
- *
- *          The real root problem: dirty sensor state after failed XGA
- *          transition. The diagnostic block switched to FRAMESIZE_XGA at
- *          boot to test lens sharpness. set_framesize(XGA) reconfigured
- *          the sensor PLL successfully (confirmed by log), but the DMA
- *          descriptor ring was sized at init time for VGA and could not
- *          service an XGA frame -- esp_camera_fb_get() timed out with
- *          cam_hal "Failed to get the frame on time!" at exactly 4s (the
- *          default cam_hal frame-wait timeout).
- *
- *          The critical error was in the recovery path after that timeout:
- *          the code fell through to set_framesize(VGA) on a sensor whose
- *          DVP pipeline was already stalled mid-XGA-stream. Calling
- *          set_framesize() on a stalled pipeline does not flush or reset
- *          the parallel bus -- it only reconfigures the PLL and register
- *          file over SCCB. The DVP timing generator remained in a broken
- *          state, which is why the subsequent camera_recover() saw NO-SOI:
- *          the sensor re-detected fine on I2C but the parallel bus never
- *          produced a frame start. A full deinit+init eventually resolved
- *          it, but only after the NO-SOI verification fb_get() burned
- *          another ~4.5s and the recovery path itself approached the 5s
- *          WDT window.
- *
- *          The redundant double PLL calculation visible in the recovery
- *          log (two "Calculated VCO" lines 40ms apart) was also caused by
- *          this block: esp_camera_init() calculates PLL for VGA once, then
- *          the immediately-following set_framesize(VGA) inside camera_init()
- *          recalculates it redundantly. Harmless but now also gone since
- *          set_framesize() in camera_init() is no longer redundant with the
- *          config struct (both set FRAMESIZE_VGA, second call is a no-op
- *          in normal operation -- but emitting a second PLL log was
- *          misleading during diagnosis).
- *
- *          The diagnostic conclusion (lens sharpness at XGA vs VGA) was
- *          already obtained from the one flush frame that succeeded at
- *          1024x768 before the hang. No further diagnostic runs are needed.
- *          The block is removed entirely; VGA is the permanent operating
- *          resolution for this deployment.
+ *            [UDP_CAM_RX] cam_tx_id=42 event_id=101 zone=0
+ *            [CAM]        event_id=101 capture_start
+ *            [CAM]        event_id=101 jpeg_send bytes=9800
+ *            [CAM]        event_id=101 clip_done elapsed_ms=10000
  ******************************************************************************/
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -252,13 +191,21 @@
 #include "trinity_log.h"
 
 static const char *TAG = "CAM";
+
 /*---------------------------------------------------------------------------*/
 /* Globals                                                                     */
 /*---------------------------------------------------------------------------*/
 
-static SemaphoreHandle_t g_trigger_sem = NULL;
-static int               g_tcp_sock    = -1;
-static bool              g_wifi_up     = false;
+/** \brief Queue of cam_trigger_t from udp_trigger_task to capture_task.
+ *
+ *  Depth 5 matches the old semaphore count — handles burst triggers without
+ *  dropping while capture_task is busy with a clip. Each entry carries the
+ *  full trigger context (event_id, cam_tx_id, zone) so identity is preserved
+ *  through the capture pipeline. */
+static QueueHandle_t g_capture_queue = NULL;
+
+static int           g_tcp_sock      = -1;
+static bool          g_wifi_up       = false;
 
 /* Number of stale frames to drain from the DMA ring immediately after
  * tcp_connect() returns, before starting the real clip capture loop. */
@@ -267,7 +214,7 @@ static bool              g_wifi_up     = false;
 /* How often (in ms) to pull+discard one frame while idle, to keep the
  * camera pipeline alive. Must be a multiple of the 2000ms idle wait period
  * in capture_task for the counter logic below to land on it cleanly. */
-#define CAM_IDLE_PING_INTERVAL_MS        6000
+#define CAM_IDLE_PING_INTERVAL_MS       6000
 
 static esp_err_t camera_init(void);
 static esp_err_t camera_recover(void);
@@ -314,29 +261,7 @@ static esp_err_t camera_init(void)
         return err;
     }
 
-    /* ---- Image quality tuning (2026-06-13) ----
-     * Default AGC was driving high analog gain in low light, producing
-     * grainy/speckled JPEGs (whole-frame noise, not blur -- ruled out
-     * focus initially, since this board's OV3660 lens is fixed-focus).
-     *
-     * Capping gainceiling forces the sensor to stop amplifying noise:
-     * the image will be clean but may go dark in low light. That's the
-     * diagnostic signal -- if it's still blurry under bright light after
-     * this change, it's the fixed-focus lens, not gain/exposure.
-     *
-     * Follow-up (2026-06-13): user confirmed room is bright and image is
-     * still soft -- not a lighting/noise issue. Dropped jpeg_quality
-     * 10 -> 6 (less compression, less detail loss) and added
-     * set_sharpness() to counter softness via in-sensor edge enhancement.
-     * set_sharpness() return value is checked since not all sensor
-     * drivers implement it (returns -1/ESP_ERR_NOT_SUPPORTED if absent).
-     *
-     * Note: set_framesize(VGA) here is intentionally redundant with the
-     * config struct above. It is kept to make camera_init() self-contained
-     * when called from camera_recover() after a mode change left the sensor
-     * in an unknown framesize state. The redundant PLL recalculation is
-     * harmless and the log line is a useful confirmation during debugging.
-     */
+    /* ---- Image quality tuning (2026-06-13) ---- */
     sensor_t *p_sensor = esp_camera_sensor_get();
     if (NULL != p_sensor)
     {
@@ -374,15 +299,12 @@ static esp_err_t camera_init(void)
  * camera_init() re-probes the sensor over SCCB and restores all tuning.
  *
  * After re-init, a verification frame is pulled to confirm the DVP bus is
- * actually producing valid SOI/frames -- re-detecting the sensor on SCCB is
- * not sufficient evidence the parallel interface is alive ("NO-SOI" can
- * occur even after a successful re-detect, most commonly when a prior
- * failed resolution switch left the DVP pipeline stalled before deinit).
+ * actually producing valid SOI/frames — re-detecting the sensor on SCCB is
+ * not sufficient evidence the parallel interface is alive.
  *
  * WDT is kicked before/after every step that can block for a meaningful
  * time, since this can be called from a WDT-monitored task and each step
- * (deinit, power-cycle delays, re-init warmup, verification fb_get) can
- * individually approach or exceed the per-task WDT window.
+ * can individually approach or exceed the per-task WDT window.
  *
  * \return ESP_OK on success (sensor re-init AND verified producing frames),
  *         error code otherwise.
@@ -403,8 +325,6 @@ static esp_err_t camera_recover(void)
     vTaskDelay(pdMS_TO_TICKS(100));
     trinity_wdt_kick();
 
-    /* camera_init() includes its own 500ms warmup and re-applies all
-     * sensor tuning (framesize, quality, gain ceiling, AEC, BPC/WPC). */
     esp_err_t init_err = camera_init();
     trinity_wdt_kick();
 
@@ -414,9 +334,6 @@ static esp_err_t camera_recover(void)
         return init_err;
     }
 
-    /* Verify the DVP bus is actually live before declaring success.
-     * This fb_get() can block ~4.5s if the sensor re-detected on SCCB but
-     * still isn't producing SOI on the parallel bus. */
     camera_fb_t *p_verify = esp_camera_fb_get();
     trinity_wdt_kick();
 
@@ -435,12 +352,9 @@ static esp_err_t camera_recover(void)
 /**
  * \brief Recover the camera, restarting the device if recovery fails.
  *
- * camera_recover() can fail to restore a working sensor (e.g. persistent
- * NO-SOI after re-init). Retrying recovery in a tight loop just burns time
- * inside a WDT-monitored task and eventually trips the watchdog anyway (as
- * seen in the field: repeated hot-reset attempts ending in task_wdt abort).
- * If recovery doesn't produce a verified-good sensor, do a clean
- * esp_restart() instead -- this is a deterministic, bounded recovery path.
+ * If camera_recover() fails to restore a verified-good sensor, do a clean
+ * esp_restart() — deterministic and bounded, avoids tight retry loops that
+ * trip the watchdog.
  */
 static void camera_recover_or_restart(void)
 {
@@ -497,12 +411,8 @@ static void wifi_init(void)
 
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-
     esp_wifi_start();
 
-    /* WIFI_PS_NONE: tested, did not fix the idle-death issue on its own,
-     * but left in place since it has no observed downside other than idle
-     * current draw, and rules out modem-sleep as a contributing factor. */
     esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
     if (ESP_OK != ps_err)
     {
@@ -536,10 +446,8 @@ static void tcp_connect(void)
             continue;
         }
 
-        /* connect() itself can block for a while (TCP SYN timeout) if the
-         * BBB is slow to accept (e.g. still draining the previous clip's
-         * socket on back-to-back triggers). Kick before and after. */
-        int conn_err = connect(g_tcp_sock, (struct sockaddr *)&addr, sizeof(addr));
+        int conn_err = connect(g_tcp_sock,
+                               (struct sockaddr *)&addr, sizeof(addr));
         trinity_wdt_kick();
 
         if (0 == conn_err)
@@ -556,7 +464,17 @@ static void tcp_connect(void)
     }
 }
 
-static bool send_jpeg_to_bbb(camera_fb_t *p_fb)
+/**
+ * \brief Send one JPEG frame to the BeagleBone over TCP.
+ *
+ * \param p_fb      Camera frame buffer to send.
+ * \param event_id  PIR event_id carried from trigger — logged at send so
+ *                  the JPEG transmission is traceable back to the originating
+ *                  PIR event.
+ *
+ * \return true on success, false on send failure.
+ */
+static bool send_jpeg_to_bbb(camera_fb_t *p_fb, uint64_t event_id)
 {
     uint8_t  hdr[4];
     uint32_t len = (uint32_t)p_fb->len;
@@ -574,7 +492,8 @@ static bool send_jpeg_to_bbb(camera_fb_t *p_fb)
         trinity_wdt_kick();
     }
 
-    ESP_LOGI(TAG, "Sent JPEG %zu bytes to BBB", p_fb->len);
+    ESP_LOGI(TAG, "[CAM] event_id=%llu jpeg_send bytes=%zu",
+             (unsigned long long)event_id, p_fb->len);
     return true;
 }
 
@@ -582,9 +501,29 @@ static bool send_jpeg_to_bbb(camera_fb_t *p_fb)
 /* UDP trigger task                                                            */
 /*---------------------------------------------------------------------------*/
 
+/**
+ * \brief Listen for UDP trigger packets from the hub and enqueue them.
+ *
+ * \details Parses incoming UDP payload via cam_parse_trigger() to extract
+ *          event_id, cam_tx_id, and zone. Logs [UDP_CAM_RX] immediately on
+ *          receipt so the transport arrival is visible in the trace chain.
+ *          Enqueues the cam_trigger_t to g_capture_queue for capture_task.
+ *
+ *          A queue is used rather than a semaphore because the trigger now
+ *          carries identity (event_id, cam_tx_id, zone) that must be
+ *          preserved through the capture pipeline — a semaphore would
+ *          discard this context on Give/Take.
+ *
+ *          recv() is bounded to 2s via SO_RCVTIMEO so the WDT can be
+ *          kicked while idle between triggers.
+ */
 static void udp_trigger_task(void *arg)
 {
     struct sockaddr_in addr = {0};
+    char               buf[64];
+    cam_trigger_t      trig  = {0};
+    int                n     = 0;
+
     addr.sin_family      = AF_INET;
     addr.sin_port        = htons(UDP_TRIGGER_PORT);
     addr.sin_addr.s_addr = INADDR_ANY;
@@ -592,27 +531,40 @@ static void udp_trigger_task(void *arg)
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     bind(sock, (struct sockaddr *)&addr, sizeof(addr));
 
-    /* ---- Trinity: bounded recv so the loop can kick the WDT while idle ---- */
+    /* Bounded recv so the loop can kick the WDT while idle. */
     struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     trinity_wdt_add();
 
-    char buf[32];
     while (1)
     {
-        int n = recv(sock, buf, sizeof(buf) - 1, 0);
+        n = recv(sock, buf, sizeof(buf) - 1, 0);
 
         trinity_wdt_kick();
 
-        if (n > 0)
+        if (n <= 0) { continue; }
+
+        buf[n] = '\0';
+
+        if (!cam_parse_trigger(buf, &trig))
         {
-            buf[n] = '\0';
-            if (cam_is_trigger(buf))
-            {
-                ESP_LOGI(TAG, "UDP trigger received");
-                xSemaphoreGive(g_trigger_sem);
-            }
+            ESP_LOGW(TAG, "UDP: unknown payload ignored: %s", buf);
+            continue;
+        }
+
+        ESP_LOGI(TAG, "[UDP_CAM_RX] cam_tx_id=%u event_id=%llu zone=%d",
+                 (unsigned)trig.cam_tx_id,
+                 (unsigned long long)trig.event_id,
+                 (int)trig.zone);
+
+        /* Drop if queue is full — newest trigger wins on burst. Log the
+         * drop so it's visible rather than silently losing identity. */
+        if (pdTRUE != xQueueSend(g_capture_queue, &trig, 0))
+        {
+            ESP_LOGW(TAG, "[UDP_CAM_RX] queue full — drop cam_tx_id=%u event_id=%llu",
+                     (unsigned)trig.cam_tx_id,
+                     (unsigned long long)trig.event_id);
         }
     }
 }
@@ -621,28 +573,40 @@ static void udp_trigger_task(void *arg)
 /* Capture task                                                                */
 /*---------------------------------------------------------------------------*/
 
+/**
+ * \brief Dequeue trigger context and run JPEG clip capture + BBB upload.
+ *
+ * \details Receives cam_trigger_t from g_capture_queue. Logs event_id at
+ *          every stage (capture_start, jpeg_send, clip_done) so the full
+ *          camera lifecycle is traceable back to the originating PIR event
+ *          with a single grep on event_id.
+ *
+ *          Idle keepalive: pulls and discards one frame every
+ *          CAM_IDLE_PING_INTERVAL_MS while waiting for a trigger to keep
+ *          the DMA/I2S pipeline alive. If the ping times out, proactively
+ *          recovers the sensor before the next real trigger arrives.
+ *
+ *          Queue receive is bounded to 2s so the WDT can be kicked while
+ *          idle between triggers.
+ */
 static void capture_task(void *arg)
 {
+    cam_trigger_t trig            = {0};
+    uint32_t      idle_ms_since_ping = 0;
+
     while (!g_wifi_up) { vTaskDelay(pdMS_TO_TICKS(500)); }
 
-    /* ---- Trinity: register after WiFi is up, before the main loop ---- */
     trinity_wdt_add();
-
-    /* ---- Idle keepalive (2026-06-12) ----
-     * Counts elapsed idle time in units of the 2000ms xSemaphoreTake
-     * timeout below, so we can ping the camera periodically while waiting
-     * for a trigger. */
-    uint32_t idle_ms_since_ping = 0;
 
     while (1)
     {
-        /* ---- Trinity: bounded wait so the loop can kick the WDT while
-         *      idle, waiting for a trigger.                            ---- */
-        if (pdTRUE != xSemaphoreTake(g_trigger_sem, pdMS_TO_TICKS(2000)))
+        /* Bounded wait so the WDT can be kicked while idle. */
+        if (pdTRUE != xQueueReceive(g_capture_queue, &trig,
+                                    pdMS_TO_TICKS(2000)))
         {
             trinity_wdt_kick();
 
-            /* ---- Idle keepalive (2026-06-12) ---- */
+            /* ---- Idle keepalive ---- */
             idle_ms_since_ping += 2000;
             if (idle_ms_since_ping >= CAM_IDLE_PING_INTERVAL_MS)
             {
@@ -660,9 +624,6 @@ static void capture_task(void *arg)
                     camera_recover_or_restart();
                 }
 
-                /* fb_get() above (or recovery) can block; kick again
-                 * immediately so that delay doesn't eat into the 5s
-                 * per-task WDT window. */
                 trinity_wdt_kick();
             }
 
@@ -670,28 +631,22 @@ static void capture_task(void *arg)
         }
         trinity_wdt_kick();
 
-        /* Trigger received — reset the idle-ping counter so we don't
-         * double-ping right after a clip finishes. */
+        /* Trigger received — reset idle-ping counter. */
         idle_ms_since_ping = 0;
 
-        ESP_LOGI(TAG, "Triggered — starting clip");
+        ESP_LOGI(TAG, "[CAM] event_id=%llu capture_start cam_tx_id=%u zone=%d",
+                 (unsigned long long)trig.event_id,
+                 (unsigned)trig.cam_tx_id,
+                 (int)trig.zone);
 
         tcp_connect();
         trinity_wdt_kick();
 
-        /* ---- Frame-capture deadlock fix (2026-06-12) ----
-         * Drain any stale/garbage frames that may have queued up in the
-         * DMA ring during the blocking connect() above before starting
-         * the real clip. Failures here are not fatal — if the sensor is
-         * already dead, the main loop below will detect it.
-         */
+        /* Drain stale frames from DMA ring before starting clip. */
         for (int i = 0; i < CAM_POST_CONNECT_FLUSH_FRAMES; i++)
         {
             camera_fb_t *p_flush = esp_camera_fb_get();
-            if (NULL != p_flush)
-            {
-                esp_camera_fb_return(p_flush);
-            }
+            if (NULL != p_flush) { esp_camera_fb_return(p_flush); }
         }
         trinity_wdt_kick();
 
@@ -702,9 +657,6 @@ static void capture_task(void *arg)
         {
             if (sensor_dead)
             {
-                /* Sensor already confirmed dead this clip — don't pay the
-                 * ~4s fb_get() timeout on every remaining slot. Just
-                 * advance the clock so the clip still ends on schedule. */
                 vTaskDelay(pdMS_TO_TICKS(CAM_CLIP_FRAME_MS));
                 trinity_wdt_kick();
                 elapsed += CAM_CLIP_FRAME_MS;
@@ -714,9 +666,10 @@ static void capture_task(void *arg)
             camera_fb_t *p_fb = esp_camera_fb_get();
             if (NULL != p_fb)
             {
-                if (!send_jpeg_to_bbb(p_fb))
+                if (!send_jpeg_to_bbb(p_fb, trig.event_id))
                 {
-                    ESP_LOGW(TAG, "Send failed — aborting clip");
+                    ESP_LOGW(TAG, "[CAM] event_id=%llu send_failed — aborting clip",
+                             (unsigned long long)trig.event_id);
                     esp_camera_fb_return(p_fb);
                     break;
                 }
@@ -724,7 +677,9 @@ static void capture_task(void *arg)
             }
             else
             {
-                ESP_LOGE(TAG, "Capture timeout at %lu ms — marking sensor dead for this clip",
+                ESP_LOGE(TAG, "[CAM] event_id=%llu capture_timeout at %lu ms — "
+                              "marking sensor dead for this clip",
+                         (unsigned long long)trig.event_id,
                          (unsigned long)elapsed);
                 sensor_dead = true;
             }
@@ -734,14 +689,13 @@ static void capture_task(void *arg)
             elapsed += CAM_CLIP_FRAME_MS;
         }
 
-        ESP_LOGI(TAG, "Clip complete — %lu ms", (unsigned long)elapsed);
+        ESP_LOGI(TAG, "[CAM] event_id=%llu clip_done elapsed_ms=%lu",
+                 (unsigned long long)trig.event_id,
+                 (unsigned long)elapsed);
+
         close(g_tcp_sock);
         g_tcp_sock = -1;
 
-        /* ---- Frame-capture deadlock fix (2026-06-12) ----
-         * If the sensor died during this clip, hot-reset it now so the
-         * *next* trigger starts from a known-good state instead of
-         * failing 100% of the time until power-cycle. */
         if (sensor_dead)
         {
             camera_recover_or_restart();
@@ -776,7 +730,6 @@ static void heartbeat_task(void *arg)
         return;
     }
 
-    /* ---- Trinity: register before entering the heartbeat loop ---- */
     trinity_wdt_add();
 
     while (1)
@@ -794,14 +747,13 @@ static void heartbeat_task(void *arg)
 
         ESP_LOGI(TAG, "Heartbeat sent seq=%lu", (unsigned long)(seq - 1));
 
-        /* ---- Trinity: chunk the heartbeat interval into 2s kicks so the
-         *      WDT (5s timeout) never starves during the wait.        ---- */
         uint32_t jitter_ms = esp_random() % CAM_HEARTBEAT_JITTER;
         uint32_t total_ms  = CAM_HEARTBEAT_MS + jitter_ms;
 
         for (uint32_t elapsed = 0; elapsed < total_ms; elapsed += 2000)
         {
-            uint32_t chunk = (total_ms - elapsed > 2000) ? 2000 : (total_ms - elapsed);
+            uint32_t chunk = (total_ms - elapsed > 2000) ?
+                             2000 : (total_ms - elapsed);
             vTaskDelay(pdMS_TO_TICKS(chunk));
             trinity_wdt_kick();
         }
@@ -820,7 +772,11 @@ void app_main(void)
     trinity_log_init();
     trinity_wdt_init();
 
-    g_trigger_sem = xSemaphoreCreateCounting(5, 0);
+    /* Queue of cam_trigger_t — depth 5 handles burst triggers while
+     * capture_task is busy with a clip. Replaces g_trigger_sem (counting
+     * semaphore, depth 5) which was correct when the trigger contained no
+     * data but wrong once event_id/cam_tx_id/zone need to be preserved. */
+    g_capture_queue = xQueueCreate(5, sizeof(cam_trigger_t));
 
     if (ESP_OK != camera_init())
     {
@@ -834,14 +790,6 @@ void app_main(void)
     xTaskCreate(capture_task,     "capture",     8192, NULL, 5, NULL);
     xTaskCreate(heartbeat_task,   "heartbeat",   4096, NULL, 4, NULL);
 
-    /* -----------------------------------------------------------------------
-     * log main-task stack high-water-mark before app_main() exits.
-     *
-     * trinity_wdt_kick() covers all spawned Trinity tasks, but app_main()
-     * itself never calls it.  Sample here so a shrinking margin is visible
-     * in the serial log on every boot AND survives a crash via the NVS fault
-     * log (trinity_log_dump_previous() on next boot).
-     * --------------------------------------------------------------------- */
     {
         UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
         ESP_LOGI(TAG,
@@ -855,11 +803,11 @@ void app_main(void)
         if (hwm < (UBaseType_t)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS)
         {
             ESP_LOGW(TAG,
-                     "[TRINITY] LOW STACK on main task at exit: hwm=%u words threshold=%u words",
+                     "[TRINITY] LOW STACK on main task at exit: "
+                     "hwm=%u words threshold=%u words",
                      (unsigned)hwm,
                      (unsigned)CONFIG_TRINITY_STACK_LOW_WATERMARK_WORDS);
             trinity_log_record_low_stack((uint32_t)hwm);
         }
     }
-
 }
