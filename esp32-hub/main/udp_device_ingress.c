@@ -22,6 +22,12 @@
  *          Extended to handle camera heartbeats alongside doorbell events.
  *          doorbell_get_age_s() and doorbell_is_alive() retain their names
  *          for compatibility with existing tcp_manager.c call sites.
+ *
+ * \note    Bug fix — duplicate publish removed (2026-06-16):
+ *          bus_publish_doorbell() was called twice on every press event.
+ *          First call captured pipeline_eid correctly. Second call was
+ *          redundant — event_id incremented twice, BeagleBone received
+ *          two events per press. Second call removed.
  ******************************************************************************/
 
 /*
@@ -222,12 +228,13 @@ static void udp_device_ingress_task(void *p_arg)
 
          if (device_id >= MAX_DOORBELL_CAMS) { continue; }
 
-         // Increment pipeline sequence counter on verified reception
          rx_seq++;
 
          doorbell_stamp(device_id);
 
-         // Publish and extract returned tracking ID from vroom_bus
+         /* Single publish — pipeline_eid captured for log correlation.
+          * Second call removed (2026-06-16): was incrementing event_id
+          * twice and delivering duplicate events to BeagleBone. */
          pipeline_eid = bus_publish_doorbell(device_id, event_id, ts_ms);
 
          ESP_LOGI(TAG, "[DOORBELL] rx_id=%u event_id=%llu device_id=%d cam_event_id=%llu",
@@ -236,11 +243,9 @@ static void udp_device_ingress_task(void *p_arg)
                   (int)device_id,
                   (unsigned long long)event_id);
 
-
          snprintf(log_buf, sizeof(log_buf),
                   "EVENT: DOORBELL_PRESS device_id=%d\n", device_id);
          trinity_log_event(log_buf);
-         bus_publish_doorbell(device_id, event_id, ts_ms);
       }
       else if (NULL != strstr(rx_buf, "\"event_type\":\"heartbeat\""))
       {
