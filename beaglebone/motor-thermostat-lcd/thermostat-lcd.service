@@ -1,12 +1,12 @@
 [Unit]
-Description=Motor thermostat LCD — PID average temp and motor status display
+Description=Thermostat LCD — PID average temp and motor status display
 After=network.target data-controller.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/home/debian/motor-thermostat-lcd
-ExecStart=/home/debian/motor-thermostat-lcd/motor_lcd
+ExecStart=/home/debian/motor-thermostat-lcd/thermostat_lcd
 Restart=always
 RestartSec=10
 StandardOutput=journal

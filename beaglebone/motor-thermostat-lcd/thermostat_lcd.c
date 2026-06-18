@@ -1,24 +1,26 @@
 /******************************************************************************
- * \file motor_lcd.c
+ * \file thermostat_lcd.c
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  * \date 01-01-2025
  *
- * \brief Motor thermostat LCD display for BeagleBone.
+ * \brief Thermostat LCD display for BeagleBone.
  *
- * \details Reads motor PID state from shared memory and renders it on a
+ * \details Reads thermostat state from shared memory and renders it on a
  *          HD44780 16x2 LCD via direct GPIO register access.
  *
  *          This is NOT the smart home dashboard. The smart home dashboard
- *          is the STM32 blackpill running LVGL on an ILI9341 TFT display.
+ *          is the STM32 BlackPill running LVGL on an ILI9341 TFT display.
  *
  *          This LCD shows:
- *            Line 0: average temperature used by the motor PID loop
+ *            Line 0: average temperature used by the PID loop
  *            Line 1: motor online status and battery percentage
  *
  *          Data source: POSIX shared memory /sensor_shm written by
  *          data_controller. Protected by shm_data->shm_mutex
- *          (PTHREAD_PROCESS_SHARED) — the named semaphore shm_sem no
- *          longer exists as of the 2026-05-22 mutex migration.
+ *          (PTHREAD_PROCESS_SHARED).
+ *
+ *          SHM read logged as:
+ *            [SHM] transport=sensor_shm event_id=M read dst=thermostat_lcd
  *
  * \note    Semaphore → mutex (2026-05-22):
  *          sem_open/sem_wait/sem_post removed. All shared memory access
@@ -28,7 +30,12 @@
  *          Displays shm_data->current_temp (avg temp for PID) and
  *          shm_data->batt_motor only. Smart home fields (motion, lock,
  *          light, reed, PIR) are not displayed here — those belong on
- *          the STM32 blackpill dashboard.
+ *          the STM32 BlackPill dashboard.
+ *
+ * \note    Renamed from motor_lcd.c (2026-06-18):
+ *          motor_lcd implied display of motor state only. This process
+ *          owns the full thermostat loop display — temperature sensors,
+ *          motor PID, and room cooling state.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -42,9 +49,9 @@
 
 /******************************** CONSTANTS ***********************************/
 
-#define SHM_NAME         "/sensor_shm"  /**< shared memory object name        */
-#define UPDATE_INTERVAL  2              /**< display refresh interval seconds  */
-#define LCD_LOG          "/var/log/motor_lcd.log" /**< log file path          */
+#define SHM_NAME         "/sensor_shm"            /**< shared memory object name   */
+#define UPDATE_INTERVAL  2                         /**< display refresh interval s  */
+#define LCD_LOG          "/var/log/thermostat_lcd.log" /**< log file path           */
 
 /********************************** LOGGING ***********************************/
 
@@ -83,8 +90,8 @@ int main(void)
    }
 
    LOG("=========================================");
-   LOG("Motor thermostat LCD starting");
-   LOG("NOT the smart home dashboard (that is the STM32 blackpill/LVGL)");
+   LOG("Thermostat LCD starting");
+   LOG("NOT the smart home dashboard (that is the STM32 BlackPill/LVGL)");
    LOG("=========================================");
 
    /* 1. Map GPIO banks */
@@ -102,7 +109,7 @@ int main(void)
 
    lcd_clear();
    lcd_set_cursor(0, 0);
-   lcd_print("Motor Thermo");
+   lcd_print("Thermostat");
    lcd_set_cursor(1, 0);
    lcd_print("Starting...");
    sleep(2);
@@ -145,21 +152,24 @@ int main(void)
 
    while (1)
    {
-      double  temp       = 0.0;
-      int     batt_motor = -1;
-      int     valid      = 0;
-      int     seq        = 0;
-      int     online     = 0;
+      double   temp       = 0.0;
+      int      batt_motor = -1;
+      int      valid      = 0;
+      int      seq        = 0;
+      int      online     = 0;
+      uint64_t event_id   = 0;
 
-      /* Read motor PID fields under the process-shared mutex.
-       * shm_sem no longer exists — use shm_mutex (2026-05-22 migration). */
       pthread_mutex_lock((pthread_mutex_t *)&shm_data->shm_mutex);
       temp       = shm_data->current_temp;
       batt_motor = shm_data->batt_motor;
       valid      = shm_data->data_valid;
       seq        = shm_data->sequence;
       online     = shm_data->device_online[3]; /* index 3 = DEV_MOTOR */
+      event_id   = shm_data->event_id;
       pthread_mutex_unlock((pthread_mutex_t *)&shm_data->shm_mutex);
+
+      LOG("[SHM] transport=sensor_shm event_id=%llu read dst=thermostat_lcd",
+          (unsigned long long)event_id);
 
       if (!valid)
       {
@@ -179,7 +189,7 @@ int main(void)
          char line0[17];
          char line1[17];
 
-         LOG("Motor LCD update: temp=%.1fC batt=%d%% online=%d (seq=%d)",
+         LOG("Thermostat LCD update: temp=%.1fC batt=%d%% online=%d (seq=%d)",
              temp, batt_motor, online, seq);
 
          /* Line 0: average temperature for PID loop */

@@ -11,8 +11,46 @@
  *          raw SensorData wire frame.
  *
  * \note    Logging taxonomy (2026-06-16):
- *          [SHM] update, get_latest, get_device_status, get_room_status,
- *          doorbell_press
+ *          [SHM] write src=pipe_ingress  — sensor frame from named pipe
+ *          [SHM] write src=uart_ingress  — frame from STM32 BlackPill UART
+ *          [SHM] read  dst=blackpill_lcd — uart_push_thread reading to build
+ *                                          UART bundle for STM32 BlackPill
+ *          [SHM] read  dst=thermostat_lcd — motor_lcd reading temp and motor
+ *                                           state for HD44780 display
+ *          [SHM] get_device_status
+ *          [SHM] get_room_status
+ *          [SHM] doorbell_press
+ *
+ * \note    Structured event tracing (2026-06-16):
+ *          handle_get_latest() projects event_id from p_snapshot into
+ *          shm_data->event_id under the shm_mutex, then logs it after
+ *          the lock is released using p_snapshot (stable, not re-read
+ *          from shm).
+ *
+ *          SHM has two writers and two readers:
+ *
+ *            [SHM] transport=sensor_shm event_id=M write src=pipe_ingress
+ *            [SHM] transport=sensor_shm event_id=M write src=uart_ingress
+ *            [SHM] transport=sensor_shm event_id=M read  dst=blackpill_lcd
+ *            [SHM] transport=sensor_shm event_id=M read  dst=thermostat_lcd
+ *
+ *          pipe_ingress: sensor data from ESP32 via named pipe
+ *                        sensor_frame_dispatch() → shm_update_frame()
+ *                        → handle_get_latest()
+ *
+ *          uart_ingress: heartbeat and command frames from STM32 BlackPill
+ *                        uart_parse_line() → handle_get_latest()
+ *
+ *          blackpill_lcd: uart_push_thread() reads SHM to build the UART
+ *                         bundle pushed to STM32 BlackPill every 5s
+ *
+ *          thermostat_lcd: motor_lcd reads current_temp and batt_motor
+ *                          for the HD44780 motor thermostat display
+ *
+ *          event_id is the most recent non-zero value from lock_event_id
+ *          or light_event_id in the snapshot. PIR/reed/temp event IDs are
+ *          per-slot and not scalar — they are not projected here; their
+ *          trace ends at [DISPATCH].
  ******************************************************************************/
 
 #include "shm_updater.h"
@@ -76,8 +114,18 @@ static void update_shm_cam_liveness(const struct SensorData *p_data)
    pthread_mutex_unlock(&shm_data->shm_mutex);
 }
 
-void handle_get_latest(const struct LatestData *p_snapshot)
+void handle_get_latest(const struct LatestData *p_snapshot, const char *p_src)
 {
+   uint32_t seq      = 0;
+   uint64_t event_id = 0;
+
+   /* Pick the most recent non-zero event_id from the snapshot.
+    * lock and light are the only scalar event IDs that flow through
+    * LatestData. PIR/reed/temp are per-slot and end at [DISPATCH]. */
+   event_id = p_snapshot->lock_event_id
+              ? p_snapshot->lock_event_id
+              : p_snapshot->light_event_id;
+
    pthread_mutex_lock(&shm_data->shm_mutex);
 
    shm_data->current_temp      = p_snapshot->avg_temp;
@@ -88,6 +136,7 @@ void handle_get_latest(const struct LatestData *p_snapshot)
    shm_data->current_timestamp = p_snapshot->timestamp;
    shm_data->data_valid        = p_snapshot->valid;
    shm_data->sequence++;
+   shm_data->event_id          = event_id;
 
    if (p_snapshot->doorbell_pressed)
    {
@@ -101,13 +150,21 @@ void handle_get_latest(const struct LatestData *p_snapshot)
    shm_data->last_command   = CMD_GET_LATEST;
    shm_data->command_result = 0;
 
+   seq = shm_data->sequence;
+
    pthread_mutex_unlock(&shm_data->shm_mutex);
 
-   LOG("[SHM] update temp=%.1fC motion=%d valid=%d seq=%u",
-       shm_data->current_temp,
-       shm_data->current_motion,
-       shm_data->data_valid,
-       shm_data->sequence);
+   /* Log from p_snapshot — not from shm_data — so the line reflects
+    * exactly what was written even if another thread writes immediately
+    * after the unlock. */
+   LOG("[SHM] transport=sensor_shm event_id=%llu write src=%s "
+       "temp=%.1fC motion=%d valid=%d seq=%u",
+       (unsigned long long)event_id,
+       p_src,
+       p_snapshot->avg_temp,
+       p_snapshot->motion_count,
+       p_snapshot->valid,
+       seq);
 }
 
 void handle_get_device_status(struct CommandMsg *p_cmd)
@@ -172,7 +229,7 @@ void handle_get_room_status(struct CommandMsg *p_cmd)
 void shm_update_frame(const struct LatestData *p_snapshot,
                       const struct SensorData *p_data)
 {
-   handle_get_latest(p_snapshot);
+   handle_get_latest(p_snapshot, "pipe_ingress");
    update_shm_rooms(p_data);
    update_shm_doorbell_liveness(p_data);
    update_shm_cam_liveness(p_data);

@@ -10,7 +10,7 @@
  *              uart_controller.h, used by both uart_transport.c and here)
  *            - build_and_push()  — payload formatter, calls uart_push_msg()
  *            - uart_push_thread() — UART-ingress push path (sem-driven)
- *            - uart_update_frame() — TCP-ingress push path (synchronous)
+ *            - uart_update_frame() — pipe-ingress push path (synchronous)
  *
  *          Implementations moved to dedicated modules (no behavior change):
  *            uart_transport.c  — uart_reader_thread, uart_ring_push/pop,
@@ -22,20 +22,17 @@
  *                                 doorbell_inject_pending,
  *                                 g_db_pending* state
  *
- *          The "doorbell pending" calls in both push paths previously wrote
- *          g_db_pending* directly — now they call doorbell_pending_mark()
- *          from doorbell_pending.h. The fd guard previously checked
- *          g_uart_fd directly — now calls uart_transport_is_open().
- *
- * \note    See the original uart_controller.c header (pre-split) for the
- *          full design rationale, protocol format, and change history.
+ * \note    SHM read path (dst=blackpill_lcd):
+ *          Both uart_push_thread() and uart_update_frame() read from SHM
+ *          to build the UART bundle pushed to the STM32 BlackPill display.
+ *          Each logs:
+ *            [SHM] transport=sensor_shm event_id=M read dst=blackpill_lcd
  *
  * \note    Rate-limit to 2 per second max.
  *          Bundle size grows with doorbell/cam count (~280 bytes at 3DB/4CAM,
  *          ~24ms at 115200 baud). Back-to-back TCP frames from simultaneous
  *          camera triggers can saturate the STM32 ring buffer before
  *          drain_uart_queue() drains it. 500ms gives ~100 drain cycles.
- *
  ******************************************************************************/
 
 #include <pthread.h>
@@ -213,19 +210,21 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
 }
 
 /******************************************************************************
- * \brief Thread — sends sensor state to STM32, driven by g_uart_frame_sem.
+ * \brief Thread — sends sensor state to STM32 BlackPill, driven by
+ *        g_uart_frame_sem.
  *
  * \param p_arg - Unused thread argument.
  *
  * \return void*
  *
  * \details Blocks on g_uart_frame_sem with UART_PUSH_INTERVAL_SEC watchdog
- *          ceiling. Wakes immediately when uart_parse_line() posts a frame,
- *          drains all pending frames from g_uart_ring, then builds and sends
- *          the full STM32 protocol payload from a single get_snapshot() call.
+ *          ceiling. Wakes immediately when uart_parse_line() posts a frame
+ *          from the STM32 BlackPill (heartbeat or command), drains all
+ *          pending frames from g_uart_ring, then reads SHM and snapshot
+ *          to build and send the full STM32 protocol payload.
  *
- *          Handles UART-ingress frames (PIR/LGT/LCK) only. TCP-ingress
- *          frames are handled synchronously by uart_update_frame().
+ *          SHM read logged as:
+ *            [SHM] transport=sensor_shm event_id=M read dst=blackpill_lcd
  *
  *          Doorbell state is read from shm_data under shm_mutex and cleared
  *          one-shot. doorbell_pending_check() polls for a late-arriving
@@ -263,6 +262,7 @@ void *uart_push_thread(void *p_arg)
    char     db_asset[DOORBELL_ASSET_LEN];
    int      i                  = 0;
    UartFrame frame             = {0};
+   uint64_t  event_id          = 0;
 
    uint8_t  r_state[MAX_REEDS];
    int8_t   r_batt[MAX_REEDS];
@@ -295,7 +295,6 @@ void *uart_push_thread(void *p_arg)
 
       if (!running) { break; }
 
-      /* uart_transport_is_open() replaces the old direct g_uart_fd check */
       if (!uart_transport_is_open()) { continue; }
 
       /* Rate-limit outbound bundles to 2 per second max.
@@ -330,10 +329,14 @@ void *uart_push_thread(void *p_arg)
       motion              = shm_data->current_motion;
       lgt                 = shm_data->current_light;
       lck                 = shm_data->current_lock;
+      event_id            = shm_data->event_id;
       doorbell_pressed    = shm_data->doorbell_pressed;
       doorbell_device_id  = shm_data->doorbell_device_id;
       if (0 != doorbell_pressed) { shm_data->doorbell_pressed = 0; }
       pthread_mutex_unlock(&shm_data->shm_mutex);
+
+      LOG("[SHM] transport=sensor_shm event_id=%llu read dst=blackpill_lcd",
+          (unsigned long long)event_id);
 
       if (!valid)
       {
@@ -347,7 +350,6 @@ void *uart_push_thread(void *p_arg)
       db_conf_pct        = 0;
       db_asset[0]        = '\0';
 
-      /* Check for late-arriving result from a previous press cycle */
       doorbell_pending_check();
 
       if (0 != doorbell_pressed)
@@ -360,12 +362,10 @@ void *uart_push_thread(void *p_arg)
          {
             LOG("[CONTROLLER] waiting_for_result device_id=%d",
                 doorbell_device_id);
-            /* doorbell_pending_mark() replaces direct g_db_pending* writes */
             doorbell_pending_mark(doorbell_device_id);
          }
       }
 
-      /* Inject pending result into bundle if ready and no new press */
       doorbell_inject_pending(&doorbell_pressed, &doorbell_device_id,
                               &db_inference_valid, &db_event_id,
                               &db_person, &db_conf_pct,
@@ -440,7 +440,7 @@ void *uart_push_thread(void *p_arg)
 }
 
 /******************************************************************************
- * \brief Synchronous outbound push to STM32 from TCP ingress path.
+ * \brief Synchronous outbound push to STM32 BlackPill from pipe ingress path.
  *
  * \param p_snapshot  - Frozen read model from get_snapshot(). Not modified.
  * \param p_raw_frame - Raw wire frame from sensor pipe. Used for
@@ -448,15 +448,16 @@ void *uart_push_thread(void *p_arg)
  *
  * \return void
  *
- * \details Called from sensor_frame_dispatch() on every TCP ingress frame.
+ * \details Called from sensor_frame_dispatch() on every pipe ingress frame.
+ *          Reads doorbell state from SHM under shm_mutex, logged as:
+ *            [SHM] transport=sensor_shm event_id=M read dst=blackpill_lcd
  *          Builds the full STM32 protocol payload from the frozen snapshot
- *          and sends it via uart_push_msg(). Doorbell state is read from
- *          shm_data under shm_mutex and cleared one-shot.
+ *          and sends it via uart_push_msg().
  *
  *          doorbell_pending_check() polls for a late-arriving result;
  *          doorbell_inject_pending() injects it into the bundle if ready.
  *          doorbell_pending_mark() records a press when no result is
- *          available yet — replaces direct g_db_pending* writes.
+ *          available yet.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -473,11 +474,11 @@ void uart_update_frame(const struct LatestData *p_snapshot,
    int      db_inference_valid     = 0;
    uint8_t  db_person              = 0;
    uint8_t  db_conf_pct            = 0;
+   uint64_t event_id               = 0;
    char     db_asset[DOORBELL_ASSET_LEN];
 
-
-    /* Rate-limit to 2 per second max — matches uart_push_thread limit.
-    * Prevents STM32 queue saturation from back-to-back TCP frames.   */
+   /* Rate-limit to 2 per second max — matches uart_push_thread limit.
+    * Prevents STM32 queue saturation from back-to-back pipe frames.   */
    {
       static struct timespec s_last;
       struct timespec        now;
@@ -489,7 +490,7 @@ void uart_update_frame(const struct LatestData *p_snapshot,
    }
 
    if (!p_snapshot->valid)        { return; }
-   if (!uart_transport_is_open()) { return; }  /* replaces: 0 > g_uart_fd */
+   if (!uart_transport_is_open()) { return; }
 
    db_asset[0] = '\0';
 
@@ -610,14 +611,17 @@ void uart_update_frame(const struct LatestData *p_snapshot,
       }
    }
 
-   /* Check for late-arriving result from a previous press cycle */
    doorbell_pending_check();
 
    pthread_mutex_lock(&shm_data->shm_mutex);
    doorbell_pressed   = shm_data->doorbell_pressed;
    doorbell_device_id = shm_data->doorbell_device_id;
+   event_id           = shm_data->event_id;
    if (doorbell_pressed) { shm_data->doorbell_pressed = 0; }
    pthread_mutex_unlock(&shm_data->shm_mutex);
+
+   LOG("[SHM] transport=sensor_shm event_id=%llu read dst=blackpill_lcd",
+       (unsigned long long)event_id);
 
    if (0 != doorbell_pressed)
    {
@@ -628,12 +632,10 @@ void uart_update_frame(const struct LatestData *p_snapshot,
       if (!db_inference_valid)
       {
          LOG("[CONTROLLER] waiting_for_result device_id=%d", doorbell_device_id);
-         /* doorbell_pending_mark() replaces direct g_db_pending* writes */
          doorbell_pending_mark(doorbell_device_id);
       }
    }
 
-   /* Inject pending result into bundle if ready and no new press */
    doorbell_inject_pending(&doorbell_pressed, &doorbell_device_id,
                            &db_inference_valid, &db_event_id,
                            &db_person, &db_conf_pct,

@@ -9,28 +9,35 @@
  *          into transport / protocol / correlation / lock-adapter modules,
  *          no behavior change). See uart_transport.h for design rationale.
  *
- *          Rule: this file does not know what a "doorbell" is. It owns:
+ *          This file owns:
  *            - g_uart_fd lifecycle (uart_open, uart_reader_thread)
  *            - line framing + per-line dispatch (uart_parse_line)
  *            - ring buffer push/pop (uart_ring_push/uart_ring_pop)
  *            - uart_push_msg() — the only UART write primitive
  *
- *          uart_parse_line() dispatches PIR/LGT/LCK frames. PIR/LGT route
- *          to uart_stage_pir()/uart_stage_light() (cmd/uart_staging.c,
- *          registry writes). LCK routes to uart_process_lock()
- *          (uart_lock.c) — the only cross-module call in this file beyond
- *          registry staging, kept because lock frames arrive on this
- *          transport's RX path and uart_lock.c is the designated adapter
- *          for them.
+ *          uart_parse_line() handles inbound frames from the STM32
+ *          BlackPill on /dev/ttyS1. The STM32 is a display consumer —
+ *          it receives sensor bundles from uart_push_thread() and sends
+ *          back heartbeat (HB) frames and future command frames (LGT/LCK)
+ *          triggered by user interaction on the LVGL display.
  *
- * \note    Counting semaphore + ring buffer (2026-05-22, preserved):
+ *          On receiving a frame, uart_parse_line():
+ *            1. Stamps the device heartbeat
+ *            2. Saves to DB
+ *            3. Routes to the appropriate staging function
+ *            4. Pushes onto g_uart_ring and signals g_uart_frame_sem
+ *            5. Writes updated snapshot to SHM via handle_get_latest()
+ *               with src=uart_ingress so the blackpill_lcd and
+ *               thermostat_lcd readers see the update immediately
+ *
+ * \note    Counting semaphore + ring buffer (2026-05-22):
  *          uart_ring_push() and uart_ring_pop() — single-producer
  *          single-consumer ring buffer (capacity UART_RING_SIZE frames).
  *          uart_parse_line() calls uart_ring_push() then sem_post() so
  *          the semaphore count equals the number of frames in the buffer
- *          at all times. uart_push_thread() (uart_protocol.c) calls
- *          sem_timedwait() then uart_ring_pop() — the successful wait
- *          guarantees a frame exists, so pop never races.
+ *          at all times. uart_push_thread() calls sem_timedwait() then
+ *          uart_ring_pop() — the successful wait guarantees a frame
+ *          exists, so pop never races.
  ******************************************************************************/
 
 #include <termios.h>
@@ -182,20 +189,27 @@ static int uart_open(const char *p_dev)
 }
 
 /******************************************************************************
- * \brief Parse and process one inbound UART frame from STM32.
+ * \brief Parse and process one inbound UART frame from STM32 BlackPill.
  *
- * \param p_line - Null-terminated line string read from UART device.
+ * \param p_line - Null-terminated line string read from /dev/ttyS1.
  *
  * \return void
  *
- * \details Parses <ID>:<value>[,<batt>] format. Stamps heartbeat, saves
- *          to DB, routes to the appropriate staging function, pushes onto
- *          g_uart_ring, signals g_uart_frame_sem, then pushes the updated
- *          snapshot to shm via handle_get_latest().
+ * \details Parses <ID>:<value>[,<batt>] format. Supported inbound IDs:
+ *            HB  — heartbeat from BlackPill, stamps device liveness only
+ *            LGT — light command (future: user button press on LVGL display)
+ *            LCK — lock command  (future: user button press on LVGL display)
+ *            PIR — PIR state     (future)
  *
- *          All registry writes go through uart_stage_pir(),
- *          uart_stage_light(), or uart_process_lock() -> uart_stage_lock()
- *          — no direct state_registry calls here.
+ *          On a valid frame:
+ *            1. heartbeat_stamp() — marks device online
+ *            2. db_save_uart()    — persists to SQLite
+ *            3. staging function  — updates state registry
+ *            4. uart_ring_push() + sem_post() — wakes uart_push_thread
+ *            5. handle_get_latest(src=uart_ingress) — projects updated
+ *               snapshot to SHM so blackpill_lcd and thermostat_lcd
+ *               readers see the change without waiting for the next
+ *               pipe_ingress frame
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -278,23 +292,25 @@ static void uart_parse_line(const char *p_line)
    uart_ring_push(&frame);
    sem_post(&g_uart_frame_sem);
 
-   /* Push updated snapshot to shm immediately after staging so the
-    * LCD display sees UART-ingress updates without waiting for the
-    * next TCP frame cycle.                                           */
+   /* Project updated snapshot to SHM immediately so blackpill_lcd and
+    * thermostat_lcd readers see the change without waiting for the
+    * next pipe_ingress frame.                                         */
    get_snapshot(&snap);
-   handle_get_latest(&snap);
+   handle_get_latest(&snap, "uart_ingress");
 }
 
 /******************************************************************************
- * \brief Thread — reads line-framed UART data from STM32.
+ * \brief Thread — reads line-framed UART data from STM32 BlackPill.
  *
  * \param p_arg - Unused thread argument.
  *
  * \return void*
  *
- * \details Owns g_uart_fd lifecycle. Reopens the device automatically
- *          on read error or EOF. Character-by-character accumulation
- *          into line[] with overflow protection.
+ * \details Listens on /dev/ttyS1 for inbound frames from the STM32
+ *          BlackPill — heartbeat and future command frames. Owns
+ *          g_uart_fd lifecycle. Reopens the device automatically on
+ *          read error or EOF. Character-by-character accumulation into
+ *          line[] with overflow protection.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
