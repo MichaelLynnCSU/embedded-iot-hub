@@ -1,3 +1,21 @@
+/******************************************************************************
+ * \file sensor_types.h
+ * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ * \date 2026-05-10
+ *
+ * \brief Shared wire format structs for controller.
+ *
+ * \details Pipe ingress structs consumed by the BeagleBone controller.
+ *          Must be byte-for-byte identical with
+ *          beaglebone/server/sensor_types.h.
+ *          Both files must be updated together if the layout changes.
+ *
+ * \note    Structured event tracing (2026-06-16):
+ *          event_id added to ReedSlotData, PirSlotData, TempSlotData.
+ *          lock_event_id and light_event_id added to SensorData and
+ *          LatestData tails.
+ ******************************************************************************/
+
 #ifndef INCLUDE_SENSOR_TYPES_H_
 #define INCLUDE_SENSOR_TYPES_H_
 
@@ -24,6 +42,7 @@ struct __attribute__((packed)) ReedSlotData
    uint8_t  offline;
    uint16_t gen;
    char     name[REED_NAME_SIZE];
+   uint64_t event_id;  /*!< last vroom event_id for this slot */
 };
 
 /** \warning Must match sensor_types.h PirSlotData exactly — packed wire format */
@@ -35,6 +54,8 @@ struct __attribute__((packed)) PirSlotData
    uint8_t  active;
    int8_t   occupied;
    uint8_t  offline;
+   uint8_t  _pad[2];   /*!< alignment padding before event_id */
+   uint64_t event_id;  /*!< last vroom event_id for this slot */
 };
 
 /** \warning Must match sensor_types.h TempSlotData exactly — packed wire format */
@@ -47,6 +68,7 @@ struct __attribute__((packed)) TempSlotData
    uint8_t  offline;
    uint8_t  _pad;
    char     name[TEMP_NAME_LEN];
+   uint64_t event_id;  /*!< last vroom event_id for this slot */
 };
 
 /** \warning Must match sensor_types.h DoorbellSlotData exactly */
@@ -104,7 +126,10 @@ struct SensorData
    uint8_t                 temp_count;
    struct DoorbellSlotData doorbell_slots[MAX_DOORBELL_CAMS];
    uint8_t                 doorbell_count;
-   struct CamSlotData cam_slots[MAX_CAMS];
+   struct CamSlotData      cam_slots[MAX_CAMS];
+
+   uint64_t lock_event_id;   /*!< last vroom event_id for BLE lock  */
+   uint64_t light_event_id;  /*!< last vroom event_id for BLE light */
 };
 
 /**
@@ -135,6 +160,9 @@ struct LatestData
    uint8_t             temp_count;
    uint8_t             doorbell_pressed;
    uint8_t             doorbell_device_id;
+
+   uint64_t lock_event_id;
+   uint64_t light_event_id;
 };
 
 /** \brief One captured UART frame stored in the ring buffer. */

@@ -21,6 +21,11 @@
  *          CamSlotData added. cam_slots[MAX_CAMS] added to SensorData
  *          tail. MAX_CAMS=3 (indoor/front/back). Heartbeat stamped by
  *          esp32-cam udp_device_ingress, projected to BBB via TCP frame.
+ *
+ * \note    Structured event tracing (2026-06-16):
+ *          event_id added to ReedSlotData, PirSlotData, TempSlotData.
+ *          lock_event_id and light_event_id added to SensorData tail.
+ *          Matches ESP32 tcp_manager.c Phase 4A serialization.
  ******************************************************************************/
 
 #ifndef SENSOR_TYPES_H
@@ -70,6 +75,7 @@ struct __attribute__((packed)) ReedSlotData
    uint8_t  offline;
    uint16_t gen;
    char     name[REED_NAME_LEN];
+   uint64_t event_id;  /*!< last vroom event_id for this slot */
 };
 
 /** \brief PIR sensor slot — packed wire format. */
@@ -81,6 +87,8 @@ struct __attribute__((packed)) PirSlotData
    uint8_t  active;
    int8_t   occupied;
    uint8_t  offline;
+   uint8_t  _pad[2];   /*!< alignment padding before event_id */
+   uint64_t event_id;  /*!< last vroom event_id for this slot */
 };
 
 /** \brief Temperature sensor slot — packed wire format. */
@@ -93,6 +101,7 @@ struct __attribute__((packed)) TempSlotData
    uint8_t  offline;
    uint8_t  _pad;
    char     name[TEMP_NAME_LEN];
+   uint64_t event_id;  /*!< last vroom event_id for this slot */
 };
 
 /**
@@ -130,10 +139,8 @@ struct SensorData
 
    struct ReedSlotData reed_slots[MAX_REEDS];
    uint8_t             motor_online;
-
-   struct PirSlotData pir_slots[MAX_PIRS];
-   uint8_t            pir_count;
-
+   struct PirSlotData  pir_slots[MAX_PIRS];
+   uint8_t             pir_count;
    struct TempSlotData temp_slots[MAX_TEMPS];
    uint8_t             temp_count;
 
@@ -141,6 +148,9 @@ struct SensorData
    uint8_t                 doorbell_count;
 
    struct CamSlotData cam_slots[MAX_CAMS];
+
+   uint64_t lock_event_id;   /*!< last vroom event_id for BLE lock  */
+   uint64_t light_event_id;  /*!< last vroom event_id for BLE light */
 };
 
 #endif /* SENSOR_TYPES_H */

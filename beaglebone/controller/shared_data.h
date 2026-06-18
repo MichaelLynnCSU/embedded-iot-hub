@@ -23,6 +23,24 @@
  *          cam_age_s[] and cam_online[] added. CAM_COUNT=3.
  *          Projected from SensorData.cam_slots[] by shm_updater.c.
  *          Heartbeat stamped by esp32-cam, forwarded by hub TCP frame.
+ *
+ * \note    Structured event tracing — finish line (2026-06-16):
+ *          event_id added to tail of SharedSensorData. Carries the
+ *          VROOM-assigned correlation key from device → hub → TCP →
+ *          controller → SHM → LCD. Completes the Lane A trace chain:
+ *
+ *            [BLE_*]   tx_id=N event_id=M
+ *            [VROOM]   event_id=M
+ *            [TCP]     event_id=M
+ *            [PARSE]   event_id=M
+ *            [DISPATCH] event_id=M
+ *            [SHM]     transport=sensor_shm event_id=M write
+ *            [LCD]     transport=sensor_shm event_id=M read
+ *
+ *          Set in shm_updater.c:handle_get_latest() from p_snapshot.
+ *          LCD reads it for correlation logging only — no semantic use.
+ *
+ * \warning Layout change — recompile both controller and LCD binaries.
  ******************************************************************************/
 
 #ifndef INCLUDE_SHARED_DATA_H_
@@ -139,6 +157,12 @@ struct SharedSensorData
    /* Inference camera liveness */
    uint16_t cam_age_s[CAM_COUNT];
    uint8_t  cam_online[CAM_COUNT];
+
+   /* Structured event tracing finish line (2026-06-16):
+    * VROOM-assigned event_id from the last sensor frame written here.
+    * LCD reads this for [LCD] transport=sensor_shm event_id=N read log.
+    * Correlation only — no semantic use by the display. */
+   uint64_t event_id;
 };
 
 #endif /* INCLUDE_SHARED_DATA_H_ */

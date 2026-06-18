@@ -5,6 +5,21 @@
  * \details Owns central_ledger and state_mutex. update_snapshot() is the
  *          only write path. get_snapshot() is the only read path.
  *          No other translation unit touches central_ledger or state_mutex.
+ *
+ * \note    Structured event tracing — finish line (2026-06-16):
+ *          lock_event_id and light_event_id now copied from SensorData
+ *          into central_ledger in update_snapshot(). These are the
+ *          VROOM-assigned event IDs that entered the system at BLE
+ *          ingress and survived TCP → PARSE → DISPATCH. Carrying them
+ *          through the registry closes the trace chain to the SHM write
+ *          point and ultimately to the LCD read:
+ *
+ *            [BLE_LOCK]  event_id=8
+ *            [VROOM]     event_id=8
+ *            [TCP]       event_id=8
+ *            [DISPATCH]  event_id=8
+ *            [SHM]       transport=sensor_shm event_id=8 write
+ *            [LCD]       transport=sensor_shm event_id=8 read
  ******************************************************************************/
 
 #include "state_registry.h"
@@ -49,6 +64,11 @@ void update_snapshot(const struct SensorData *p_data)
    central_ledger.motor_online       = p_data->motor_online;
    central_ledger.doorbell_pressed   = p_data->doorbell_pressed;
    central_ledger.doorbell_device_id = p_data->doorbell_device_id;
+
+   /* Carry event_ids through the registry so shm_updater can project
+    * them into SharedSensorData and close the Lane A trace chain. */
+   central_ledger.lock_event_id  = p_data->lock_event_id;
+   central_ledger.light_event_id = p_data->light_event_id;
 
    for (i = 0; i < MAX_REEDS; i++)
    {
