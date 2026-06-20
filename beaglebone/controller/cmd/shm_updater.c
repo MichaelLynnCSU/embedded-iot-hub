@@ -51,6 +51,38 @@
  *          or light_event_id in the snapshot. PIR/reed/temp event IDs are
  *          per-slot and not scalar — they are not projected here; their
  *          trace ends at [DISPATCH].
+ *
+ * \note    Per-device event_id logging (2026-06-19):
+ *          The single rolled-up "event_id=" on the [SHM] write line above
+ *          was misleading — it silently picked lock_event_id (falling
+ *          back to light_event_id) to represent the *entire* write, while
+ *          PIR/reed/temp event IDs — which were equally present in
+ *          p_data at this point — were dropped without being logged at
+ *          all. A real capture showed event_id=52266 on the SHM write
+ *          line exactly matching lock_eid=52266 from the [DISPATCH] line
+ *          one row above it, while that same [DISPATCH] line also showed
+ *          PIR slot=1 eid=45512, PIR slot=2 eid=45342, and Temp slot=1
+ *          eid=52257 — none of which made it into the SHM log.
+ *
+ *          shm_update_frame() now logs every active device's event_id
+ *          individually (device=PIR/REED/TEMP/LOCK/LIGHT), each on its
+ *          own [SHM] line, sourced from p_data — which was already being
+ *          passed into this function and already carries every per-slot
+ *          event_id intact (confirmed via pipe_writer.c's raw struct
+ *          write, pipe_reader.c's raw struct read, and sensor_dispatch.c's
+ *          [DISPATCH] log, all of which preserve it without loss). No new
+ *          plumbing was required — only this function was discarding data
+ *          it already had in scope.
+ *
+ *          The scalar "event_id=" and "seq=" fields are removed from the
+ *          [SHM] write log line entirely. event_id= because there is no
+ *          single event identity for a multi-device snapshot write — see
+ *          above. seq= (shm_data->sequence) because per-device event_id
+ *          tracking now provides finer-grained staleness detection than
+ *          a single SHM-wide write counter did; shm_data->sequence still
+ *          increments internally for any other internal use, it is just
+ *          no longer printed here. handle_get_latest() no longer computes
+ *          or assigns shm_data->event_id.
  ******************************************************************************/
 
 #include "shm_updater.h"
@@ -114,18 +146,63 @@ static void update_shm_cam_liveness(const struct SensorData *p_data)
    pthread_mutex_unlock(&shm_data->shm_mutex);
 }
 
+/******************************************************************************
+ * \brief Log each active device's event_id individually from p_data.
+ *
+ * \param p_data - Full SensorData wire frame (not the LatestData
+ *                 snapshot) — this is the only struct that carries
+ *                 per-slot PIR/reed/temp event IDs.
+ *
+ * \details Replaces the old single rolled-up event_id= on the [SHM]
+ *          write line. See file-header note "Per-device event_id
+ *          logging (2026-06-19)" for why.
+ ******************************************************************************/
+static void log_shm_device_event_ids(const struct SensorData *p_data)
+{
+   int i = 0;
+
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      if (p_data->pir_slots[i].active)
+      {
+         LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=PIR slot=%d eid=%llu",
+             i + 1, (unsigned long long)p_data->pir_slots[i].event_id);
+      }
+   }
+
+   for (i = 0; i < MAX_REEDS; i++)
+   {
+      if (p_data->reed_slots[i].active)
+      {
+         LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=REED slot=%d eid=%llu",
+             i + 1, (unsigned long long)p_data->reed_slots[i].event_id);
+      }
+   }
+
+   for (i = 0; i < MAX_TEMPS; i++)
+   {
+      if (p_data->temp_slots[i].active)
+      {
+         LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=TEMP slot=%d eid=%llu",
+             i + 1, (unsigned long long)p_data->temp_slots[i].event_id);
+      }
+   }
+
+   if (0 != p_data->lock_event_id)
+   {
+      LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=LOCK eid=%llu",
+          (unsigned long long)p_data->lock_event_id);
+   }
+
+   if (0 != p_data->light_event_id)
+   {
+      LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=LIGHT eid=%llu",
+          (unsigned long long)p_data->light_event_id);
+   }
+}
+
 void handle_get_latest(const struct LatestData *p_snapshot, const char *p_src)
 {
-   uint32_t seq      = 0;
-   uint64_t event_id = 0;
-
-   /* Pick the most recent non-zero event_id from the snapshot.
-    * lock and light are the only scalar event IDs that flow through
-    * LatestData. PIR/reed/temp are per-slot and end at [DISPATCH]. */
-   event_id = p_snapshot->lock_event_id
-              ? p_snapshot->lock_event_id
-              : p_snapshot->light_event_id;
-
    pthread_mutex_lock(&shm_data->shm_mutex);
 
    shm_data->current_temp      = p_snapshot->avg_temp;
@@ -136,7 +213,6 @@ void handle_get_latest(const struct LatestData *p_snapshot, const char *p_src)
    shm_data->current_timestamp = p_snapshot->timestamp;
    shm_data->data_valid        = p_snapshot->valid;
    shm_data->sequence++;
-   shm_data->event_id          = event_id;
 
    if (p_snapshot->doorbell_pressed)
    {
@@ -150,21 +226,16 @@ void handle_get_latest(const struct LatestData *p_snapshot, const char *p_src)
    shm_data->last_command   = CMD_GET_LATEST;
    shm_data->command_result = 0;
 
-   seq = shm_data->sequence;
-
    pthread_mutex_unlock(&shm_data->shm_mutex);
 
    /* Log from p_snapshot — not from shm_data — so the line reflects
     * exactly what was written even if another thread writes immediately
     * after the unlock. */
-   LOG("[SHM] transport=sensor_shm event_id=%llu write src=%s "
-       "temp=%.1fC motion=%d valid=%d seq=%u",
-       (unsigned long long)event_id,
+   LOG("[SHM] transport=sensor_shm write src=%s temp=%.1fC motion=%d valid=%d",
        p_src,
        p_snapshot->avg_temp,
        p_snapshot->motion_count,
-       p_snapshot->valid,
-       seq);
+       p_snapshot->valid);
 }
 
 void handle_get_device_status(struct CommandMsg *p_cmd)
@@ -230,6 +301,7 @@ void shm_update_frame(const struct LatestData *p_snapshot,
                       const struct SensorData *p_data)
 {
    handle_get_latest(p_snapshot, "pipe_ingress");
+   log_shm_device_event_ids(p_data);
    update_shm_rooms(p_data);
    update_shm_doorbell_liveness(p_data);
    update_shm_cam_liveness(p_data);

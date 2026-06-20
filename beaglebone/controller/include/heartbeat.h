@@ -24,5 +24,5 @@ void  heartbeat_stamp           (DEV_ID_E idx);
 void  heartbeat_snapshot_online (uint8_t *p_out, int count);
 void *heartbeat_monitor_thread  (void *p_arg);
 
-static const int hb_timeout_sec[DEV_COUNT] = { 30, 300, 300, 300 };
+static const int hb_timeout_sec[DEV_COUNT] = { 30, 300, 300, 300, 300 };
 #endif

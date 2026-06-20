@@ -25,20 +25,23 @@
  *          Heartbeat stamped by esp32-cam, forwarded by hub TCP frame.
  *
  * \note    Structured event tracing — finish line (2026-06-16):
- *          event_id added to tail of SharedSensorData. Carries the
- *          VROOM-assigned correlation key from device → hub → TCP →
- *          controller → SHM → LCD. Completes the Lane A trace chain:
+ *          event_id added to tail of SharedSensorData. Originally carried
+ *          the VROOM-assigned correlation key from the last sensor frame,
+ *          set by shm_updater.c:handle_get_latest() for LCD correlation
+ *          logging only.
  *
- *            [BLE_*]   tx_id=N event_id=M
- *            [VROOM]   event_id=M
- *            [TCP]     event_id=M
- *            [PARSE]   event_id=M
- *            [DISPATCH] event_id=M
- *            [SHM]     transport=sensor_shm event_id=M write
- *            [LCD]     transport=sensor_shm event_id=M read
- *
- *          Set in shm_updater.c:handle_get_latest() from p_snapshot.
- *          LCD reads it for correlation logging only — no semantic use.
+ * \note    Per-device event_id logging (2026-06-19):
+ *          SharedSensorData.event_id is NO LONGER WRITTEN by
+ *          shm_updater.c. The rolled-up single event_id silently
+ *          discarded every PIR/reed/temp event_id to represent an entire
+ *          snapshot with one device's ID — see shm_updater.c header note
+ *          "Per-device event_id logging (2026-06-19)" for rationale.
+ *          Per-device EID_* lines are now emitted directly into the UART
+ *          bundle by uart_controller.c instead. The event_id field is
+ *          retained here for ABI compatibility with the LCD binary but
+ *          is always 0 in current builds — do not write or read it for
+ *          any correlation purpose. Remove it when LCD is next recompiled
+ *          against a new layout.
  *
  * \warning Layout change — recompile both controller and LCD binaries.
  ******************************************************************************/
@@ -159,9 +162,21 @@ struct SharedSensorData
    uint8_t  cam_online[CAM_COUNT];
 
    /* Structured event tracing finish line (2026-06-16):
-    * VROOM-assigned event_id from the last sensor frame written here.
-    * LCD reads this for [LCD] transport=sensor_shm event_id=N read log.
-    * Correlation only — no semantic use by the display. */
+    * Originally: VROOM-assigned event_id from the last sensor frame,
+    * set by shm_updater.c:handle_get_latest() for LCD correlation logging.
+    *
+    * Per-device event_id logging (2026-06-19):
+    * This field is NO LONGER WRITTEN by shm_updater.c. The rolled-up
+    * single event_id silently discarded every PIR/reed/temp event_id to
+    * represent an entire snapshot with one device's ID — see shm_updater.c
+    * header note "Per-device event_id logging (2026-06-19)" for rationale.
+    * Per-device EID_* lines are now emitted directly into the UART bundle
+    * by uart_controller.c instead.
+    *
+    * Field retained here for ABI compatibility with the LCD binary.
+    * Value is always 0 in current builds. Do not write or read it for
+    * any correlation purpose — use the per-device EID_* UART lines instead.
+    * Remove this field when LCD is next recompiled against a new layout. */
    uint64_t event_id;
 };
 

@@ -37,7 +37,7 @@
 /** \brief Device name strings — indexed by DEV_ID_E */
 const char *dev_names[DEV_COUNT] =
 {
-   "PIR", "LIGHT", "LOCK", "MOTOR"
+   "PIR", "LIGHT", "LOCK", "MOTOR", "LCD"
 };
 
 /** \brief Per-device heartbeat state entry */

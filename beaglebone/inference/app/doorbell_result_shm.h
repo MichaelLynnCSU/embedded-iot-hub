@@ -62,6 +62,23 @@
  *          consume -> UART send) can be traced with:
  *              grep <event_id_hex> /var/log/doorbell_daemon.log \
  *                                  /var/log/data_controller.log
+ *
+ * \note    CAM/doorbell identity (2026-06-19):
+ *          event_id here is the camera's own ID, assigned at capture time
+ *          by cam_make_event_id() and relayed unchanged through
+ *          doorbell_daemon — doorbell_daemon does NOT mint a separate
+ *          "doorbell event" ID. There is one ID for one capture.
+ *          doorbell_daemon is a consumer/processor of that capture, not
+ *          an independent event source. uart_controller names its local
+ *          copy db_event_id purely as a variable-naming convenience —
+ *          it is the same identity as cam_header_t.event_id throughout.
+ *
+ *          The non-doorbell monitoring cameras (MAX_CAMS / cam_slots[])
+ *          are a completely separate device class with NO event_id today:
+ *          CamSlotData carries only age_s and online. They share no
+ *          identity with this segment and are not involved in this
+ *          publish/consume flow. Adding CAM event tracing is a separate
+ *          task starting at cam_trigger.c on the ESP32 side.
  ******************************************************************************/
 
 #ifndef DOORBELL_RESULT_SHM_H
@@ -92,8 +109,18 @@
  */
 struct DoorbellResult
 {
-   uint64_t event_id;     /*!< 0 = none yet; else matches cam_header_t.event_id
-                            *   from the Lane B frame this result came from   */
+   uint64_t event_id;     /*!< 0 = none yet; else the camera-assigned ID from
+                            *   cam_header_t.event_id in the Lane B frame that
+                            *   triggered this result.
+                            *
+                            *   doorbell_daemon relays this ID unchanged — it
+                            *   does not mint a new one. One capture = one ID,
+                            *   continuous from camera through inference through
+                            *   UART send. uart_controller's local variable
+                            *   db_event_id holds this same value.
+                            *
+                            *   Unrelated to MAX_CAMS/cam_slots[] monitoring
+                            *   cameras, which have no event_id today.        */
    uint8_t  device_id;    /*!< doorbell cam ID (0-3)                          */
    uint8_t  person;       /*!< 1 = person detected, 0 = not                   */
    uint8_t  conf_pct;     /*!< confidence, 0-100, represents 0.00-1.00        */

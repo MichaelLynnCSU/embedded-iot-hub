@@ -20,7 +20,7 @@
  *          (PTHREAD_PROCESS_SHARED).
  *
  *          SHM read logged as:
- *            [SHM] transport=sensor_shm event_id=M read dst=thermostat_lcd
+ *            [SHM] transport=sensor_shm read dst=thermostat_lcd
  *
  * \note    Semaphore → mutex (2026-05-22):
  *          sem_open/sem_wait/sem_post removed. All shared memory access
@@ -36,6 +36,16 @@
  *          motor_lcd implied display of motor state only. This process
  *          owns the full thermostat loop display — temperature sensors,
  *          motor PID, and room cooling state.
+ *
+ * \note    event_id removed from SHM read (2026-06-19):
+ *          shm_data->event_id is no longer written by data_controller
+ *          (shm_updater.c stopped setting it when per-device EID_* lines
+ *          were introduced in uart_controller.c — see shared_data.h note
+ *          "Per-device event_id logging (2026-06-19)"). Reading it here
+ *          produced only 0 on every poll. The [SHM] log line is retained
+ *          as a process-alive / SHM-access heartbeat with the event_id=
+ *          field removed. sensor_shm is now a snapshot store, not a
+ *          flattened-event transport.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -152,12 +162,11 @@ int main(void)
 
    while (1)
    {
-      double   temp       = 0.0;
-      int      batt_motor = -1;
-      int      valid      = 0;
-      int      seq        = 0;
-      int      online     = 0;
-      uint64_t event_id   = 0;
+      double temp       = 0.0;
+      int    batt_motor = -1;
+      int    valid      = 0;
+      int    seq        = 0;
+      int    online     = 0;
 
       pthread_mutex_lock((pthread_mutex_t *)&shm_data->shm_mutex);
       temp       = shm_data->current_temp;
@@ -165,11 +174,9 @@ int main(void)
       valid      = shm_data->data_valid;
       seq        = shm_data->sequence;
       online     = shm_data->device_online[3]; /* index 3 = DEV_MOTOR */
-      event_id   = shm_data->event_id;
       pthread_mutex_unlock((pthread_mutex_t *)&shm_data->shm_mutex);
 
-      LOG("[SHM] transport=sensor_shm event_id=%llu read dst=thermostat_lcd",
-          (unsigned long long)event_id);
+      LOG("[SHM] transport=sensor_shm read dst=thermostat_lcd");
 
       if (!valid)
       {

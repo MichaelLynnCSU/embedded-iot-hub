@@ -386,21 +386,21 @@ void *uart_reader_thread(void *p_arg)
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
-void uart_push_msg(const char *p_msg, int len)
+void uart_push_msg(const UartMsg *p_msg)
 {
    ssize_t w = 0;
 
-   LOG("[PUSH] bundle len=%d:\n%.*s", len, len, p_msg);
+   LOG("[PUSH] bundle len=%d:\n%.*s", p_msg->len, p_msg->len, p_msg->buf);
 
    pthread_mutex_lock(&g_uart_write_mutex);
-   w = write(g_uart_fd, p_msg, len);
+   w = write(g_uart_fd, p_msg->buf, p_msg->len);
    pthread_mutex_unlock(&g_uart_write_mutex);
 
    usleep(UART_PUSH_DELAY_US);
 
-   if (w == (ssize_t)len)
+   if (w == (ssize_t)p_msg->len)
    {
-      LOG("[PUSH] Sent: %.*s", len - 1, p_msg);
+      LOG("[PUSH] Sent: %.*s", p_msg->len - 1, p_msg->buf);
    }
    else
    {

@@ -55,6 +55,19 @@
  *          enforcement). Previously, if MAX_DOORBELL_CAMS > 4, frames like
  *          DB4:... fell through to the single-value handler and were
  *          silently dropped.
+ *
+ * \note    EID_* frames (2026-06-19):
+ *          uart_controller.c now emits one EID_<TYPE><slot>:value line per
+ *          active device per bundle (EID_PIR1, EID_REED1, EID_TEMP1,
+ *          EID_LOCK, EID_LIGHT) as per-device correlation trace metadata.
+ *          The BlackPill LCD renders state — it does not consume event IDs.
+ *          EID_* lines are explicitly acknowledged and discarded at the top
+ *          of the dispatcher (before parse_int or fallthrough logic) so:
+ *            - The protocol contract is documented in code, not just comments.
+ *            - parse_int() is not run on a non-numeric EID value string.
+ *            - Future developers see an intentional no-op, not a mystery drop.
+ *          No EID storage arrays or display widgets are added. If event ID
+ *          display is ever needed on the BlackPill, extend here.
  ******************************************************************************/
 
 #include "parser.h"
@@ -451,18 +464,19 @@ static void parse_single_value(const char *p_id, int val, int batt)
  * \param  p_line - Null-terminated message string, e.g. "PIR:42,87".
  *
  * \details Dispatch order:
- *          1.  REED_COUNT  — reed count handler, returns.
- *          2.  DR<1-6>     — reed slot handler, returns.
- *          3.  PIR_COUNT   — PIR count handler, returns.
- *          4.  PIR<1-5>    — PIR slot handler, returns.
- *          5.  OCC<1-5>    — occupancy slot handler, returns.
- *          6.  TEMP_COUNT  — temp count handler, returns.
- *          7.  TEMP<1-4>   — temp slot handler, returns.
- *          8.  DB<0-9>     — doorbell liveness handler, returns.
- *          9.  CAM<1-3>    — inference camera liveness handler, returns.
- *          10. DOORBELL    — press/inference event handler, returns.
- *          11. STATE       — bulk state handler, returns.
- *          12. Everything else — single-value fallthrough (PIR, LGT, LCK,
+ *          1.  EID_*       — trace metadata, explicitly ignored, returns.
+ *          2.  REED_COUNT  — reed count handler, returns.
+ *          3.  DR<1-6>     — reed slot handler, returns.
+ *          4.  PIR_COUNT   — PIR count handler, returns.
+ *          5.  PIR<1-5>    — PIR slot handler, returns.
+ *          6.  OCC<1-5>    — occupancy slot handler, returns.
+ *          7.  TEMP_COUNT  — temp count handler, returns.
+ *          8.  TEMP<1-4>   — temp slot handler, returns.
+ *          9.  DB<0-9>     — doorbell liveness handler, returns.
+ *          10. CAM<1-3>    — inference camera liveness handler, returns.
+ *          11. DOORBELL    — press/inference event handler, returns.
+ *          12. STATE       — bulk state handler, returns.
+ *          13. Everything else — single-value fallthrough (PIR, LGT, LCK,
  *              MTR, OCC).
  */
 void parser_process_line(const char *p_line)
@@ -491,6 +505,17 @@ void parser_process_line(const char *p_line)
    *p_colon = '\0';
    p_id     = buf;
    p_rest   = p_colon + 1;
+
+   /* EID_* — per-device event trace metadata emitted by uart_controller.c.
+    * The BlackPill LCD renders state only — it does not consume event IDs.
+    * Acknowledged explicitly here so the protocol contract is visible in
+    * code and parse_int() / fallthrough logic are never run on EID values.
+    * See uart_controller.c note "Per-device event_id tracing (2026-06-19)".
+    * Extend here if event ID display is ever added to the BlackPill UI.   */
+   if (0 == strncmp(p_id, "EID_", 4u))
+   {
+      return;
+   }
 
    /* REED_COUNT:n */
    if (0 == strcmp(p_id, "REED_COUNT"))

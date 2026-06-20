@@ -16,14 +16,31 @@
  *          caller via p_event_id (shm struct itself is unchanged — the
  *          field already existed, just wasn't surfaced). On a successful
  *          consume (return 1), this module logs
- *          "[SHM] -> [CONTROLLER] consume event_id=... ..." exactly once,
- *          using the values that were just copied out — not a re-read of
- *          shared memory — so the log always reflects what the caller
- *          actually received. This is the single log point for "consume";
- *          callers should not duplicate it. Callers are responsible for
- *          their own "waiting_for_result" / "send" logging, since only
- *          the caller knows why it polled and what it does with the
- *          result.
+ *          "[SHM] transport=doorbell_result event_id=... read dst=controller ..."
+ *          exactly once, using the values that were just copied out —
+ *          not a re-read of shared memory — so the log always reflects
+ *          what the caller actually received. This is the single log
+ *          point for "consume"; callers should not duplicate it. Callers
+ *          are responsible for their own "waiting_for_result" / "send"
+ *          logging, since only the caller knows why it polled and what
+ *          it does with the result.
+ *
+ * \note    transport= tag (2026-06-18):
+ *          The consume log line now carries transport=doorbell_result,
+ *          matching the transport=sensor_shm convention used elsewhere
+ *          in this log file (uart_controller.c, cmd/shm_updater.c) for
+ *          reads/writes against the *other* shm segment. Previously the
+ *          consume line was "[SHM] -> [CONTROLLER] consume event_id=...",
+ *          which shared the bare "[SHM]" prefix and event_id= field with
+ *          the sensor_shm convention but carried no field identifying
+ *          which segment was being read — the two were only
+ *          distinguishable by an implicit, undocumented difference in
+ *          verb ("consume" vs "read"). Any log filtering on transport=
+ *          would have silently missed every doorbell consume event. The
+ *          write-side log in doorbell_daemon.log is unaffected by this
+ *          change — it is self-contained in its own log file under its
+ *          own "[DOORBELL] -> [SHM] publish" convention and does not
+ *          share this ambiguity.
  ******************************************************************************/
 #include "doorbell_result_reader.h"
 #include "doorbell_result_shm.h"
@@ -84,7 +101,8 @@ int doorbell_result_reader_init(void)
  *          If changed: issues a memory barrier, copies out event_id,
  *          person, conf_pct, and asset into local variables, then copies
  *          those local variables (not a re-read of shm) out to the
- *          caller's pointers and into the "[SHM] -> [CONTROLLER] consume"
+ *          caller's pointers and into the
+ *          "[SHM] transport=doorbell_result ... read dst=controller"
  *          log line. Updates g_last_event_id last, so the log always
  *          matches exactly what the caller receives.
  *
@@ -145,8 +163,8 @@ int doorbell_result_reader_poll(uint64_t *p_event_id,
       p_asset[asset_len - 1] = '\0';
    }
 
-   LOG("[SHM] -> [CONTROLLER] consume event_id=" EVENT_ID_FMT
-       " device_id=%d person=%d conf=%d asset=%s",
+   LOG("[SHM] transport=doorbell_result event_id=" EVENT_ID_FMT
+       " read dst=controller device_id=%d person=%d conf=%d asset=%s",
        EVENT_ID_ARG(event_id), device_id, person, conf_pct, asset);
 
    g_last_event_id = event_id;

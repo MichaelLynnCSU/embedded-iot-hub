@@ -25,21 +25,28 @@
  ******************************************************************************/
 #ifndef INCLUDE_UART_TRANSPORT_H_
 #define INCLUDE_UART_TRANSPORT_H_
+#include "config.h"
+
+/** \brief UART outbound message envelope. */
+typedef struct
+{
+   char     buf[UART_MSG_BUF_SIZE];
+   int      len;
+   uint64_t event_id;
+   int      has_event_id;
+} UartMsg;
 
 /******************************************************************************
- * \brief Write a message to UART with mutex protection.
+ * \brief Write a UartMsg envelope to UART with mutex protection.
  *
- * \param p_msg - Pointer to message buffer.
- * \param len   - Length in bytes to write.
+ * \param p_msg - Pointer to UartMsg envelope.
  *
  * \return void
  *
- * \details The only UART write primitive. Exported for uart_protocol.c
- *          (build_and_push() / uart_update_frame()). Internally checks
- *          the transport-owned UART fd; safe to call even if the UART is
- *          not currently open (write fails, logged, no crash).
+ * \details The only UART write primitive. Exported for uart_controller.c
+ *          (build_and_push() / uart_update_frame()) and doorbell_pending.c.
  ******************************************************************************/
-void uart_push_msg(const char *p_msg, int len);
+void uart_push_msg(const UartMsg *p_msg);
 
 /******************************************************************************
  * \brief Return 1 if the UART device is currently open, 0 otherwise.

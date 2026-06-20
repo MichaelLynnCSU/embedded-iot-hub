@@ -29,7 +29,8 @@ typedef enum
    DEV_LIGHT = 1,
    DEV_LOCK  = 2,
    DEV_MOTOR = 3,
-   DEV_COUNT = 4
+   DEV_LCD   = 4,
+   DEV_COUNT = 5
 } DEV_ID_E;
 
 /** \warning Must match sensor_types.h ReedSlotData exactly — packed wire format */
