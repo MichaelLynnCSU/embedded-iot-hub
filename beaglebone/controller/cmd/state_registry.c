@@ -6,20 +6,26 @@
  *          only write path. get_snapshot() is the only read path.
  *          No other translation unit touches central_ledger or state_mutex.
  *
- * \note    Structured event tracing — finish line (2026-06-16):
- *          lock_event_id and light_event_id now copied from SensorData
- *          into central_ledger in update_snapshot(). These are the
- *          VROOM-assigned event IDs that entered the system at BLE
- *          ingress and survived TCP → PARSE → DISPATCH. Carrying them
- *          through the registry closes the trace chain to the SHM write
- *          point and ultimately to the LCD read:
+ * \note    Structured event tracing (2026-06-16):
+ *          lock_event_id and light_event_id copied from SensorData into
+ *          central_ledger in update_snapshot(). Per-slot PIR/reed/temp
+ *          event_ids carried via whole-struct slot copies below.
+ *          These survive the full chain:
  *
  *            [BLE_LOCK]  event_id=8
  *            [VROOM]     event_id=8
  *            [TCP]       event_id=8
  *            [DISPATCH]  event_id=8
- *            [SHM]       transport=sensor_shm event_id=8 write
- *            [LCD]       transport=sensor_shm event_id=8 read
+ *            [SHM]       transport=sensor_shm write src=pipe_ingress device=LOCK eid=8
+ *            [UART]      transport=ttyS1 write dst=blackpill_lcd device=LOCK eid=8
+ *
+ *          Note: the old "[LCD] transport=sensor_shm event_id=8 read"
+ *          log line no longer exists. After the 2026-06-19 cleanup,
+ *          uart_push_thread() reads SHM only for doorbell_pressed
+ *          consume-and-clear — all sensor state comes from get_snapshot()
+ *          directly. Per-device EID_* lines in the UART bundle are the
+ *          trace endpoint, not an SHM read log. See uart_controller.c
+ *          header note "SHM read path (dst=blackpill_lcd)".
  ******************************************************************************/
 
 #include "state_registry.h"
@@ -65,8 +71,8 @@ void update_snapshot(const struct SensorData *p_data)
    central_ledger.doorbell_pressed   = p_data->doorbell_pressed;
    central_ledger.doorbell_device_id = p_data->doorbell_device_id;
 
-   /* Carry event_ids through the registry so shm_updater can project
-    * them into SharedSensorData and close the Lane A trace chain. */
+   /* Carry event_ids through the registry so uart_controller.c can
+    * emit per-device EID_* lines in the UART bundle. */
    central_ledger.lock_event_id  = p_data->lock_event_id;
    central_ledger.light_event_id = p_data->light_event_id;
 

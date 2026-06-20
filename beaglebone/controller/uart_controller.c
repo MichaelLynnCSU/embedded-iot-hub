@@ -23,8 +23,32 @@
  *                                 g_db_pending* state
  *
  * \note    SHM read path (dst=blackpill_lcd):
- *          Both uart_push_thread() and uart_update_frame() read from SHM
- *          to build the UART bundle pushed to the STM32 BlackPill display.
+ *          Both push paths previously read sensor state fields from SHM
+ *          (valid, temp, motion, lgt, lck, cam_online). These have been
+ *          removed in favour of state_registry.c via get_snapshot() and
+ *          p_raw_frame directly (2026-06-19 cleanup):
+ *
+ *          uart_push_thread() (UART ingress path):
+ *            - SHM mutex block now holds only doorbell_pressed consume-
+ *              and-clear — one job, minimal hold time.
+ *            - valid/temp/motion/lgt/lck come from snap (LatestData)
+ *              via get_snapshot(), which is now called before the
+ *              doorbell block so snap is populated when needed.
+ *            - No semantic change — shm_updater.c projects the same
+ *              values from state_registry into both SHM and LatestData.
+ *
+ *          uart_update_frame() (pipe ingress path):
+ *            - cam_online[] loop now reads p_raw_frame->cam_slots[i].online
+ *              directly instead of shm_data->cam_online[i].
+ *            - Mutex lock/unlock around that loop removed.
+ *            - Confirmed equivalent: shm_updater.c line 143 is a direct
+ *              assignment shm_data->cam_online[i] = p_data->cam_slots[i].online
+ *              with no transformation or liveness logic applied.
+ *            - doorbell_pressed consume-and-clear remains under SHM mutex
+ *              — load-bearing, cannot be moved to snapshot.
+ *
+ *          sensor_shm segment itself is unchanged — thermostat_lcd still
+ *          reads from it for its own display path.
  *
  * \note    Rate-limit to 2 per second max.
  *          Bundle size grows with doorbell/cam count (~280 bytes at 3DB/4CAM,
@@ -371,8 +395,13 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
  * \details Blocks on g_uart_frame_sem with UART_PUSH_INTERVAL_SEC watchdog
  *          ceiling. Wakes immediately when uart_parse_line() posts a frame
  *          from the STM32 BlackPill (heartbeat or command), drains all
- *          pending frames from g_uart_ring, then reads SHM and snapshot
+ *          pending frames from g_uart_ring, then reads snapshot and SHM
  *          to build and send the full STM32 protocol payload.
+ *
+ *          SHM mutex is held only for doorbell_pressed consume-and-clear.
+ *          All sensor state (valid, temp, motion, lgt, lck, slots) comes
+ *          from get_snapshot() via state_registry.c — see file header note
+ *          "SHM read path (dst=blackpill_lcd)".
  *
  *          Per-device event_id values come from snap (LatestData),
  *          populated via state_registry.c's whole-struct slot copies —
@@ -385,21 +414,6 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
 void *uart_push_thread(void *p_arg)
 {
    struct LatestData snap        = {0};
-   int      valid              = 0;
-   double   temp               = 0.0;
-   int      motion             = 0;
-   int      lgt                = 0;
-   int      lck                = 0;
-   uint16_t age_pir            = 0;
-   uint16_t age_lgt            = 0;
-   uint16_t age_lck            = 0;
-   int8_t   batt_pir           = -1;
-   int8_t   batt_lck           = -1;
-   int      batt_motor         = -1;
-   int      motor_online       = 0;
-   int      reed_count         = 0;
-   int      pir_count          = 0;
-   int      temp_count         = 0;
    int      frames_ready       = 0;
    int      doorbell_pressed   = 0;
    int      doorbell_device_id = 0;
@@ -410,6 +424,10 @@ void *uart_push_thread(void *p_arg)
    char     db_asset[DOORBELL_ASSET_LEN];
    int      i                  = 0;
    UartFrame frame             = {0};
+
+   int      reed_count         = 0;
+   int      pir_count          = 0;
+   int      temp_count         = 0;
 
    uint8_t  r_state[MAX_REEDS];
    int8_t   r_batt[MAX_REEDS];
@@ -468,20 +486,11 @@ void *uart_push_thread(void *p_arg)
 
       LOG("[PUSH] Woke: %d UART frame(s) in burst", frames_ready);
 
-      pthread_mutex_lock(&shm_data->shm_mutex);
-      valid               = shm_data->data_valid;
-      temp                = shm_data->current_temp;
-      motion              = shm_data->current_motion;
-      lgt                 = shm_data->current_light;
-      lck                 = shm_data->current_lock;
-      doorbell_pressed    = shm_data->doorbell_pressed;
-      doorbell_device_id  = shm_data->doorbell_device_id;
-      if (0 != doorbell_pressed) { shm_data->doorbell_pressed = 0; }
-      pthread_mutex_unlock(&shm_data->shm_mutex);
+      /* Snapshot first — all sensor state comes from state_registry.
+       * SHM mutex below is held only for doorbell consume-and-clear.  */
+      get_snapshot(&snap);
 
-      LOG("[SHM] transport=sensor_shm read dst=blackpill_lcd");
-
-      if (!valid)
+      if (!snap.valid)
       {
          LOG("[PUSH] No valid data yet, skipping");
          continue;
@@ -492,6 +501,18 @@ void *uart_push_thread(void *p_arg)
       db_person          = 0;
       db_conf_pct        = 0;
       db_asset[0]        = '\0';
+      doorbell_pressed   = 0;
+      doorbell_device_id = 0;
+
+      /* Consume-and-clear doorbell_pressed — must stay under SHM mutex.
+       * This is the only remaining SHM read in this path.             */
+      pthread_mutex_lock(&shm_data->shm_mutex);
+      doorbell_pressed   = shm_data->doorbell_pressed;
+      doorbell_device_id = shm_data->doorbell_device_id;
+      if (0 != doorbell_pressed) { shm_data->doorbell_pressed = 0; }
+      pthread_mutex_unlock(&shm_data->shm_mutex);
+
+      LOG("[SHM] transport=sensor_shm read dst=blackpill_lcd");
 
       doorbell_pending_check();
 
@@ -513,16 +534,6 @@ void *uart_push_thread(void *p_arg)
                               &db_inference_valid, &db_event_id,
                               &db_person, &db_conf_pct,
                               db_asset, DOORBELL_ASSET_LEN);
-
-      get_snapshot(&snap);
-
-      age_pir      = snap.age_pir;
-      age_lgt      = snap.age_lgt;
-      age_lck      = snap.age_lck;
-      batt_pir     = snap.batt_pir;
-      batt_lck     = snap.batt_lck;
-      motor_online = snap.motor_online;
-      batt_motor   = snap.batt_motor;
 
       reed_count = 0;
       for (i = 0; i < MAX_REEDS; i++)
@@ -564,10 +575,11 @@ void *uart_push_thread(void *p_arg)
          if (snap.temp_slots[i].active) { temp_count = snap.temp_count; }
       }
 
-      build_and_push(temp, motion, lgt, lck,
-                     age_pir, age_lgt, age_lck,
-                     batt_pir, batt_lck, batt_motor,
-                     reed_count, motor_online,
+      build_and_push(snap.avg_temp, snap.motion_count,
+                     snap.light_state, snap.lock_state,
+                     snap.age_pir, snap.age_lgt, snap.age_lck,
+                     snap.batt_pir, snap.batt_lck, snap.batt_motor,
+                     reed_count, snap.motor_online,
                      r_state, r_batt, r_age, r_eid,
                      pir_count, p_count, p_batt, p_age, p_active, p_occ, p_eid,
                      temp_count, t_decidegc, t_batt, t_age, t_active, t_eid,
@@ -586,17 +598,24 @@ void *uart_push_thread(void *p_arg)
  *
  * \param p_snapshot  - Frozen read model from get_snapshot(). Not modified.
  * \param p_raw_frame - Raw wire frame from sensor pipe. Used for
- *                      doorbell_slots[] (DB<n> per-cam liveness lines)
- *                      and per-device event_id (PIR/reed/temp/lock/light).
+ *                      doorbell_slots[] (DB<n> per-cam liveness lines),
+ *                      cam_slots[] (CAM<n> liveness lines), and
+ *                      per-device event_id (PIR/reed/temp/lock/light).
  *
  * \return void
  *
  * \details Called from sensor_frame_dispatch() on every pipe ingress frame.
- *          Reads doorbell state from SHM under shm_mutex. Per-device
- *          event_id values come directly from p_raw_frame (SensorData) —
- *          see file header note "Per-device event_id tracing, full
- *          pipeline (2026-06-19)". shm_data->event_id is no longer read;
- *          that field no longer exists upstream.
+ *          Reads doorbell state from SHM under shm_mutex (consume-and-clear
+ *          only). cam_online[] is read directly from
+ *          p_raw_frame->cam_slots[i].online — confirmed equivalent to
+ *          shm_data->cam_online[i] (shm_updater.c line 143 is a direct
+ *          assignment with no transformation). SHM mutex is no longer held
+ *          around the CAM loop — see file header note "SHM read path".
+ *
+ *          Per-device event_id values come directly from p_raw_frame
+ *          (SensorData) — see file header note "Per-device event_id
+ *          tracing, full pipeline (2026-06-19)". shm_data->event_id is
+ *          no longer read; that field no longer exists upstream.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -750,6 +769,8 @@ void uart_update_frame(const struct LatestData *p_snapshot,
 
    doorbell_pending_check();
 
+   /* Consume-and-clear doorbell_pressed — must stay under SHM mutex.
+    * This is the only remaining SHM read in this path.               */
    pthread_mutex_lock(&shm_data->shm_mutex);
    doorbell_pressed   = shm_data->doorbell_pressed;
    doorbell_device_id = shm_data->doorbell_device_id;
@@ -794,14 +815,20 @@ void uart_update_frame(const struct LatestData *p_snapshot,
                       doorbell_pressed, doorbell_device_id);
    }
 
-   pthread_mutex_lock(&shm_data->shm_mutex);
-   for (i = 0; i < CAM_COUNT; i++)
+   /* CAM liveness — read directly from p_raw_frame->cam_slots[i].online.
+    * Previously read from shm_data->cam_online[] under mutex. Confirmed
+    * equivalent: shm_updater.c line 143 is a direct assignment with no
+    * transformation. Mutex around this loop removed. See file header
+    * note "SHM read path (dst=blackpill_lcd)".                        */
+   if (NULL != p_raw_frame)
    {
-      pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
-                      "CAM%d:%d\n", i + 1,
-                      shm_data->cam_online[i]);
+      for (i = 0; i < MAX_CAMS; i++)
+      {
+         pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
+                         "CAM%d:%d\n", i + 1,
+                         p_raw_frame->cam_slots[i].online);
+      }
    }
-   pthread_mutex_unlock(&shm_data->shm_mutex);
 
    /* Per-device event_id lines, sourced directly from p_raw_frame
     * (SensorData) — see emit_device_event_ids() and file header note

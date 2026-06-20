@@ -1,10 +1,42 @@
 #!/usr/bin/env python3
-"""
-inference.py — PIR-triggered person detection on BeagleBone.
+r"""
+******************************************************************************
+ \file    inference.py
+ \author  MichaelLynnCSU (https://github.com/MichaelLynnCSU)
+ \date    2026-06-20
 
-Watches current_motion in shared memory. On increment, requests a JPEG
-from the ESP32-CAM, runs TFLite person detection, saves result to /data/
-and uploads to S3 via curl.
+ \brief   PIR-triggered person detection on BeagleBone.
+
+ \details Watches current_motion in shared memory. On increment, requests
+          a JPEG from the ESP32-CAM, runs TFLite person detection, saves
+          result to /data/ and uploads to S3 via curl.
+
+          Consumes SharedSensorData.current_motion from sensor_shm —
+          aggregate state, not a device event stream. No event_id exists
+          in this path by design; inference is state-driven, not
+          event-driven. See architecture note in data_controller.c.
+
+ \note    Logging taxonomy:
+          [SHM]   transport=sensor_shm read dst=inference current_motion=N
+                  — emitted once per consumed state transition (motion
+                  increment that passes debounce). Not emitted on every
+                  poll. Matches [SHM] read convention used by
+                  thermostat_lcd and blackpill_lcd.
+
+          [INFER] Motion event — fetching JPEG
+                  — emitted when inference is triggered.
+
+          [INFER] Result: person=N confidence=0.NN
+                  — emitted after TFLite completes.
+
+ \note    SHM read log (2026-06-20):
+          Added [SHM] transport=sensor_shm read dst=inference line
+          immediately before inference trigger. Logs only the consumed
+          state transition — not every poll, not every changed read.
+          Gives visibility into whether controller wrote motion and
+          whether inference consumed it, without flooding the log at
+          10Hz poll rate.
+******************************************************************************
 """
 
 import ctypes
@@ -162,7 +194,7 @@ def save_jpeg(jpeg_bytes, detected, confidence):
     path  = os.path.join(PENDING_DIR, fname)
     with open(path, 'wb') as f:
         f.write(jpeg_bytes)
-    log.info("Saved %s", path)
+    log.info("[INFER] Saved %s", path)
     return path
 
 
@@ -176,11 +208,11 @@ def upload_to_s3(path):
                        capture_output=True)
         dest = os.path.join(UPLOADED_DIR, os.path.basename(path))
         os.rename(path, dest)
-        log.info("Uploaded %s", key)
+        log.info("[INFER] Uploaded %s", key)
     except Exception as e:
         dest = os.path.join(FAILED_DIR, os.path.basename(path))
         os.rename(path, dest)
-        log.error("Upload failed for %s: %s", path, e)
+        log.error("[INFER] Upload failed for %s: %s", path, e)
 
 
 # ── Disk watermark cleanup ────────────────────────────────────────────────────
@@ -193,7 +225,7 @@ def enforce_disk_limit(directory, max_files=200):
     )
     while len(files) > max_files:
         os.remove(files.pop(0))
-        log.warning("Disk limit: purged oldest file in %s", directory)
+        log.warning("[INFER] Disk limit: purged oldest file in %s", directory)
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -202,21 +234,22 @@ def main():
     for d in (PENDING_DIR, UPLOADED_DIR, FAILED_DIR):
         os.makedirs(d, exist_ok=True)
 
-    log.info("Loading TFLite model: %s", MODEL_PATH)
+    log.info("[INFER] Loading TFLite model: %s", MODEL_PATH)
     from tflite_runtime.interpreter import Interpreter
     interpreter    = Interpreter(model_path=MODEL_PATH)
     interpreter.allocate_tensors()
     input_details  = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
     labels         = load_labels()
-    log.info("Model loaded. Input shape: %s", input_details[0]['shape'])
+    log.info("[INFER] Model loaded. Input shape: %s", input_details[0]['shape'])
 
-    log.info("Opening shared memory: %s", SHM_NAME)
+    log.info("[INFER] Opening shared memory: %s", SHM_NAME)
     mm = open_shm()
 
     last_motion   = read_current_motion(mm)
     last_trigger  = 0.0
-    log.info("Inference ready. Watching current_motion (last=%d)", last_motion)
+    log.info("[INFER] Inference ready. Watching current_motion (last=%d)",
+             last_motion)
 
     while True:
         time.sleep(POLL_INTERVAL_S)
@@ -229,11 +262,13 @@ def main():
         now = time.monotonic()
 
         if (now - last_trigger) < DEBOUNCE_S:
-            log.debug("Debounce skip")
+            log.debug("[INFER] Debounce skip")
             continue
 
         last_trigger = now
-        log.info("Motion event — fetching JPEG")
+        log.info("[SHM] transport=sensor_shm read dst=inference current_motion=%d",
+                 cur)
+        log.info("[INFER] Motion event — fetching JPEG")
 
         jpeg = fetch_jpeg()
         if jpeg is None:
@@ -242,7 +277,7 @@ def main():
         detected, confidence = run_inference(
             jpeg, interpreter, labels, input_details, output_details
         )
-        log.info("Result: person=%s confidence=%.2f", detected, confidence)
+        log.info("[INFER] Result: person=%s confidence=%.2f", detected, confidence)
 
         path = save_jpeg(jpeg, detected, confidence)
         enforce_disk_limit(PENDING_DIR)

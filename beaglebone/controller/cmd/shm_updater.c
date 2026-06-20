@@ -13,44 +13,40 @@
  * \note    Logging taxonomy (2026-06-16):
  *          [SHM] write src=pipe_ingress  — sensor frame from named pipe
  *          [SHM] write src=uart_ingress  — frame from STM32 BlackPill UART
- *          [SHM] read  dst=blackpill_lcd — uart_push_thread reading to build
- *                                          UART bundle for STM32 BlackPill
- *          [SHM] read  dst=thermostat_lcd — motor_lcd reading temp and motor
- *                                           state for HD44780 display
- *          [SHM] get_device_status
- *          [SHM] get_room_status
- *          [SHM] doorbell_press
+ *          [SHM] read  dst=thermostat_lcd — thermostat_lcd reading temp
+ *                                           and motor state for HD44780
+ *
+ *          SHM architecture — two writers, three readers:
+ *
+ *          Writers:
+ *            pipe_ingress:   sensor_frame_dispatch() → shm_update_frame()
+ *                            → handle_get_latest(p_snapshot, "pipe_ingress")
+ *            uart_ingress:   uart_parse_line() → handle_get_latest()
+ *                            → handle_get_latest(p_snapshot, "uart_ingress")
+ *
+ *          Readers:
+ *            thermostat_lcd: thermostat_lcd.c display update loop.
+ *                            Reads current_temp, batt_motor,
+ *                            device_online[3], data_valid, sequence.
+ *
+ *            inference.py:   PIR-triggered inference daemon (Yocto
+ *                            recipes-apps/inference). Reads
+ *                            current_motion at a fixed struct offset
+ *                            to detect PIR motion increments. Does NOT
+ *                            use /doorbell_result — that segment is
+ *                            exclusively the doorbell path.
+ *
+ *            uart_controller: doorbell_pressed consume-and-clear ONLY.
+ *                            All sensor state now comes from
+ *                            get_snapshot() via state_registry.c.
+ *                            cam_online[] read directly from p_raw_frame.
+ *                            See uart_controller.c header note "SHM read
+ *                            path (dst=blackpill_lcd)" (2026-06-19).
  *
  * \note    Structured event tracing (2026-06-16):
- *          handle_get_latest() projects event_id from p_snapshot into
- *          shm_data->event_id under the shm_mutex, then logs it after
- *          the lock is released using p_snapshot (stable, not re-read
- *          from shm).
- *
- *          SHM has two writers and two readers:
- *
- *            [SHM] transport=sensor_shm event_id=M write src=pipe_ingress
- *            [SHM] transport=sensor_shm event_id=M write src=uart_ingress
- *            [SHM] transport=sensor_shm event_id=M read  dst=blackpill_lcd
- *            [SHM] transport=sensor_shm event_id=M read  dst=thermostat_lcd
- *
- *          pipe_ingress: sensor data from ESP32 via named pipe
- *                        sensor_frame_dispatch() → shm_update_frame()
- *                        → handle_get_latest()
- *
- *          uart_ingress: heartbeat and command frames from STM32 BlackPill
- *                        uart_parse_line() → handle_get_latest()
- *
- *          blackpill_lcd: uart_push_thread() reads SHM to build the UART
- *                         bundle pushed to STM32 BlackPill every 5s
- *
- *          thermostat_lcd: motor_lcd reads current_temp and batt_motor
- *                          for the HD44780 motor thermostat display
- *
- *          event_id is the most recent non-zero value from lock_event_id
- *          or light_event_id in the snapshot. PIR/reed/temp event IDs are
- *          per-slot and not scalar — they are not projected here; their
- *          trace ends at [DISPATCH].
+ *          handle_get_latest() previously projected a single rolled-up
+ *          event_id from p_snapshot into shm_data->event_id under the
+ *          shm_mutex. That field is no longer written — see note below.
  *
  * \note    Per-device event_id logging (2026-06-19):
  *          The single rolled-up "event_id=" on the [SHM] write line above
