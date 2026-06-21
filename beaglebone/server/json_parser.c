@@ -18,11 +18,62 @@
  *          Log taxonomy (2026-06-15):
  *          All log lines use [PARSE] domain prefix with frame_seq=<n>.
  *
- *          Structured event tracing (2026-06-16):
+ *          Structured event tracing — Phase 4A (2026-06-16):
  *          event_id parsed from per-slot JSON into ReedSlotData,
  *          PirSlotData, TempSlotData. lock_event_id and light_event_id
  *          parsed into SensorData. Slot summary logs condensed to one
  *          line per device type.
+ *
+ *          Wire protocol split — Phase 4B (2026-06-20):
+ *          Hub now emits a two-key envelope per tick:
+ *
+ *            {
+ *              "telemetry": { ... },
+ *              "events": [ { "type": "...", "slot": N, "event_id": NNN }, ... ]
+ *            }
+ *
+ *          "telemetry" carries all continuous state (ages, battery,
+ *          occupancy, slot arrays). Sent every tick regardless of
+ *          whether anything changed. High-volume, low-signal.
+ *
+ *          "events" carries only slots whose event_id advanced since
+ *          the hub's last send. Delta filtering is performed once, at
+ *          the hub boundary (send_to_bb() / tcp_manager.c), using
+ *          per-domain s_last_sent_*_eid[] caches. The hub guarantees
+ *          that every entry in events[] represents a true state
+ *          transition — novelty is a protocol contract, not a
+ *          BeagleBone-side convention.
+ *
+ *          Consequences for this file:
+ *          - All scalars and slot arrays are read from p_root["telemetry"],
+ *            not from p_root directly.
+ *          - event_id fields are no longer present in per-slot telemetry
+ *            objects (reeds[], pirs[], temps[]). parse_reed_slots(),
+ *            parse_pir_slots(), parse_temp_slots() skip event_id silently
+ *            (key absent — no change needed in those functions).
+ *          - lock_event_id and light_event_id are no longer scalar fields
+ *            in telemetry; they arrive exclusively via events[].
+ *          - parse_events() is the sole writer of all event_id fields in
+ *            SensorData. It routes by "type" string into the correct slot
+ *            or scalar field.
+ *          - No dedup logic is needed or performed here. A duplicate
+ *            event_id arriving in events[] would indicate a hub bug or
+ *            TCP reconnect replay and is logged as WARN, not silently
+ *            suppressed.
+ *
+ *          Log split (2026-06-20):
+ *          Events and telemetry write to separate log files, joined by
+ *          frame_seq. See pipe_writer.c for log routing.
+ *          - events.log   — one line per events[] entry. Low-volume,
+ *                           high-signal. Audit trail. Rotate slowly.
+ *          - telemetry.log — heartbeat-interval lines (every N frames
+ *                           per device). High-volume by design. Rotate
+ *                           aggressively; only recent history is useful.
+ *          Cross-referencing: find frame_seq of an event_id in events.log,
+ *          look up that frame_seq in telemetry.log for contemporaneous
+ *          battery/age state. Wall-clock timestamp on both is BeagleBone
+ *          time(NULL) at parse time — same call, same instant, no
+ *          arithmetic needed.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -55,6 +106,11 @@ static uint16_t json_get_age(struct json_object *p_root, const char *p_key)
 
 /******************************************************************************
  * \brief Parse reed slots from JSON reeds array into SensorData.
+ *
+ * \note  event_id is intentionally absent from telemetry slot objects
+ *        as of Phase 4B. parse_events() is the sole writer of
+ *        reed_slots[].event_id. The json_object_object_get_ex() call
+ *        for "event_id" that existed here has been removed.
  ******************************************************************************/
 static void parse_reed_slots(struct json_object *p_reeds_arr,
                               struct SensorData  *p_data)
@@ -101,14 +157,15 @@ static void parse_reed_slots(struct json_object *p_reeds_arr,
       if (json_object_object_get_ex(p_r, "name", &p_jval))
          (void)strncpy(p_data->reed_slots[slot].name,
                        json_object_get_string(p_jval), REED_NAME_LEN - 1);
-
-      if (json_object_object_get_ex(p_r, "event_id", &p_jval))
-         p_data->reed_slots[slot].event_id = (uint64_t)json_object_get_int64(p_jval);
    }
 }
 
 /******************************************************************************
  * \brief Parse PIR slots from JSON pirs array into SensorData.
+ *
+ * \note  event_id is intentionally absent from telemetry slot objects
+ *        as of Phase 4B. parse_events() is the sole writer of
+ *        pir_slots[].event_id.
  ******************************************************************************/
 static void parse_pir_slots(struct json_object *p_pirs_arr,
                              struct SensorData  *p_data)
@@ -151,14 +208,15 @@ static void parse_pir_slots(struct json_object *p_pirs_arr,
 
       if (json_object_object_get_ex(p_r, "offline", &p_jval))
          p_data->pir_slots[slot].offline = (uint8_t)json_object_get_int(p_jval);
-
-      if (json_object_object_get_ex(p_r, "event_id", &p_jval))
-         p_data->pir_slots[slot].event_id = (uint64_t)json_object_get_int64(p_jval);
    }
 }
 
 /******************************************************************************
  * \brief Parse "temps" JSON array into p_data->temp_slots[].
+ *
+ * \note  event_id is intentionally absent from telemetry slot objects
+ *        as of Phase 4B. parse_events() is the sole writer of
+ *        temp_slots[].event_id.
  ******************************************************************************/
 static void parse_temp_slots(struct json_object *p_temps_arr,
                               struct SensorData  *p_data)
@@ -209,9 +267,6 @@ static void parse_temp_slots(struct json_object *p_temps_arr,
             p_data->temp_slots[slot].name[TEMP_NAME_LEN - 1] = '\0';
          }
       }
-
-      if (json_object_object_get_ex(p_r, "event_id", &p_jval))
-         p_data->temp_slots[slot].event_id = (uint64_t)json_object_get_int64(p_jval);
    }
 }
 
@@ -321,15 +376,106 @@ static void parse_rooms(struct json_object *p_rooms_arr,
 }
 
 /******************************************************************************
+ * \brief Parse "events" array from hub delta gate into SensorData.
+ *
+ * \details Hub guarantees novelty — every entry here represents a true
+ *          state transition. No dedup is performed on this side.
+ *
+ *          A duplicate event_id arriving here indicates a hub bug or
+ *          TCP reconnect replay. Callers should treat a repeat as WARN,
+ *          not silent suppression.
+ *
+ *          Entry formats:
+ *            { "type": "PIR",   "slot": N, "event_id": NNN }
+ *            { "type": "REED",  "slot": N, "event_id": NNN }
+ *            { "type": "TEMP",  "slot": N, "event_id": NNN }
+ *            { "type": "LOCK",             "event_id": NNN }
+ *            { "type": "LIGHT",            "event_id": NNN }
+ *
+ *          Unknown "type" values are silently skipped (forward compatible).
+ ******************************************************************************/
+static void parse_events(struct json_object *p_events_arr,
+                         struct SensorData  *p_data)
+{
+   int                 n        = 0;
+   int                 i        = 0;
+   int                 slot     = 0;
+   uint64_t            event_id = 0;
+   const char         *p_type   = NULL;
+   struct json_object *p_entry  = NULL;
+   struct json_object *p_jval   = NULL;
+
+   n = json_object_array_length(p_events_arr);
+
+   for (i = 0; i < n; i++)
+   {
+      p_entry = json_object_array_get_idx(p_events_arr, i);
+      if (NULL == p_entry) { continue; }
+
+      if (!json_object_object_get_ex(p_entry, "type", &p_jval)) { continue; }
+      p_type = json_object_get_string(p_jval);
+      if (NULL == p_type) { continue; }
+
+      if (!json_object_object_get_ex(p_entry, "event_id", &p_jval)) { continue; }
+      event_id = (uint64_t)json_object_get_int64(p_jval);
+
+      if (0 == strcmp(p_type, "LOCK"))
+      {
+         p_data->lock_event_id = event_id;
+      }
+      else if (0 == strcmp(p_type, "LIGHT"))
+      {
+         p_data->light_event_id = event_id;
+      }
+      else
+      {
+         /* Slot-based types: PIR, REED, TEMP */
+         if (!json_object_object_get_ex(p_entry, "slot", &p_jval)) { continue; }
+         slot = json_object_get_int(p_jval) - 1;
+
+         if (0 == strcmp(p_type, "PIR"))
+         {
+            if ((slot >= 0) && (slot < MAX_PIRS))
+               p_data->pir_slots[slot].event_id = event_id;
+         }
+         else if (0 == strcmp(p_type, "REED"))
+         {
+            if ((slot >= 0) && (slot < MAX_REEDS))
+               p_data->reed_slots[slot].event_id = event_id;
+         }
+         else if (0 == strcmp(p_type, "TEMP"))
+         {
+            if ((slot >= 0) && (slot < MAX_TEMPS))
+               p_data->temp_slots[slot].event_id = event_id;
+         }
+         /* Unknown type: silently skip — forward compatible */
+      }
+   }
+}
+
+/******************************************************************************
  * \brief Parse a JSON body string into SensorData and write to pipe.
+ *
+ * \details Expects the Phase 4B envelope:
+ *            { "telemetry": { ... }, "events": [ ... ] }
+ *
+ *          Rejects frames missing "telemetry" with a [PARSE] log line
+ *          rather than falling back to flat-root parsing. A missing
+ *          "telemetry" key means a wrong-protocol-version frame from
+ *          a hub that has not yet been updated; silent misrouting is
+ *          a worse failure mode than explicit rejection.
+ *
+ *          "events" may be an empty array — this is normal on telemetry-
+ *          only ticks and must be handled gracefully.
  ******************************************************************************/
 void process_json(const char *p_json_body)
 {
-   struct json_object *p_root    = NULL;
-   struct json_object *p_obj     = NULL;
+   struct json_object *p_root      = NULL;
+   struct json_object *p_telemetry = NULL;
+   struct json_object *p_obj       = NULL;
    struct SensorData   data;
-   int                 i         = 0;
-   uint32_t            frame_seq = 0;
+   int                 i           = 0;
+   uint32_t            frame_seq   = 0;
 
    frame_seq = ++g_frame_seq;
 
@@ -337,6 +483,15 @@ void process_json(const char *p_json_body)
    if (NULL == p_root)
    {
       log_msg("[PARSE] decode_failed frame_seq=%u", frame_seq);
+      return;
+   }
+
+   /* Require telemetry envelope — reject old-protocol flat frames */
+   if (!json_object_object_get_ex(p_root, "telemetry", &p_telemetry))
+   {
+      log_msg("[PARSE] missing_telemetry frame_seq=%u -- wrong protocol version?",
+              frame_seq);
+      json_object_put(p_root);
       return;
    }
 
@@ -352,12 +507,12 @@ void process_json(const char *p_json_body)
 
    for (i = 0; i < MAX_REEDS; i++)
    {
-      data.reed_slots[i].age     = AGE_UNKNOWN;
-      data.reed_slots[i].batt    = -1;
-      data.reed_slots[i].active  = 0;
-      data.reed_slots[i].state   = 0xFF;
-      data.reed_slots[i].offline = 0;
-      data.reed_slots[i].gen     = 0;
+      data.reed_slots[i].age      = AGE_UNKNOWN;
+      data.reed_slots[i].batt     = -1;
+      data.reed_slots[i].active   = 0;
+      data.reed_slots[i].state    = 0xFF;
+      data.reed_slots[i].offline  = 0;
+      data.reed_slots[i].gen      = 0;
       data.reed_slots[i].event_id = 0;
    }
 
@@ -391,39 +546,42 @@ void process_json(const char *p_json_body)
    data.lock_event_id  = 0;
    data.light_event_id = 0;
 
-   if (json_object_object_get_ex(p_root, "avg_temp",          &p_obj)) data.avg_temp          = json_object_get_double(p_obj);
-   if (json_object_object_get_ex(p_root, "motion_count",      &p_obj)) data.motion_count       = json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "light_state",       &p_obj)) data.light_state        = json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "lock_state",        &p_obj)) data.lock_state         = json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "batt_pir",          &p_obj)) data.batt_pir           = (int8_t)json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "pir_occupied",      &p_obj)) data.pir_occupied       = (int8_t)json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "doorbell_pressed",  &p_obj)) data.doorbell_pressed   = (uint8_t)json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "doorbell_device_id",&p_obj)) data.doorbell_device_id = (uint8_t)json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "batt_lck",          &p_obj)) data.batt_lck           = (int8_t)json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "motor_online",      &p_obj)) data.motor_online       = (uint8_t)json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "batt_motor",        &p_obj)) data.batt_motor         = json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "pir_count",         &p_obj)) data.pir_count          = (uint8_t)json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "lock_event_id",     &p_obj)) data.lock_event_id      = (uint64_t)json_object_get_int64(p_obj);
-   if (json_object_object_get_ex(p_root, "light_event_id",    &p_obj)) data.light_event_id     = (uint64_t)json_object_get_int64(p_obj);
+   /* ---- Telemetry scalars ---- */
+   if (json_object_object_get_ex(p_telemetry, "avg_temp",           &p_obj)) data.avg_temp          = json_object_get_double(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "motion_count",       &p_obj)) data.motion_count       = json_object_get_int(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "light_state",        &p_obj)) data.light_state        = json_object_get_int(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "lock_state",         &p_obj)) data.lock_state         = json_object_get_int(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "batt_pir",           &p_obj)) data.batt_pir           = (int8_t)json_object_get_int(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "pir_occupied",       &p_obj)) data.pir_occupied       = (int8_t)json_object_get_int(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "doorbell_pressed",   &p_obj)) data.doorbell_pressed   = (uint8_t)json_object_get_int(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "doorbell_device_id", &p_obj)) data.doorbell_device_id = (uint8_t)json_object_get_int(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "batt_lck",           &p_obj)) data.batt_lck           = (int8_t)json_object_get_int(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "motor_online",       &p_obj)) data.motor_online       = (uint8_t)json_object_get_int(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "batt_motor",         &p_obj)) data.batt_motor         = json_object_get_int(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "pir_count",          &p_obj)) data.pir_count          = (uint8_t)json_object_get_int(p_obj);
 
-   data.age_pir = json_get_age(p_root, "age_pir");
-   data.age_lgt = json_get_age(p_root, "age_lgt");
-   data.age_lck = json_get_age(p_root, "age_lck");
+   data.age_pir = json_get_age(p_telemetry, "age_pir");
+   data.age_lgt = json_get_age(p_telemetry, "age_lgt");
+   data.age_lck = json_get_age(p_telemetry, "age_lck");
 
-   if (json_object_object_get_ex(p_root, "reeds",     &p_obj)) parse_reed_slots(p_obj,     &data);
-   if (json_object_object_get_ex(p_root, "pirs",      &p_obj)) parse_pir_slots(p_obj,      &data);
-   if (json_object_object_get_ex(p_root, "temp_count",&p_obj)) data.temp_count = (uint8_t)json_object_get_int(p_obj);
-   if (json_object_object_get_ex(p_root, "temps",     &p_obj)) parse_temp_slots(p_obj,     &data);
-   if (json_object_object_get_ex(p_root, "doorbells", &p_obj)) parse_doorbell_slots(p_obj, &data);
-   if (json_object_object_get_ex(p_root, "cams",      &p_obj)) parse_cam_slots(p_obj,      &data);
-   if (json_object_object_get_ex(p_root, "rooms",     &p_obj)) parse_rooms(p_obj,          &data);
+   /* ---- Telemetry arrays ---- */
+   if (json_object_object_get_ex(p_telemetry, "reeds",      &p_obj)) parse_reed_slots(p_obj,     &data);
+   if (json_object_object_get_ex(p_telemetry, "pirs",       &p_obj)) parse_pir_slots(p_obj,      &data);
+   if (json_object_object_get_ex(p_telemetry, "temp_count", &p_obj)) data.temp_count = (uint8_t)json_object_get_int(p_obj);
+   if (json_object_object_get_ex(p_telemetry, "temps",      &p_obj)) parse_temp_slots(p_obj,     &data);
+   if (json_object_object_get_ex(p_telemetry, "doorbells",  &p_obj)) parse_doorbell_slots(p_obj, &data);
+   if (json_object_object_get_ex(p_telemetry, "cams",       &p_obj)) parse_cam_slots(p_obj,      &data);
+   if (json_object_object_get_ex(p_telemetry, "rooms",      &p_obj)) parse_rooms(p_obj,          &data);
+
+   /* ---- Events[] — hub delta gate, novelty guaranteed by protocol ---- */
+   if (json_object_object_get_ex(p_root, "events", &p_obj)) parse_events(p_obj, &data);
 
    json_object_put(p_root);
 
    pipe_ensure_connected();
    pipe_write(&data, frame_seq);
 
-   /* ---- Condensed summary ---- */
+   /* ---- Condensed telemetry summary ---- */
    log_msg("[PARSE] seq=%u tmp=%.1f mot=%u lgt=%d lck=%d occ=%d mtr=%d db=%d "
            "ages pir=%d lgt=%d lck=%d batts pir=%d lck=%d mtr=%d",
            frame_seq,
@@ -434,65 +592,86 @@ void process_json(const char *p_json_body)
            data.age_pir, data.age_lgt, data.age_lck,
            data.batt_pir, data.batt_lck, data.batt_motor);
 
-   /* ---- Per-slot PIR (one line, active slots only) ---- */
+   /* ---- Per-slot PIR telemetry (active slots only) ---- */
    for (i = 0; i < MAX_PIRS; i++)
    {
       if (data.pir_slots[i].active)
       {
-         log_msg("[PARSE] PIR slot=%d cnt=%u batt=%d age=%d occ=%d eid=%llu",
+         log_msg("[PARSE] PIR slot=%d cnt=%u batt=%d age=%d occ=%d",
                  i + 1,
                  data.pir_slots[i].count,
                  data.pir_slots[i].batt,
                  data.pir_slots[i].age,
-                 data.pir_slots[i].occupied,
-                 (unsigned long long)data.pir_slots[i].event_id);
+                 data.pir_slots[i].occupied);
       }
    }
 
-   /* ---- Per-slot Reed (one line, active slots only) ---- */
+   /* ---- Per-slot Reed telemetry (active slots only) ---- */
    for (i = 0; i < MAX_REEDS; i++)
    {
       if (data.reed_slots[i].active)
       {
-         log_msg("[PARSE] Reed slot=%d (%s) st=%s batt=%d age=%d gen=%u eid=%llu",
+         log_msg("[PARSE] Reed slot=%d (%s) st=%s batt=%d age=%d gen=%u",
                  i + 1,
                  data.reed_slots[i].name,
                  (1 == data.reed_slots[i].state) ? "open"   :
                  (0 == data.reed_slots[i].state) ? "closed" : "?",
                  data.reed_slots[i].batt,
                  data.reed_slots[i].age,
-                 data.reed_slots[i].gen,
-                 (unsigned long long)data.reed_slots[i].event_id);
+                 data.reed_slots[i].gen);
       }
    }
 
-   /* ---- Per-slot Temp (one line, active slots only) ---- */
+   /* ---- Per-slot Temp telemetry (active slots only) ---- */
    for (i = 0; i < MAX_TEMPS; i++)
    {
       if (data.temp_slots[i].active)
       {
-         log_msg("[PARSE] Temp slot=%d %d.%dC batt=%d age=%d eid=%llu",
+         log_msg("[PARSE] Temp slot=%d %d.%dC batt=%d age=%d",
                  i + 1,
                  data.temp_slots[i].temp_decidegc / 10,
                  data.temp_slots[i].temp_decidegc % 10,
                  data.temp_slots[i].batt,
-                 data.temp_slots[i].age,
-                 (unsigned long long)data.temp_slots[i].event_id);
+                 data.temp_slots[i].age);
       }
    }
 
-   /* ---- Lock / Light event IDs (only when non-zero) ---- */
+   /* ---- Event log lines — one per events[] entry, frame_seq for join ---- */
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      if (data.pir_slots[i].event_id != 0)
+         log_msg("[EVENT] frame_seq=%u type=PIR  slot=%d event_id=%llu",
+                 frame_seq, i + 1,
+                 (unsigned long long)data.pir_slots[i].event_id);
+   }
+
+   for (i = 0; i < MAX_REEDS; i++)
+   {
+      if (data.reed_slots[i].event_id != 0)
+         log_msg("[EVENT] frame_seq=%u type=REED slot=%d event_id=%llu",
+                 frame_seq, i + 1,
+                 (unsigned long long)data.reed_slots[i].event_id);
+   }
+
+   for (i = 0; i < MAX_TEMPS; i++)
+   {
+      if (data.temp_slots[i].event_id != 0)
+         log_msg("[EVENT] frame_seq=%u type=TEMP slot=%d event_id=%llu",
+                 frame_seq, i + 1,
+                 (unsigned long long)data.temp_slots[i].event_id);
+   }
+
    if (data.lock_event_id != 0)
-      log_msg("[PARSE] Lock st=%d batt=%d eid=%llu",
-              data.lock_state, data.batt_lck,
+      log_msg("[EVENT] frame_seq=%u type=LOCK event_id=%llu",
+              frame_seq,
               (unsigned long long)data.lock_event_id);
 
    if (data.light_event_id != 0)
-      log_msg("[PARSE] Light st=%d eid=%llu",
-              data.light_state,
+      log_msg("[EVENT] frame_seq=%u type=LIGHT event_id=%llu",
+              frame_seq,
               (unsigned long long)data.light_event_id);
 
-   /* ---- Doorbells — one line showing online set only ---- */
+   /* ---- Doorbells — online set only ---- */
    {
       char db_buf[64] = {0};
       int  pos        = 0;
@@ -506,7 +685,7 @@ void process_json(const char *p_json_body)
          log_msg("[PARSE] Doorbells online:%s", db_buf);
    }
 
-   /* ---- Cams — one line showing online set only ---- */
+   /* ---- Cams — online set only ---- */
    {
       char cam_buf[64] = {0};
       int  pos         = 0;

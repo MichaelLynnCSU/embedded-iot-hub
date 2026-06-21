@@ -79,6 +79,16 @@
  *          increments internally for any other internal use, it is just
  *          no longer printed here. handle_get_latest() no longer computes
  *          or assigns shm_data->event_id.
+ *
+ * \note    Wire protocol split — Phase 4B (2026-06-20):
+ *          event_id fields in per-slot objects are zero on telemetry-only
+ *          ticks — the hub delta gate (send_to_bb() / tcp_manager.c)
+ *          guarantees non-zero only when a true state transition was
+ *          emitted in events[] that tick. Zero-guards added to the
+ *          PIR/REED/TEMP loops in log_shm_device_event_ids() to suppress
+ *          no-event ticks from the SHM event log. LOCK and LIGHT already
+ *          carried equivalent guards (if (0 != p_data->lock_event_id))
+ *          and are unchanged.
  ******************************************************************************/
 
 #include "shm_updater.h"
@@ -152,6 +162,10 @@ static void update_shm_cam_liveness(const struct SensorData *p_data)
  * \details Replaces the old single rolled-up event_id= on the [SHM]
  *          write line. See file-header note "Per-device event_id
  *          logging (2026-06-19)" for why.
+ *
+ *          Zero-guards on PIR/REED/TEMP suppress telemetry-only ticks
+ *          where no event was emitted by the hub — see file-header note
+ *          "Wire protocol split — Phase 4B (2026-06-20)".
  ******************************************************************************/
 static void log_shm_device_event_ids(const struct SensorData *p_data)
 {
@@ -159,7 +173,7 @@ static void log_shm_device_event_ids(const struct SensorData *p_data)
 
    for (i = 0; i < MAX_PIRS; i++)
    {
-      if (p_data->pir_slots[i].active)
+      if (p_data->pir_slots[i].active && (0 != p_data->pir_slots[i].event_id))
       {
          LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=PIR slot=%d eid=%llu",
              i + 1, (unsigned long long)p_data->pir_slots[i].event_id);
@@ -168,7 +182,7 @@ static void log_shm_device_event_ids(const struct SensorData *p_data)
 
    for (i = 0; i < MAX_REEDS; i++)
    {
-      if (p_data->reed_slots[i].active)
+      if (p_data->reed_slots[i].active && (0 != p_data->reed_slots[i].event_id))
       {
          LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=REED slot=%d eid=%llu",
              i + 1, (unsigned long long)p_data->reed_slots[i].event_id);
@@ -177,7 +191,7 @@ static void log_shm_device_event_ids(const struct SensorData *p_data)
 
    for (i = 0; i < MAX_TEMPS; i++)
    {
-      if (p_data->temp_slots[i].active)
+      if (p_data->temp_slots[i].active && (0 != p_data->temp_slots[i].event_id))
       {
          LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=TEMP slot=%d eid=%llu",
              i + 1, (unsigned long long)p_data->temp_slots[i].event_id);

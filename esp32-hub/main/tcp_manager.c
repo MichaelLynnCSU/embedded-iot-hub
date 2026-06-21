@@ -85,6 +85,13 @@
 
 static const char *TAG = "TCP_MGR";
 
+/* ---- Per-domain last-sent event_id caches (delta gate) ---- */
+static uint64_t s_last_sent_pir_eid[MAX_PIRS];
+static uint64_t s_last_sent_reed_eid[MAX_REEDS];
+static uint64_t s_last_sent_temp_eid[MAX_TEMPS];
+static uint64_t s_last_sent_lock_eid;
+static uint64_t s_last_sent_light_eid;
+
 /*----------------------------------------------------------------------------*/
 
 typedef struct
@@ -368,45 +375,53 @@ static void handle_bb_send_error(int *p_sock, int *p_block_count, int *p_state)
 
 static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
 {
-   cJSON   *p_root     = NULL;
-   cJSON   *p_reeds    = NULL;
-   cJSON   *p_rooms    = NULL;
-   cJSON   *p_entry    = NULL;
-   cJSON   *p_pirs     = NULL;
-   cJSON   *p_temps    = NULL;
-   cJSON   *p_cams     = NULL;
+   cJSON   *p_root      = NULL;
+   cJSON   *p_telemetry = NULL;
+   cJSON   *p_events    = NULL;
+   cJSON   *p_reeds     = NULL;
+   cJSON   *p_rooms     = NULL;
+   cJSON   *p_entry     = NULL;
+   cJSON   *p_pirs      = NULL;
+   cJSON   *p_temps     = NULL;
+   cJSON   *p_cams      = NULL;
    cJSON   *p_doorbells = NULL;
-   char    *p_msg      = NULL;
+   char    *p_msg       = NULL;
    char     name[REED_NAME_BUF_SIZE] = {0};
-   uint8_t  door_state = 0xFF;
-   uint16_t gen        = 0;
-   int      i          = 0;
-   int      sent       = 0;
+   uint8_t  door_state  = 0xFF;
+   uint16_t gen         = 0;
+   int      i           = 0;
+   int      sent        = 0;
 
    if ((TCP_STATE_CONNECTED != *p_bb_state) || (SOCK_INVALID == *p_bb_sock)) { return; }
 
    p_root = cJSON_CreateObject();
    if (NULL == p_root) { ESP_LOGE(TAG, "cJSON root alloc failed (BB)"); return; }
 
-   /* ---- Scalar fields ---- */
-   (void)cJSON_AddNumberToObject(p_root, "avg_temp",          g_state.avg_temp);
-   (void)cJSON_AddNumberToObject(p_root, "motion_count",      g_state.motion_count);
-   (void)cJSON_AddNumberToObject(p_root, "light_state",       g_state.light_state);
-   (void)cJSON_AddNumberToObject(p_root, "lock_state",        g_state.lock_state);
-   (void)cJSON_AddNumberToObject(p_root, "age_pir",           g_state.age_pir);
-   (void)cJSON_AddNumberToObject(p_root, "age_lgt",           g_state.age_lgt);
-   (void)cJSON_AddNumberToObject(p_root, "age_lck",           g_state.age_lck);
-   (void)cJSON_AddNumberToObject(p_root, "batt_pir",          g_state.pir_batt);
-   (void)cJSON_AddNumberToObject(p_root, "pir_occupied",      g_state.pir_occupied);
-   (void)cJSON_AddNumberToObject(p_root, "doorbell_pressed",  g_state.doorbell_pressed);
-   (void)cJSON_AddNumberToObject(p_root, "doorbell_device_id", g_state.doorbell_device_id);
-   (void)cJSON_AddNumberToObject(p_root, "batt_lck",          g_state.lock_batt);
-   (void)cJSON_AddNumberToObject(p_root, "batt_motor",        g_state.motor_batt);
-   (void)cJSON_AddNumberToObject(p_root, "motor_online",      g_state.motor_online);
-   (void)cJSON_AddNumberToObject(p_root, "lock_event_id",     (double)g_state.lock_event_id);
-   (void)cJSON_AddNumberToObject(p_root, "light_event_id",    (double)g_state.light_event_id);
+   /* ------------------------------------------------------------------ */
+   /* telemetry{} — continuous state, sent every tick regardless of delta */
+   /* ------------------------------------------------------------------ */
+   p_telemetry = cJSON_CreateObject();
+   if (NULL == p_telemetry) { cJSON_Delete(p_root); return; }
 
-   /* ---- Reeds ---- */
+   /* Scalar telemetry fields */
+   (void)cJSON_AddNumberToObject(p_telemetry, "avg_temp",           g_state.avg_temp);
+   (void)cJSON_AddNumberToObject(p_telemetry, "motion_count",       g_state.motion_count);
+   (void)cJSON_AddNumberToObject(p_telemetry, "light_state",        g_state.light_state);
+   (void)cJSON_AddNumberToObject(p_telemetry, "lock_state",         g_state.lock_state);
+   (void)cJSON_AddNumberToObject(p_telemetry, "age_pir",            g_state.age_pir);
+   (void)cJSON_AddNumberToObject(p_telemetry, "age_lgt",            g_state.age_lgt);
+   (void)cJSON_AddNumberToObject(p_telemetry, "age_lck",            g_state.age_lck);
+   (void)cJSON_AddNumberToObject(p_telemetry, "batt_pir",           g_state.pir_batt);
+   (void)cJSON_AddNumberToObject(p_telemetry, "pir_occupied",       g_state.pir_occupied);
+   (void)cJSON_AddNumberToObject(p_telemetry, "doorbell_pressed",   g_state.doorbell_pressed);
+   (void)cJSON_AddNumberToObject(p_telemetry, "doorbell_device_id", g_state.doorbell_device_id);
+   (void)cJSON_AddNumberToObject(p_telemetry, "batt_lck",           g_state.lock_batt);
+   (void)cJSON_AddNumberToObject(p_telemetry, "batt_motor",         g_state.motor_batt);
+   (void)cJSON_AddNumberToObject(p_telemetry, "motor_online",       g_state.motor_online);
+   (void)cJSON_AddNumberToObject(p_telemetry, "pir_count",          g_state.pir_count);
+   (void)cJSON_AddNumberToObject(p_telemetry, "temp_count",         g_state.temp_count);
+
+   /* Reeds */
    g_state.reed_count = ble_get_reed_count();
    p_reeds = cJSON_CreateArray();
    if (NULL != p_reeds)
@@ -419,21 +434,20 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
          p_entry = cJSON_CreateObject();
          if (NULL != p_entry)
          {
-            (void)cJSON_AddNumberToObject(p_entry, "id",       i + 1);
-            (void)cJSON_AddNumberToObject(p_entry, "batt",     g_state.reed_slots[i].batt);
-            (void)cJSON_AddNumberToObject(p_entry, "age",      g_state.reed_slots[i].age);
-            (void)cJSON_AddNumberToObject(p_entry, "state",    door_state);
-            (void)cJSON_AddNumberToObject(p_entry, "offline",  g_state.reed_slots[i].offline);
-            (void)cJSON_AddNumberToObject(p_entry, "gen",      gen);
-            (void)cJSON_AddStringToObject(p_entry, "name",     name);
-            (void)cJSON_AddNumberToObject(p_entry, "event_id", (double)g_state.reed_slots[i].event_id);
+            (void)cJSON_AddNumberToObject(p_entry, "id",      i + 1);
+            (void)cJSON_AddNumberToObject(p_entry, "batt",    g_state.reed_slots[i].batt);
+            (void)cJSON_AddNumberToObject(p_entry, "age",     g_state.reed_slots[i].age);
+            (void)cJSON_AddNumberToObject(p_entry, "state",   door_state);
+            (void)cJSON_AddNumberToObject(p_entry, "offline", g_state.reed_slots[i].offline);
+            (void)cJSON_AddNumberToObject(p_entry, "gen",     gen);
+            (void)cJSON_AddStringToObject(p_entry, "name",    name);
             (void)cJSON_AddItemToArray(p_reeds, p_entry);
          }
       }
-      (void)cJSON_AddItemToObject(p_root, "reeds", p_reeds);
+      (void)cJSON_AddItemToObject(p_telemetry, "reeds", p_reeds);
    }
 
-   /* ---- Rooms ---- */
+   /* Rooms */
    p_rooms = cJSON_CreateArray();
    if (NULL != p_rooms)
    {
@@ -449,10 +463,10 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
             (void)cJSON_AddItemToArray(p_rooms, p_entry);
          }
       }
-      (void)cJSON_AddItemToObject(p_root, "rooms", p_rooms);
+      (void)cJSON_AddItemToObject(p_telemetry, "rooms", p_rooms);
    }
 
-   /* ---- PIRs ---- */
+   /* PIRs */
    p_pirs = cJSON_CreateArray();
    if (NULL != p_pirs)
    {
@@ -467,15 +481,13 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
             (void)cJSON_AddNumberToObject(p_entry, "age",      g_state.pir_slots[i].age);
             (void)cJSON_AddNumberToObject(p_entry, "occupied", g_state.pir_slots[i].occupied);
             (void)cJSON_AddNumberToObject(p_entry, "offline",  g_state.pir_slots[i].offline);
-            (void)cJSON_AddNumberToObject(p_entry, "event_id", (double)g_state.pir_slots[i].event_id);
-            (void)cJSON_AddItemToArray(p_pirs, p_entry);  /* only once */
+            (void)cJSON_AddItemToArray(p_pirs, p_entry);
          }
       }
-      (void)cJSON_AddItemToObject(p_root, "pirs", p_pirs);
+      (void)cJSON_AddItemToObject(p_telemetry, "pirs", p_pirs);
    }
-   (void)cJSON_AddNumberToObject(p_root, "pir_count", g_state.pir_count);
 
-   /* ---- Temps ---- */
+   /* Temps */
    p_temps = cJSON_CreateArray();
    if (NULL != p_temps)
    {
@@ -487,22 +499,20 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
          p_entry = cJSON_CreateObject();
          if (NULL != p_entry)
          {
-            (void)cJSON_AddNumberToObject(p_entry, "id",       i + 1);
-            (void)cJSON_AddNumberToObject(p_entry, "temp",     g_state.temp_slots[i].temp_decidegc / 10);
-            (void)cJSON_AddNumberToObject(p_entry, "batt",     g_state.temp_slots[i].batt);
-            (void)cJSON_AddNumberToObject(p_entry, "age",      g_state.temp_slots[i].age);
-            (void)cJSON_AddNumberToObject(p_entry, "offline",  g_state.temp_slots[i].offline);
-            (void)cJSON_AddNumberToObject(p_entry, "gen",      t_gen);
-            (void)cJSON_AddStringToObject(p_entry, "name",     t_name);
-            (void)cJSON_AddNumberToObject(p_entry, "event_id", (double)g_state.temp_slots[i].event_id);
+            (void)cJSON_AddNumberToObject(p_entry, "id",      i + 1);
+            (void)cJSON_AddNumberToObject(p_entry, "temp",    g_state.temp_slots[i].temp_decidegc / 10);
+            (void)cJSON_AddNumberToObject(p_entry, "batt",    g_state.temp_slots[i].batt);
+            (void)cJSON_AddNumberToObject(p_entry, "age",     g_state.temp_slots[i].age);
+            (void)cJSON_AddNumberToObject(p_entry, "offline", g_state.temp_slots[i].offline);
+            (void)cJSON_AddNumberToObject(p_entry, "gen",     t_gen);
+            (void)cJSON_AddStringToObject(p_entry, "name",    t_name);
             (void)cJSON_AddItemToArray(p_temps, p_entry);
          }
       }
-      (void)cJSON_AddItemToObject(p_root, "temps", p_temps);
+      (void)cJSON_AddItemToObject(p_telemetry, "temps", p_temps);
    }
-   (void)cJSON_AddNumberToObject(p_root, "temp_count", g_state.temp_count);
 
-   /* ---- Cams ---- */
+   /* Cams */
    p_cams = cJSON_CreateArray();
    if (NULL != p_cams)
    {
@@ -517,10 +527,10 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
             (void)cJSON_AddItemToArray(p_cams, p_entry);
          }
       }
-      (void)cJSON_AddItemToObject(p_root, "cams", p_cams);
+      (void)cJSON_AddItemToObject(p_telemetry, "cams", p_cams);
    }
 
-   /* ---- Doorbells ---- */
+   /* Doorbells */
    p_doorbells = cJSON_CreateArray();
    if (NULL != p_doorbells)
    {
@@ -535,10 +545,106 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
             (void)cJSON_AddItemToArray(p_doorbells, p_entry);
          }
       }
-      (void)cJSON_AddItemToObject(p_root, "doorbells", p_doorbells);
+      (void)cJSON_AddItemToObject(p_telemetry, "doorbells", p_doorbells);
    }
 
-   /* ---- Serialize and send ---- */
+   (void)cJSON_AddItemToObject(p_root, "telemetry", p_telemetry);
+
+   /* ------------------------------------------------------------------ */
+   /* events[] — delta gate: emit only slots whose event_id advanced      */
+   /* ------------------------------------------------------------------ */
+   p_events = cJSON_CreateArray();
+   if (NULL == p_events) { cJSON_Delete(p_root); return; }
+
+   for (i = 0; (i < g_state.pir_count) && (i < MAX_PIRS); i++)
+   {
+      if (g_state.pir_slots[i].event_id != s_last_sent_pir_eid[i])
+      {
+         p_entry = cJSON_CreateObject();
+         if (NULL != p_entry)
+         {
+            (void)cJSON_AddStringToObject(p_entry, "type",     "PIR");
+            (void)cJSON_AddNumberToObject(p_entry, "slot",     i + 1);
+            (void)cJSON_AddNumberToObject(p_entry, "event_id", (double)g_state.pir_slots[i].event_id);
+            (void)cJSON_AddItemToArray(p_events, p_entry);
+            ESP_LOGI(TAG, "[EVENT] PIR slot=%d event_id=%llu",
+                     i + 1, (unsigned long long)g_state.pir_slots[i].event_id);
+         }
+         s_last_sent_pir_eid[i] = g_state.pir_slots[i].event_id;
+      }
+   }
+
+   for (i = 0; (i < g_state.reed_count) && (i < MAX_REEDS); i++)
+   {
+      if (g_state.reed_slots[i].event_id != s_last_sent_reed_eid[i])
+      {
+         p_entry = cJSON_CreateObject();
+         if (NULL != p_entry)
+         {
+            (void)cJSON_AddStringToObject(p_entry, "type",     "REED");
+            (void)cJSON_AddNumberToObject(p_entry, "slot",     i + 1);
+            (void)cJSON_AddNumberToObject(p_entry, "event_id", (double)g_state.reed_slots[i].event_id);
+            (void)cJSON_AddItemToArray(p_events, p_entry);
+            ESP_LOGI(TAG, "[EVENT] REED slot=%d event_id=%llu state=%d",
+                     i + 1, (unsigned long long)g_state.reed_slots[i].event_id,
+                     g_state.reed_slots[i].state);
+         }
+         s_last_sent_reed_eid[i] = g_state.reed_slots[i].event_id;
+      }
+   }
+
+   for (i = 0; (i < g_state.temp_count) && (i < MAX_TEMPS); i++)
+   {
+      if (g_state.temp_slots[i].event_id != s_last_sent_temp_eid[i])
+      {
+         p_entry = cJSON_CreateObject();
+         if (NULL != p_entry)
+         {
+            (void)cJSON_AddStringToObject(p_entry, "type",     "TEMP");
+            (void)cJSON_AddNumberToObject(p_entry, "slot",     i + 1);
+            (void)cJSON_AddNumberToObject(p_entry, "event_id", (double)g_state.temp_slots[i].event_id);
+            (void)cJSON_AddItemToArray(p_events, p_entry);
+            ESP_LOGI(TAG, "[EVENT] TEMP slot=%d event_id=%llu temp_dc=%d",
+                     i + 1, (unsigned long long)g_state.temp_slots[i].event_id,
+                     g_state.temp_slots[i].temp_decidegc);
+         }
+         s_last_sent_temp_eid[i] = g_state.temp_slots[i].event_id;
+      }
+   }
+
+   if (g_state.lock_event_id != s_last_sent_lock_eid)
+   {
+      p_entry = cJSON_CreateObject();
+      if (NULL != p_entry)
+      {
+         (void)cJSON_AddStringToObject(p_entry, "type",     "LOCK");
+         (void)cJSON_AddNumberToObject(p_entry, "event_id", (double)g_state.lock_event_id);
+         (void)cJSON_AddItemToArray(p_events, p_entry);
+         ESP_LOGI(TAG, "[EVENT] LOCK event_id=%llu state=%d",
+                  (unsigned long long)g_state.lock_event_id, g_state.lock_state);
+      }
+      s_last_sent_lock_eid = g_state.lock_event_id;
+   }
+
+   if (g_state.light_event_id != s_last_sent_light_eid)
+   {
+      p_entry = cJSON_CreateObject();
+      if (NULL != p_entry)
+      {
+         (void)cJSON_AddStringToObject(p_entry, "type",     "LIGHT");
+         (void)cJSON_AddNumberToObject(p_entry, "event_id", (double)g_state.light_event_id);
+         (void)cJSON_AddItemToArray(p_events, p_entry);
+         ESP_LOGI(TAG, "[EVENT] LIGHT event_id=%llu state=%d",
+                  (unsigned long long)g_state.light_event_id, g_state.light_state);
+      }
+      s_last_sent_light_eid = g_state.light_event_id;
+   }
+
+   (void)cJSON_AddItemToObject(p_root, "events", p_events);
+
+   /* ------------------------------------------------------------------ */
+   /* Serialize and send                                                   */
+   /* ------------------------------------------------------------------ */
    p_msg = cJSON_PrintUnformatted(p_root);
    cJSON_Delete(p_root);
    if (NULL == p_msg) { ESP_LOGE(TAG, "cJSON serialize failed (BB)"); return; }
@@ -551,8 +657,6 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
    else
    {
       *p_bb_block_count = 0;
-
-      /* ---- Summary log ---- */
       ESP_LOGI(TAG, "[TCP] publish tmp=%d pir=%u occ=%d lgt=%d lck=%d "
                     "reeds=%d temps=%d mtr=%d batt_mtr=%d batt_pir=%d batt_lck=%d"
                     " doorbell=%d db_id=%d",
@@ -563,49 +667,6 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
                (int)g_state.motor_online, g_state.motor_batt,
                g_state.pir_batt, g_state.lock_batt,
                g_state.doorbell_pressed, g_state.doorbell_device_id);
-
-      /* ---- Per-device event_id logs ---- */
-      for (i = 0; i < g_state.pir_count; i++)
-      {
-         ESP_LOGI(TAG, "[TCP] event_id=%llu device=PIR slot=%d count=%u batt=%d",
-                  (unsigned long long)g_state.pir_slots[i].event_id,
-                  i + 1,
-                  (unsigned)g_state.pir_slots[i].motion_count,
-                  g_state.pir_slots[i].batt);
-      }
-
-      for (i = 0; i < g_state.reed_count; i++)
-      {
-         ESP_LOGI(TAG, "[TCP] event_id=%llu device=REED slot=%d state=%d batt=%d",
-                  (unsigned long long)g_state.reed_slots[i].event_id,
-                  i + 1,
-                  g_state.reed_slots[i].state,
-                  g_state.reed_slots[i].batt);
-      }
-
-      for (i = 0; i < g_state.temp_count; i++)
-      {
-         ESP_LOGI(TAG, "[TCP] event_id=%llu device=BLE_TEMP slot=%d temp_dc=%d batt=%d",
-                  (unsigned long long)g_state.temp_slots[i].event_id,
-                  i + 1,
-                  g_state.temp_slots[i].temp_decidegc,
-                  g_state.temp_slots[i].batt);
-      }
-
-      if (0 != g_state.light_event_id)
-      {
-         ESP_LOGI(TAG, "[TCP] event_id=%llu device=LIGHT state=%d",
-                  (unsigned long long)g_state.light_event_id,
-                  g_state.light_state);
-      }
-
-      if (0 != g_state.lock_event_id)
-      {
-         ESP_LOGI(TAG, "[TCP] event_id=%llu device=LOCK state=%d batt=%d",
-                  (unsigned long long)g_state.lock_event_id,
-                  g_state.lock_state,
-                  g_state.lock_batt);
-      }
    }
 
    /* Clear doorbell pulse — one-shot, reset after each send */

@@ -96,6 +96,17 @@
  *          No EID_CAM* lines are emitted. Adding CAM event tracing is a
  *          separate, larger task starting at cam_trigger.c on the
  *          ESP32 side and is out of scope for this change.
+ *
+ * \note    Wire protocol split — Phase 4B (2026-06-20):
+ *          EID_* lines in emit_device_event_ids() are now gated on
+ *          event_id != 0 in addition to the active/state check. The hub
+ *          delta gate (send_to_bb() / tcp_manager.c) guarantees that
+ *          event_id is non-zero in events[] only on true state
+ *          transitions; per-slot event_id fields in SensorData are zero
+ *          on telemetry-only ticks. Forwarding EID_PIR1:0 etc. to the
+ *          STM32 on every heartbeat tick would be noise — zero-on-tick
+ *          is expected and suppressed. LOCK and LIGHT already carried
+ *          equivalent guards (if (0 != lock_eid)) and are unchanged.
  ******************************************************************************/
 
 #include <pthread.h>
@@ -148,6 +159,9 @@
  *          stay identical regardless of which ingress triggered the
  *          push. See file header note "Per-device event_id tracing,
  *          full pipeline (2026-06-19)".
+ *
+ *          EID_* lines are suppressed when event_id == 0 — see file
+ *          header note "Wire protocol split — Phase 4B (2026-06-20)".
  ******************************************************************************/
 static void emit_device_event_ids(UartMsg *p_msg, int *p_pos,
                                    const uint8_t  *p_r_state,
@@ -167,7 +181,7 @@ static void emit_device_event_ids(UartMsg *p_msg, int *p_pos,
 
    for (i = 0; i < pir_count; i++)
    {
-      if (!p_pactive[i]) { continue; }
+      if (!p_pactive[i] || (0 == p_p_eid[i])) { continue; }
       pos += snprintf(p_msg->buf + pos, sizeof(p_msg->buf) - pos,
                       "EID_PIR%d:%llu\n",
                       i + 1, (unsigned long long)p_p_eid[i]);
@@ -177,7 +191,7 @@ static void emit_device_event_ids(UartMsg *p_msg, int *p_pos,
 
    for (i = 0; i < reed_count; i++)
    {
-      if (UART_STATE_UNKNOWN == p_r_state[i]) { continue; }
+      if ((UART_STATE_UNKNOWN == p_r_state[i]) || (0 == p_r_eid[i])) { continue; }
       pos += snprintf(p_msg->buf + pos, sizeof(p_msg->buf) - pos,
                       "EID_REED%d:%llu\n",
                       i + 1, (unsigned long long)p_r_eid[i]);
@@ -187,7 +201,7 @@ static void emit_device_event_ids(UartMsg *p_msg, int *p_pos,
 
    for (i = 0; i < temp_count; i++)
    {
-      if (!p_tactive[i]) { continue; }
+      if (!p_tactive[i] || (0 == p_t_eid[i])) { continue; }
       pos += snprintf(p_msg->buf + pos, sizeof(p_msg->buf) - pos,
                       "EID_TEMP%d:%llu\n",
                       i + 1, (unsigned long long)p_t_eid[i]);
@@ -372,7 +386,8 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
    /* Per-device event_id lines — see emit_device_event_ids() and file
     * header note "Per-device event_id tracing, full pipeline
     * (2026-06-19)". Replaces the old single msg.event_id envelope
-    * field, which is no longer set. */
+    * field, which is no longer set. Zero event_ids suppressed per
+    * "Wire protocol split — Phase 4B (2026-06-20)". */
    emit_device_event_ids(&msg, &pos,
                           p_r_state, p_r_eid, reed_count,
                           p_pactive, p_p_eid, pir_count,
@@ -834,10 +849,12 @@ void uart_update_frame(const struct LatestData *p_snapshot,
     * (SensorData) — see emit_device_event_ids() and file header note
     * "Per-device event_id tracing, full pipeline (2026-06-19)".
     * Replaces the old single msg.event_id envelope field, which is no
-    * longer set. Doorbell event_id is unaffected — it continues to
-    * ride only in the [CONTROLLER] -> [UART] send log line above and
-    * the DOORBELL: payload line, not as an EID_* line, since it is an
-    * independent event stream from the sensor devices below. */
+    * longer set. Zero event_ids suppressed per "Wire protocol split —
+    * Phase 4B (2026-06-20)". Doorbell event_id is unaffected — it
+    * continues to ride only in the [CONTROLLER] -> [UART] send log
+    * line above and the DOORBELL: payload line, not as an EID_* line,
+    * since it is an independent event stream from the sensor devices
+    * below.                                                            */
    if (NULL != p_raw_frame)
    {
       uint64_t r_eid[MAX_REEDS];
