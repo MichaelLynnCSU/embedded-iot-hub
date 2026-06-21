@@ -6,7 +6,7 @@
  * \brief UART manager for ESP32 hub node.
  *
  * \details Receives JSON temperature data from STM32 blue pill over
- *          UART2 at 115200 baud. Parses avg_temp and tx_id fields and
+ *          UART2 at 115200 baud. Parses avg_temp and tx_id fields
  *          publishes to vroom bus for consumption by TCP and AWS managers.
  *
  *          Message format: {"avg_temp": <int>, "tx_id": <uint>}\n
@@ -29,11 +29,11 @@
  *            {"avg_temp": 22, "tx_id": 7}
  *
  *          Hub extracts tx_id via cJSON_GetObjectItem and logs it alongside
- *          frame_seq and event_id:
+ *          event_id:
  *
- *            [UART] tx_id=7 frame_seq=3 event_id=204 avg_temp=22
+ *            [UART] tx_id=7 event_id=204 avg_temp=22
  *
- *          This closes the STM32 → hub trace gap: frame_seq is hub-generated
+ *          This closes the STM32 → hub trace gap: tx_id is device-generated
  *          and increments on every parsed frame with no relationship to the
  *          STM32 transmit counter. tx_id is device-generated and increments
  *          on every STM32 transmit attempt, making drops and retransmits
@@ -41,7 +41,7 @@
  *
  *          Full trace chain:
  *            [STM32]  tx_id=7 avg_temp=22
- *            [UART]   tx_id=7 frame_seq=3 event_id=204 avg_temp=22
+ *            [UART]   tx_id=7 event_id=204 avg_temp=22
  *            [VROOM]  event_id=204 bus_seq=8 ingest type=UART_TEMP avg_temp=22
  *            [TCP]    event_id=204 ...
  *
@@ -49,9 +49,6 @@
  *          not an error. cJSON_GetObjectItem returns NULL for missing fields;
  *          tx_id defaults to 0u with no log noise.
  *
- *          frame_seq retained — it remains useful as a hub-side parse
- *          counter independent of the device counter (e.g. counting
- *          successful parses regardless of STM32 session resets).
  ******************************************************************************/
 #include "uart_manager.h"
 #include "config.h"
@@ -69,7 +66,7 @@
 
 static const char *TAG        = "UART_MGR";       /**< ESP log tag              */
 static int         g_avg_temp = DEFAULT_AVG_TEMP; /**< last received avg temp   */
-static uint32_t    g_frame_seq = 0;               /**< monotonic hub parse counter */
+
 
 void uart_manager_init(void)
 {
@@ -131,11 +128,9 @@ void uart_manager_task(void)
                   }
 
                   uint64_t eid = bus_publish_temp(g_avg_temp);
-                  g_frame_seq++;
 
-                  ESP_LOGI(TAG, "[UART] tx_id=%u frame_seq=%u event_id=%llu avg_temp=%d",
+                  ESP_LOGI(TAG, "[UART] tx_id=%u event_id=%llu avg_temp=%d",
                             (unsigned)tx_id,
-                            (unsigned)g_frame_seq,
                             (unsigned long long)eid,
                             g_avg_temp);
                }
