@@ -473,6 +473,7 @@ static void MX_GPIO_Init(void)
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN 5 */
+   static uint16_t s_tx_id = 0;  /**< per-session UART transmit counter */
    char json_msg[JSON_BUF_SIZE] = {0}; /**< JSON output buffer */
    int  avg_temp                = 0;   /**< computed average temperature */
    int  valid_count             = 0;   /**< number of valid sensor readings */
@@ -506,9 +507,9 @@ void StartDefaultTask(void const * argument)
       {
          avg_temp = avg_temp / valid_count;
       }
-
+      s_tx_id++;
       (void)snprintf(json_msg, sizeof(json_msg),
-                     "{\"avg_temp\":%d}\n", avg_temp);
+               "{\"avg_temp\":%d,\"tx_id\":%u}\n", avg_temp, (unsigned)s_tx_id);
       uart_print_esp32(json_msg);
       uart_print("Sent to VROOM: ");
       uart_print(json_msg);
