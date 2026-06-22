@@ -48,9 +48,10 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
    int               i = 0;
 
    /* ---- Summary line ---- */
-   LOG("[DISPATCH] tmp=%.1f mot=%d occ=%d lgt=%d lck=%d mtr=%d "
+   LOG("[DISPATCH] seq=%u tmp=%.1f mot=%d occ=%d lgt=%d lck=%d mtr=%d "
        "ages pir=%d lgt=%d lck=%d batts pir=%d%% lck=%d%% mtr=%d%% "
        "pirs=%d lock_eid=%llu light_eid=%llu",
+       p_data->frame_seq,
        p_data->avg_temp,
        p_data->motion_count,
        p_data->pir_occupied,
@@ -67,10 +68,9 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
        (unsigned long long)p_data->lock_event_id,
        (unsigned long long)p_data->light_event_id);
 
-   /* ---- Per-slot PIR (active only) ---- */
+   /* ---- Per-slot PIR (all slots) ---- */
    for (i = 0; i < MAX_PIRS; i++)
    {
-      if (!p_data->pir_slots[i].active) { continue; }
       LOG("[DISPATCH] PIR slot=%d cnt=%u batt=%d age=%d occ=%d eid=%llu",
           i + 1,
           (unsigned)p_data->pir_slots[i].count,
@@ -80,28 +80,24 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
           (unsigned long long)p_data->pir_slots[i].event_id);
    }
 
-   /* ---- Per-slot Reed (active only) ---- */
+   /* ---- Per-slot Reed (all slots) ---- */
    for (i = 0; i < MAX_REEDS; i++)
    {
-      if (!p_data->reed_slots[i].active) { continue; }
-      LOG("[DISPATCH] Reed slot=%d (%s) st=%s batt=%d age=%d eid=%llu",
+      LOG("[DISPATCH] Reed slot=%d active=%d st=%d batt=%d age=%d eid=%llu",
           i + 1,
-          p_data->reed_slots[i].name,
-          (1 == p_data->reed_slots[i].state) ? "open"   :
-          (0 == p_data->reed_slots[i].state) ? "closed" : "?",
+          p_data->reed_slots[i].active,
+          p_data->reed_slots[i].state,
           p_data->reed_slots[i].batt,
           p_data->reed_slots[i].age,
           (unsigned long long)p_data->reed_slots[i].event_id);
    }
 
-   /* ---- Per-slot Temp (active only) ---- */
+   /* ---- Per-slot Temp (all slots) ---- */
    for (i = 0; i < MAX_TEMPS; i++)
    {
-      if (!p_data->temp_slots[i].active) { continue; }
-      LOG("[DISPATCH] Temp slot=%d %d.%dC batt=%d age=%d eid=%llu",
+      LOG("[DISPATCH] Temp slot=%d temp=%d batt=%d age=%d eid=%llu",
           i + 1,
-          p_data->temp_slots[i].temp_decidegc / 10,
-          p_data->temp_slots[i].temp_decidegc % 10,
+          p_data->temp_slots[i].temp_decidegc,
           p_data->temp_slots[i].batt,
           p_data->temp_slots[i].age,
           (unsigned long long)p_data->temp_slots[i].event_id);

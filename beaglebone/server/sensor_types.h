@@ -151,6 +151,7 @@ struct SensorData
 
    uint64_t lock_event_id;   /*!< last vroom event_id for BLE lock  */
    uint64_t light_event_id;  /*!< last vroom event_id for BLE light */
+   uint32_t frame_seq;       /*!< monotonic frame counter from server parse stage; join key for telemetry.log and events.log */
 };
 
 #endif /* SENSOR_TYPES_H */

@@ -1,4 +1,3 @@
-
 /* USER CODE BEGIN Header */
 /******************************************************************************
  * \file main.c
@@ -17,6 +16,40 @@
  *          UART1: debug output to PC
  *          UART2: JSON output to ESP32 hub
  *          I2C1:  FRAM MB85RC256V
+ *
+ * \note    UART2 / ESP32 link is half-duplex in practice (2026-06-20):
+ *          huart2 is configured UART_MODE_TX_RX by the HAL (see
+ *          MX_USART2_UART_Init()), but is only ever driven in the TX
+ *          direction in this firmware -- StartDefaultTask() sends JSON
+ *          to the ESP32 hub via uart_print_esp32() and never reads a
+ *          reply. No HAL_UART_Receive_IT() (or any other RX path) is
+ *          registered for huart2 anywhere in this file, so the link is
+ *          effectively half-duplex / TX-only as used, even though the
+ *          peripheral itself is capable of full-duplex operation.
+ *
+ *          This is unlike the BlackPill's USART1, which is genuinely
+ *          full-duplex: it transmits HB frames to the BeagleBone AND
+ *          receives sensor bundles via interrupt on the same UART. If
+ *          an ACK/reply path is ever added to this UART2 link, RX would
+ *          need to be explicitly wired up (HAL_UART_Receive_IT() or
+ *          similar) -- it does not exist today.
+ *
+ * \note    Structured event tracing — tx_id status check (2026-06-20):
+ *          s_tx_id (in StartDefaultTask()) is already embedded in the
+ *          outgoing JSON payload and echoed to the debug UART (UART1)
+ *          immediately after the ESP32 send. However, uart_print_esp32()
+ *          previously discarded HAL_UART_Transmit()'s return value via
+ *          (void), so the debug echo unconditionally read "Sent to
+ *          VROOM: ..." even when the transmit to the ESP32 actually
+ *          failed/timed out -- the same class of silent-failure gap
+ *          found and fixed on the BlackPill's HB transmit
+ *          (heartbeat_tick(), see stm32-blackpill/Core/Src/main.c).
+ *          uart_print_esp32() now returns HAL_StatusTypeDef, and
+ *          StartDefaultTask() branches on it: success still logs
+ *          "Sent to VROOM: {...}", failure logs "FAILED to send to
+ *          VROOM tx_id=N (status=...)" instead, so a dropped frame is
+ *          visible on the debug UART rather than indistinguishable from
+ *          a successful one.
  ******************************************************************************/
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
@@ -73,7 +106,12 @@ typedef struct
 I2C_HandleTypeDef hi2c1;
 
 UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart2; /**< USART2 — ESP32 JSON hub link. Configured
+                             *   UART_MODE_TX_RX by the HAL but used
+                             *   TX-only / half-duplex in practice — no
+                             *   RX path is registered. See file header
+                             *   note "UART2 / ESP32 link is half-duplex
+                             *   in practice (2026-06-20)".              */
 
 osThreadId defaultTaskHandle;
 osThreadId myTask02Handle;
@@ -103,7 +141,7 @@ void StartTask05(void const * argument);
 
 /* USER CODE BEGIN PFP */
 void uart_print(const char *p_msg);
-void uart_print_esp32(const char *p_msg);
+HAL_StatusTypeDef uart_print_esp32(const char *p_msg);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -127,17 +165,24 @@ void uart_print(const char *p_msg)
 }
 
 /******************************************************************************
- * \brief Transmit a string over UART2 (ESP32 hub output).
+ * \brief Transmit a string over UART2 (ESP32 hub output, TX-only / see
+ *        file header note "UART2 / ESP32 link is half-duplex in
+ *        practice (2026-06-20)").
  *
  * \param p_msg - Null-terminated string to transmit.
  *
- * \return void
+ * \return HAL_StatusTypeDef - HAL_OK on success, error code otherwise.
+ *
+ * \details Returns the HAL transmit status so callers can distinguish a
+ *          successful send from a dropped/timed-out one instead of the
+ *          status being silently discarded. See file header note
+ *          "Structured event tracing — tx_id status check (2026-06-20)".
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
-void uart_print_esp32(const char *p_msg)
+HAL_StatusTypeDef uart_print_esp32(const char *p_msg)
 {
-   (void)HAL_UART_Transmit(&huart2,
+   return HAL_UART_Transmit(&huart2,
                              (uint8_t *)p_msg,
                              (uint16_t)strlen(p_msg),
                              UART_TIMEOUT_MS);
@@ -403,7 +448,15 @@ static void MX_USART2_UART_Init(void)
 {
 
   /* USER CODE BEGIN USART2_Init 0 */
-
+  /* USART2 — ESP32 JSON hub link. UART_MODE_TX_RX below enables both
+   * directions at the peripheral level, but this firmware drives TX
+   * only (uart_print_esp32()) and never registers an RX path for
+   * huart2 -- no HAL_UART_Receive_IT() call exists for this handle
+   * anywhere in this file. So in practice this link is half-duplex /
+   * TX-only, unlike the BlackPill's USART1, which is genuinely
+   * full-duplex (TX HB frames, RX sensor bundles via interrupt). See
+   * file header note "UART2 / ESP32 link is half-duplex in practice
+   * (2026-06-20)".                                                    */
   /* USER CODE END USART2_Init 0 */
 
   /* USER CODE BEGIN USART2_Init 1 */
@@ -468,6 +521,14 @@ static void MX_GPIO_Init(void)
  *
  * \details Reads g_sensor1_data under mutex, computes average temperature
  *          across valid sensors, and sends JSON every DEFAULT_TASK_DELAY ms.
+ *
+ *          Structured event tracing: uart_print_esp32()'s HAL status is
+ *          now checked. Success logs "Sent to VROOM: {...}" (tx_id is
+ *          embedded in the JSON itself); failure logs "FAILED to send
+ *          to VROOM tx_id=N (status=...)" instead, so a dropped/timed-out
+ *          transmit to the ESP32 is visible on the debug UART rather than
+ *          silently indistinguishable from success. See file header note
+ *          "Structured event tracing — tx_id status check (2026-06-20)".
  */
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void const * argument)
@@ -475,9 +536,11 @@ void StartDefaultTask(void const * argument)
   /* USER CODE BEGIN 5 */
    static uint16_t s_tx_id = 0;  /**< per-session UART transmit counter */
    char json_msg[JSON_BUF_SIZE] = {0}; /**< JSON output buffer */
+   char fail_msg[MSG_BUF_SIZE]  = {0}; /**< failure log buffer */
    int  avg_temp                = 0;   /**< computed average temperature */
    int  valid_count             = 0;   /**< number of valid sensor readings */
    int  i                       = 0;   /**< loop index */
+   HAL_StatusTypeDef tx_status  = HAL_OK; /**< uart_print_esp32() result */
 
    (void)argument;
 
@@ -510,9 +573,21 @@ void StartDefaultTask(void const * argument)
       s_tx_id++;
       (void)snprintf(json_msg, sizeof(json_msg),
                "{\"avg_temp\":%d,\"tx_id\":%u}\n", avg_temp, (unsigned)s_tx_id);
-      uart_print_esp32(json_msg);
-      uart_print("Sent to VROOM: ");
-      uart_print(json_msg);
+
+      tx_status = uart_print_esp32(json_msg);
+
+      if (HAL_OK == tx_status)
+      {
+         uart_print("Sent to VROOM: ");
+         uart_print(json_msg);
+      }
+      else
+      {
+         (void)snprintf(fail_msg, sizeof(fail_msg),
+                  "FAILED to send to VROOM tx_id=%u (status=%d)\r\n",
+                  (unsigned)s_tx_id, (int)tx_status);
+         uart_print(fail_msg);
+      }
 
       osDelay(DEFAULT_TASK_DELAY);
    }

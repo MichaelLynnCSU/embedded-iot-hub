@@ -49,6 +49,28 @@
  *          not an error. cJSON_GetObjectItem returns NULL for missing fields;
  *          tx_id defaults to 0u with no log noise.
  *
+ * \note    Delta gate on publish (2026-06-20):
+ *          bus_publish_temp() previously fired on every parsed UART frame
+ *          regardless of whether avg_temp changed. Confirmed in hub firmware
+ *          log: event_id=11 and event_id=14 both carried avg_temp=20 with
+ *          no change between them (~5s apart, one per STM32 transmit cycle).
+ *          This generated continuous UART_TEMP events in the vroom bus and
+ *          flooded events[] on the wire protocol with no-change publishes.
+ *
+ *          bus_publish_temp() now fires only when new_temp != g_avg_temp.
+ *          g_avg_temp is still updated on every frame so uart_get_avg_temp()
+ *          always reflects the latest received value.
+ *
+ *          TEMP_HIGH threshold check is gated inside the delta block — it
+ *          is a discrete state-transition event (cool->hot), not a
+ *          persistent alarm, so firing it only on change is correct. If a
+ *          persistent above-threshold alarm is ever needed, move the check
+ *          outside the delta gate at that time.
+ *
+ *          No-change frames are logged at LOGD level so the trace gap is
+ *          still visible for debugging without polluting the normal log:
+ *
+ *            [UART] tx_id=8 no_change avg_temp=22
  ******************************************************************************/
 #include "uart_manager.h"
 #include "config.h"
@@ -120,19 +142,37 @@ void uart_manager_task(void)
 
                if (NULL != p_avg)
                {
-                  g_avg_temp = p_avg->valueint;
+                  int new_temp = p_avg->valueint;
 
-                  if (g_avg_temp > TEMP_HIGH_THRESHOLD)
+                  if (new_temp != g_avg_temp)
                   {
-                     trinity_log_event("EVENT: TEMP_HIGH\n");
+                     g_avg_temp = new_temp;
+
+                     /* TEMP_HIGH is a state-transition event — gate on
+                      * delta so it fires once on cool->hot, not every
+                      * frame while above threshold. See file header note
+                      * "Delta gate on publish (2026-06-20)". */
+                     if (g_avg_temp > TEMP_HIGH_THRESHOLD)
+                     {
+                        trinity_log_event("EVENT: TEMP_HIGH\n");
+                     }
+
+                     uint64_t eid = bus_publish_temp(g_avg_temp);
+
+                     ESP_LOGI(TAG, "[UART] tx_id=%u event_id=%llu avg_temp=%d",
+                              (unsigned)tx_id,
+                              (unsigned long long)eid,
+                              g_avg_temp);
                   }
-
-                  uint64_t eid = bus_publish_temp(g_avg_temp);
-
-                  ESP_LOGI(TAG, "[UART] tx_id=%u event_id=%llu avg_temp=%d",
-                            (unsigned)tx_id,
-                            (unsigned long long)eid,
-                            g_avg_temp);
+                  else
+                  {
+                     /* Temperature unchanged — update stored value to keep
+                      * uart_get_avg_temp() fresh, skip publish. LOGD so
+                      * tx_id gaps remain visible for debugging. */
+                     g_avg_temp = new_temp;
+                     ESP_LOGD(TAG, "[UART] tx_id=%u no_change avg_temp=%d",
+                              (unsigned)tx_id, g_avg_temp);
+                  }
                }
 
                cJSON_Delete(p_json);

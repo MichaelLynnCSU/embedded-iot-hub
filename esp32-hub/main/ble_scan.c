@@ -260,6 +260,7 @@ static void handle_lock(const uint8_t *p_adv,
    bool           first_seen = false; /**< first advertisement flag  */
    bool           changed    = false; /**< state changed flag        */
    bool           log_due    = false; /**< periodic log due flag     */
+   uint64_t       eid        = 0;
 
    p_mfg = find_mfg_data(p_adv, len, &mfg_len);
    if ((NULL == p_mfg) || (mfg_len < MFG_LOCK_MIN_LEN))
@@ -282,8 +283,9 @@ static void handle_lock(const uint8_t *p_adv,
    if (first_seen || changed || log_due)
    {
       g_lock_seen = true;
-      bus_publish_lock(new_state, new_batt);
-      ESP_LOGI(TAG, ">>> LOCK state=%d batt=%d%%", new_state, new_batt);
+      eid = bus_publish_lock(new_state, new_batt);
+      ESP_LOGI(TAG, "[BLE_LOCK] adv state=%d batt=%d%% event_id=%llu",
+               (int)new_state, (int)new_batt, (unsigned long long)eid);
    }
 
    if (!lock_found)

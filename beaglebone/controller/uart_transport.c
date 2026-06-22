@@ -38,6 +38,22 @@
  *          at all times. uart_push_thread() calls sem_timedwait() then
  *          uart_ring_pop() — the successful wait guarantees a frame
  *          exists, so pop never races.
+ *
+ * \note    Full-duplex /dev/ttyS1 (2026-06-20):
+ *          /dev/ttyS1 is opened O_RDWR and operated full-duplex:
+ *            BeagleBone RX <- BlackPill PA9  (USART1 TX): HB frames
+ *            BeagleBone TX -> BlackPill PA10 (USART1 RX): sensor bundles
+ *
+ *          uart_reader_thread() reads inbound HB frames from the BlackPill.
+ *          uart_push_msg() writes outbound sensor bundles to the BlackPill.
+ *          Both share g_uart_fd; writes are serialised by g_uart_write_mutex.
+ *
+ *          HB frame format: "HB:1,<tx_id>\n"
+ *          tx_id is a uint16_t per-session counter incremented by the
+ *          BlackPill before each transmit. Gaps in tx_id in this log
+ *          indicate missed HB frames. heartbeat_stamp(DEV_LCD) is called
+ *          on every valid HB frame to keep DEV_LCD alive in the heartbeat
+ *          monitor. tx_id=0 is not a valid transmit — BlackPill starts at 1.
  ******************************************************************************/
 
 #include <termios.h>
@@ -139,6 +155,11 @@ int uart_ring_pop(UartFrame *p_frame)
  *
  * \return int - File descriptor on success, -1 on failure.
  *
+ * \details Opens O_RDWR for full-duplex operation — uart_reader_thread()
+ *          reads inbound HB frames from the BlackPill, uart_push_msg()
+ *          writes outbound sensor bundles. See file header note
+ *          "Full-duplex /dev/ttyS1 (2026-06-20)".
+ *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static int uart_open(const char *p_dev)
@@ -184,7 +205,7 @@ static int uart_open(const char *p_dev)
       return -1;
    }
 
-   LOG("UART opened: %s @ 115200", p_dev);
+   LOG("UART opened: %s @ 115200 (full-duplex)", p_dev);
    return fd;
 }
 
@@ -195,13 +216,17 @@ static int uart_open(const char *p_dev)
  *
  * \return void
  *
- * \details Parses <ID>:<value>[,<batt>] format. Supported inbound IDs:
- *            HB  — heartbeat from BlackPill, stamps device liveness only
+ * \details Parses <ID>:<value>[,<field2>] format. Supported inbound IDs:
+ *            HB  — heartbeat from BlackPill. Format: "HB:1,<tx_id>".
+ *                  Calls heartbeat_stamp(DEV_LCD) and logs tx_id.
+ *                  tx_id gaps indicate missed HB frames. Does NOT push
+ *                  onto g_uart_ring or trigger uart_push_thread — HB is
+ *                  liveness-only, not a sensor state update.
  *            LGT — light command (future: user button press on LVGL display)
  *            LCK — lock command  (future: user button press on LVGL display)
  *            PIR — PIR state     (future)
  *
- *          On a valid frame:
+ *          On a valid non-HB frame:
  *            1. heartbeat_stamp() — marks device online
  *            2. db_save_uart()    — persists to SQLite
  *            3. staging function  — updates state registry
@@ -238,6 +263,32 @@ static void uart_parse_line(const char *p_line)
    *p_colon = '\0';
    p_id     = buf;
    p_rest   = p_colon + 1;
+
+   /* HB:1,<tx_id> — liveness only, no ring push, no state update.
+    * heartbeat_stamp(DEV_LCD) keeps DEV_LCD alive in the monitor.
+    * tx_id logged so gaps are visible. See file header note
+    * "Full-duplex /dev/ttyS1 (2026-06-20)".                        */
+   if (0 == strcmp(p_id, "HB"))
+   {
+      char  tmp[UART_LINE_LEN] = {0};
+      char *p_tok              = NULL;
+      int   hb_val             = 0;
+      int   tx_id              = 0;
+
+      (void)strncpy(tmp, p_rest, sizeof(tmp) - 1u);
+      tmp[sizeof(tmp) - 1u] = '\0';
+
+      p_tok = strtok(tmp, ",");
+      if (NULL != p_tok) { hb_val = atoi(p_tok); }
+
+      p_tok = strtok(NULL, ",");
+      if (NULL != p_tok) { tx_id = atoi(p_tok); }
+
+      LOG("[UART] transport=ttyS1 read src=blackpill_lcd id=HB val=%d tx_id=%d",
+          hb_val, tx_id);
+      heartbeat_stamp(DEV_LCD);
+      return;
+   }
 
    p_comma = strchr(p_rest, ',');
    if (NULL != p_comma)
@@ -307,10 +358,15 @@ static void uart_parse_line(const char *p_line)
  * \return void*
  *
  * \details Listens on /dev/ttyS1 for inbound frames from the STM32
- *          BlackPill — heartbeat and future command frames. Owns
- *          g_uart_fd lifecycle. Reopens the device automatically on
- *          read error or EOF. Character-by-character accumulation into
- *          line[] with overflow protection.
+ *          BlackPill — heartbeat (HB) and future command frames.
+ *          Owns g_uart_fd lifecycle. Reopens the device automatically
+ *          on read error or EOF. Character-by-character accumulation
+ *          into line[] with overflow protection.
+ *
+ *          /dev/ttyS1 is full-duplex — uart_push_msg() writes outbound
+ *          sensor bundles on the same fd. Writes are serialised by
+ *          g_uart_write_mutex. See file header note "Full-duplex
+ *          /dev/ttyS1 (2026-06-20)".
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -383,6 +439,12 @@ void *uart_reader_thread(void *p_arg)
 
 /******************************************************************************
  * \brief Write a message to UART with mutex protection.
+ *
+ * \details Serialises writes with g_uart_write_mutex so uart_push_thread()
+ *          and any future writers do not interleave on the shared fd.
+ *          /dev/ttyS1 is full-duplex — reads and writes on the same fd
+ *          are independent at the kernel level; the mutex protects only
+ *          concurrent writers, not read/write concurrency.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/

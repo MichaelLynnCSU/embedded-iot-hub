@@ -41,6 +41,13 @@
  *
  *            [BLE] tx_id=5 temp=25.3°C batt=87%
  *            [BLE_TEMP] tx_id=5 event_id=101 slot=0 temp=25.3°C batt=87%
+ *
+ * \note    Temperature event threshold (2026-06-20):
+ *          bus_publish_ble_temp() is gated on abs(delta) >= 5 decidegC
+ *          (0.5°C) rather than any change. Sensor noise causes 0.1°C
+ *          oscillations between consecutive advertisements at stable
+ *          temperatures, confirmed in sensor_server.log frames 96869-96870.
+ *          Sub-threshold changes update the slot table silently.
  ******************************************************************************/
 
 #include "ble_temp.h"
@@ -187,8 +194,7 @@ void ble_temp_handle(const uint8_t *p_mfg,
    if (0 <= slot)
    {
       was_offline = (SLOT_OFFLINE == g_temp_table[slot].state);
-      changed     = (temp_decidegc != g_temp_table[slot].temp_decidegc) ||
-                    (batt          != g_temp_table[slot].batt);
+      changed = (abs((int)temp_decidegc - (int)g_temp_table[slot].temp_decidegc) >= 5) || (batt != g_temp_table[slot].batt);
 
       g_temp_table[slot].temp_decidegc = temp_decidegc;
       g_temp_table[slot].batt          = batt;

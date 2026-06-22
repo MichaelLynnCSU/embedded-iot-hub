@@ -1,32 +1,32 @@
 /******************************************************************************
  * \file server_log.h
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
- * \date 2026-05-10
+ * \brief Log routing declarations for sensor server modules.
  *
- * \brief Shared log interface for sensor server modules.
+ * \details Three writers, three destinations:
  *
- * \details Extracted from sensor_server.c (2026-05-10) so that
- *          uart_io.c, pipe_writer.c, and json_parser.c can all call
- *          log_msg() without depending on sensor_server.c directly.
- *          sensor_server.c owns the log_fp handle and calls log_init().
+ *   log_msg()        -> sensor_server.log
+ *                       Operational lines: [SERVER], [UART], [PARSE], [PIPE].
+ *                       All modules may call this.
+ *
+ *   log_telemetry()  -> telemetry.log
+ *                       Exactly one call per frame from json_parser.c.
+ *                       Numeric and boolean device state only — no strings,
+ *                       no semantic decoding. High-volume; rotate aggressively.
+ *
+ *   log_event()      -> events.log
+ *                       One call per events[] entry from hub delta gate.
+ *                       Low-volume; every line is a true state transition.
+ *                       Rotate slowly — this is the audit trail.
+ *
+ * File handles and implementations live in sensor_server.c.
+ * seq is the join key across all three files.
  ******************************************************************************/
 
 #ifndef SERVER_LOG_H
 #define SERVER_LOG_H
 
-/******************************************************************************
- * \brief Write timestamped message to stdout and log file.
- *
- * \param p_fmt - printf-style format string.
- * \param ...   - Format arguments.
- ******************************************************************************/
 void log_msg(const char *p_fmt, ...);
-
-/******************************************************************************
- * \brief Initialize log file with line buffering.
- *
- * \return void
- ******************************************************************************/
-void log_init(void);
+void log_telemetry(const char *p_fmt, ...);
+void log_event(const char *p_fmt, ...);
 
 #endif /* SERVER_LOG_H */

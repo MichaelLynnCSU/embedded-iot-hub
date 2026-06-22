@@ -78,6 +78,19 @@
  *          events (start, shutdown). It never logs data-stage events;
  *          those belong to [UART], [PARSE], and [PIPE] respectively.
  *          See each module's file header for its event taxonomy.
+ *
+ * \note    Log split (2026-06-21):
+ *          Two additional log files added alongside sensor_server.log:
+ *            - telemetry.log  -- one line per frame, numeric/boolean state
+ *                                only, no strings, no semantic decoding.
+ *                                High-volume; rotate aggressively.
+ *            - events.log     -- one line per events[] entry from hub delta
+ *                                gate. Low-volume; audit trail.
+ *          log_telemetry() and log_event() write to these files.
+ *          log_msg() is unchanged and continues to serve [SERVER], [UART],
+ *          [PARSE], and [PIPE] lines in sensor_server.log.
+ *          All three writers use the same timestamp call so wall-clock
+ *          correlation across files is exact.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -92,19 +105,21 @@
 #include "pipe_writer.h"
 #include "server_log.h"
 
-#define LOG_FILE      "/var/log/sensor_server.log" /**< log file path */
-#define READ_SLEEP_US 10000                        /**< main loop sleep us */
+#define LOG_FILE      "/var/log/sensor_server.log" /**< operational log        */
+#define TEL_LOG_FILE  "/var/log/telemetry.log"     /**< numeric state snapshots */
+#define EVT_LOG_FILE  "/var/log/events.log"        /**< hub event ledger        */
+#define READ_SLEEP_US 10000                        /**< main loop sleep us      */
 #define PROCESS_BUF   4096                         /**< stable frame copy buffer */
 
-static volatile int  g_running = 1;    /**< main loop run flag */
-static FILE         *g_log_fp  = NULL; /**< log file handle -- owned here */
+static volatile int  g_running  = 1;    /**< main loop run flag          */
+static FILE         *g_log_fp   = NULL; /**< sensor_server.log handle    */
+static FILE         *g_tel_fp   = NULL; /**< telemetry.log handle        */
+static FILE         *g_evt_fp   = NULL; /**< events.log handle           */
 
 /******************************************************************************
- * \brief Initialize log file with line buffering.
+ * \brief Initialize all three log files with line buffering.
  *
  * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void log_init(void)
 {
@@ -112,27 +127,47 @@ void log_init(void)
    if (NULL == g_log_fp)
    {
       perror("log fopen");
-      return;
+   }
+   else
+   {
+      (void)setvbuf(g_log_fp, NULL, _IOLBF, 0);
    }
 
-   (void)setvbuf(g_log_fp, NULL, _IOLBF, 0);
+   g_tel_fp = fopen(TEL_LOG_FILE, "a");
+   if (NULL == g_tel_fp)
+   {
+      perror("telemetry log fopen");
+   }
+   else
+   {
+      (void)setvbuf(g_tel_fp, NULL, _IOLBF, 0);
+   }
+
+   g_evt_fp = fopen(EVT_LOG_FILE, "a");
+   if (NULL == g_evt_fp)
+   {
+      perror("events log fopen");
+   }
+   else
+   {
+      (void)setvbuf(g_evt_fp, NULL, _IOLBF, 0);
+   }
 }
 
 /******************************************************************************
- * \brief Write timestamped message to stdout and log file.
+ * \brief Write timestamped message to stdout and sensor_server.log.
+ *
+ * \details Used for [SERVER], [UART], [PARSE], [PIPE] operational lines.
+ *          Not used for telemetry or event log lines.
  *
  * \param p_fmt - printf-style format string.
  * \param ...   - Format arguments.
- *
- * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 void log_msg(const char *p_fmt, ...)
 {
-   time_t    now  = 0;    /**< current timestamp */
-   struct tm *p_t = NULL; /**< broken-down time */
-   va_list   args;        /**< variadic argument list */
+   time_t    now  = 0;
+   struct tm *p_t = NULL;
+   va_list   args;
 
    now = time(NULL);
    p_t = localtime(&now);
@@ -157,13 +192,71 @@ void log_msg(const char *p_fmt, ...)
 }
 
 /******************************************************************************
+ * \brief Write one telemetry snapshot line to telemetry.log.
+ *
+ * \details Numeric and boolean device state only — no strings, no semantic
+ *          decoding. Exactly one call per frame from json_parser.c.
+ *          Format is fixed so awk field positions never shift.
+ *
+ * \param p_fmt - printf-style format string.
+ * \param ...   - Format arguments.
+ ******************************************************************************/
+void log_telemetry(const char *p_fmt, ...)
+{
+   time_t    now  = 0;
+   struct tm *p_t = NULL;
+   va_list   args;
+
+   now = time(NULL);
+   p_t = localtime(&now);
+
+   if (NULL != g_tel_fp)
+   {
+      fprintf(g_tel_fp, "[%02d:%02d:%02d] ",
+              p_t->tm_hour, p_t->tm_min, p_t->tm_sec);
+      va_start(args, p_fmt);
+      (void)vfprintf(g_tel_fp, p_fmt, args);
+      va_end(args);
+      fprintf(g_tel_fp, "\n");
+      (void)fflush(g_tel_fp);
+   }
+}
+
+/******************************************************************************
+ * \brief Write one event line to events.log.
+ *
+ * \details One call per events[] entry from the hub delta gate.
+ *          Low-volume; every line represents a true state transition.
+ *          frame_seq is the join key to correlate with telemetry.log.
+ *
+ * \param p_fmt - printf-style format string.
+ * \param ...   - Format arguments.
+ ******************************************************************************/
+void log_event(const char *p_fmt, ...)
+{
+   time_t    now  = 0;
+   struct tm *p_t = NULL;
+   va_list   args;
+
+   now = time(NULL);
+   p_t = localtime(&now);
+
+   if (NULL != g_evt_fp)
+   {
+      fprintf(g_evt_fp, "[%02d:%02d:%02d] ",
+              p_t->tm_hour, p_t->tm_min, p_t->tm_sec);
+      va_start(args, p_fmt);
+      (void)vfprintf(g_evt_fp, p_fmt, args);
+      va_end(args);
+      fprintf(g_evt_fp, "\n");
+      (void)fflush(g_evt_fp);
+   }
+}
+
+/******************************************************************************
  * \brief POSIX signal handler — initiates graceful shutdown.
  *
  * \param sig - Signal number received.
- *
- * \return void
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static void signal_handler(int sig)
 {
@@ -175,28 +268,18 @@ static void signal_handler(int sig)
    uart_io_close();
    pipe_writer_close();
 
-   if (NULL != g_log_fp)
-   {
-      fclose(g_log_fp);
-   }
+   if (NULL != g_log_fp) { fclose(g_log_fp); }
+   if (NULL != g_tel_fp) { fclose(g_tel_fp); }
+   if (NULL != g_evt_fp) { fclose(g_evt_fp); }
 }
 
 /******************************************************************************
  * \brief Application entry point.
  *
  * \return int - 0 on clean exit, 1 on UART init failure.
- *
- * \details Initializes logging, UART, and pipe. Main loop reads bytes via
- *          uart_io_read(), then drains all complete frames with
- *          uart_io_next_frame() into g_process[] before calling
- *          process_json(). The loop handles back-to-back frames naturally.
- *
- * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 int main(void)
 {
-   /* Stable frame copy -- process_json() always works on this buffer,
-    * never on the active UART accumulation buffer owned by uart_io.c */
    char g_process[PROCESS_BUF];
 
    log_init();
@@ -220,9 +303,6 @@ int main(void)
    {
       uart_io_read();
 
-      /* Drain all complete frames found in the active buffer.
-       * uart_io_next_frame() copies into g_process[] and compacts
-       * the active buffer -- back-to-back frames are preserved. */
       while (uart_io_next_frame(g_process, PROCESS_BUF))
       {
          process_json(g_process);

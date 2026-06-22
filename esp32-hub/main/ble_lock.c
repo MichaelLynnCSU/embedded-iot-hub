@@ -148,13 +148,14 @@ static void do_connect_lock(void)
  ******************************************************************************/
 void ble_lock_update_adv(uint8_t state, uint8_t batt)
 {
-   uint64_t eid = 0;  /**< correlation event ID */
-
-   g_current_lock_state = state;
-   g_lock_batt          = (int)batt;
-   eid = bus_publish_lock(state, (int)batt);
-   ESP_LOGI(TAG, "[BLE_LOCK] adv state=%d batt=%d%% event_id=%llu",
-            (int)state, (int)batt, (unsigned long long)eid);
+    g_current_lock_state = state;
+    g_lock_batt          = (int)batt;
+    /* Delta gate and bus publish are the caller's responsibility.
+     * ble_scan.c handle_lock() gates bus_publish_lock() on
+     * first_seen || changed || log_due. Publishing here unconditionally
+     * generated a new event_id on every heartbeat advertisement,
+     * flooding events[] with lock heartbeats — confirmed in
+     * sensor_server.log frames 94838–94877 (2026-06-20). */
 }
 
 /******************************************************************************

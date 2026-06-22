@@ -66,14 +66,23 @@
  *          frame_seq. See pipe_writer.c for log routing.
  *          - events.log   — one line per events[] entry. Low-volume,
  *                           high-signal. Audit trail. Rotate slowly.
- *          - telemetry.log — heartbeat-interval lines (every N frames
- *                           per device). High-volume by design. Rotate
- *                           aggressively; only recent history is useful.
+ *          - telemetry.log — one line per frame. Numeric and boolean
+ *                           device state only — no strings, no semantic
+ *                           decoding. High-volume; rotate aggressively.
  *          Cross-referencing: find frame_seq of an event_id in events.log,
  *          look up that frame_seq in telemetry.log for contemporaneous
  *          battery/age state. Wall-clock timestamp on both is BeagleBone
  *          time(NULL) at parse time — same call, same instant, no
  *          arithmetic needed.
+ *
+ *          Log split (2026-06-21):
+ *          log_msg() calls in the output block replaced with:
+ *          - log_telemetry() — one call per frame, fixed numeric schema
+ *          - log_event()     — one call per events[] entry
+ *          Rooms, reed names, and all string fields removed from telemetry.
+ *          Room and reed string state belongs in events.log if needed.
+ *          [PARSE] summary line retained in sensor_server.log for
+ *          operational visibility (quick grep of the main log still works).
  ******************************************************************************/
 
 #include <stdio.h>
@@ -454,6 +463,141 @@ static void parse_events(struct json_object *p_events_arr,
 }
 
 /******************************************************************************
+ * \brief Helper — return age as int for log formatting.
+ *
+ * \details AGE_UNKNOWN (65534) renders as -1 in log output so offline
+ *          devices are visually consistent with batt=-1 (no-read sentinel).
+ *          Raw value is preserved in SensorData; this is display-only.
+ ******************************************************************************/
+static int fmt_age(uint16_t age)
+{
+   return (age >= AGE_UNKNOWN) ? -1 : (int)age;
+}
+
+/******************************************************************************
+ * \brief Emit one telemetry.log line for this frame.
+ *
+ * \details Fixed field order, every device every frame, numeric/boolean
+ *          only. No strings, no semantic decoding. Age sentinel 65534
+ *          rendered as -1.
+ *
+ *          Field order:
+ *            seq
+ *            lck  age_lck
+ *            lgt  age_lgt
+ *            pir[0..MAX_PIRS-1]  occ age batt
+ *            reed[0..MAX_REEDS-1] state age batt
+ *            temp[0..MAX_TEMPS-1] val age batt
+ *            cam[0..MAX_CAMS-1]  online age
+ *            db[0..MAX_DOORBELL_CAMS-1] online age
+ ******************************************************************************/
+static void emit_telemetry(const struct SensorData *p_data, uint32_t seq)
+{
+   /* Build line into a local buffer so log_telemetry() makes one write. */
+   char  buf[2048];
+   int   pos = 0;
+   int   i   = 0;
+
+   pos += snprintf(buf + pos, sizeof(buf) - pos,
+                   "seq=%u"
+                   " lck=%d age_lck=%d"
+                   " lgt=%d age_lgt=%d",
+                   seq,
+                   p_data->lock_state,  fmt_age(p_data->age_lck),
+                   p_data->light_state, fmt_age(p_data->age_lgt));
+
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      pos += snprintf(buf + pos, sizeof(buf) - pos,
+                      " pir%d_occ=%d pir%d_age=%d pir%d_batt=%d",
+                      i + 1, p_data->pir_slots[i].occupied,
+                      i + 1, fmt_age(p_data->pir_slots[i].age),
+                      i + 1, p_data->pir_slots[i].batt);
+   }
+
+   for (i = 0; i < MAX_REEDS; i++)
+   {
+      /* state=0xFF means slot never populated — emit as -1 */
+      int st = (p_data->reed_slots[i].active) ? p_data->reed_slots[i].state : -1;
+      pos += snprintf(buf + pos, sizeof(buf) - pos,
+                      " reed%d=%d reed%d_age=%d reed%d_batt=%d",
+                      i + 1, st,
+                      i + 1, fmt_age(p_data->reed_slots[i].age),
+                      i + 1, p_data->reed_slots[i].batt);
+   }
+
+   for (i = 0; i < MAX_TEMPS; i++)
+   {
+      pos += snprintf(buf + pos, sizeof(buf) - pos,
+                      " temp%d=%d temp%d_age=%d temp%d_batt=%d",
+                      i + 1, p_data->temp_slots[i].temp_decidegc,
+                      i + 1, fmt_age(p_data->temp_slots[i].age),
+                      i + 1, p_data->temp_slots[i].batt);
+   }
+
+   for (i = 0; i < MAX_CAMS; i++)
+   {
+      pos += snprintf(buf + pos, sizeof(buf) - pos,
+                      " cam%d=%d cam%d_age=%d",
+                      i, p_data->cam_slots[i].online,
+                      i, fmt_age(p_data->cam_slots[i].age_s));
+   }
+
+   for (i = 0; i < MAX_DOORBELL_CAMS; i++)
+   {
+      pos += snprintf(buf + pos, sizeof(buf) - pos,
+                      " db%d=%d db%d_age=%d",
+                      i, p_data->doorbell_slots[i].online,
+                      i, fmt_age(p_data->doorbell_slots[i].age_s));
+   }
+
+   log_telemetry("%s", buf);
+}
+
+/******************************************************************************
+ * \brief Emit one events.log line per events[] entry in this frame.
+ *
+ * \details Slot-based and scalar events. frame_seq is the join key back
+ *          to telemetry.log. One call per non-zero event_id field.
+ ******************************************************************************/
+static void emit_events(const struct SensorData *p_data, uint32_t seq)
+{
+   int i = 0;
+
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      if (p_data->pir_slots[i].event_id != 0)
+         log_event("seq=%u type=PIR slot=%d event_id=%llu",
+                   seq, i + 1,
+                   (unsigned long long)p_data->pir_slots[i].event_id);
+   }
+
+   for (i = 0; i < MAX_REEDS; i++)
+   {
+      if (p_data->reed_slots[i].event_id != 0)
+         log_event("seq=%u type=REED slot=%d event_id=%llu",
+                   seq, i + 1,
+                   (unsigned long long)p_data->reed_slots[i].event_id);
+   }
+
+   for (i = 0; i < MAX_TEMPS; i++)
+   {
+      if (p_data->temp_slots[i].event_id != 0)
+         log_event("seq=%u type=TEMP slot=%d event_id=%llu",
+                   seq, i + 1,
+                   (unsigned long long)p_data->temp_slots[i].event_id);
+   }
+
+   if (p_data->lock_event_id != 0)
+      log_event("seq=%u type=LOCK event_id=%llu",
+                seq, (unsigned long long)p_data->lock_event_id);
+
+   if (p_data->light_event_id != 0)
+      log_event("seq=%u type=LIGHT event_id=%llu",
+                seq, (unsigned long long)p_data->light_event_id);
+}
+
+/******************************************************************************
  * \brief Parse a JSON body string into SensorData and write to pipe.
  *
  * \details Expects the Phase 4B envelope:
@@ -581,7 +725,7 @@ void process_json(const char *p_json_body)
    pipe_ensure_connected();
    pipe_write(&data, frame_seq);
 
-   /* ---- Condensed telemetry summary ---- */
+   /* ---- Operational summary to sensor_server.log (grep-friendly) ---- */
    log_msg("[PARSE] seq=%u tmp=%.1f mot=%u lgt=%d lck=%d occ=%d mtr=%d db=%d "
            "ages pir=%d lgt=%d lck=%d batts pir=%d lck=%d mtr=%d",
            frame_seq,
@@ -589,123 +733,10 @@ void process_json(const char *p_json_body)
            data.light_state, data.lock_state,
            data.pir_occupied, data.motor_online,
            data.doorbell_pressed,
-           data.age_pir, data.age_lgt, data.age_lck,
+           fmt_age(data.age_pir), fmt_age(data.age_lgt), fmt_age(data.age_lck),
            data.batt_pir, data.batt_lck, data.batt_motor);
 
-   /* ---- Per-slot PIR telemetry (active slots only) ---- */
-   for (i = 0; i < MAX_PIRS; i++)
-   {
-      if (data.pir_slots[i].active)
-      {
-         log_msg("[PARSE] PIR slot=%d cnt=%u batt=%d age=%d occ=%d",
-                 i + 1,
-                 data.pir_slots[i].count,
-                 data.pir_slots[i].batt,
-                 data.pir_slots[i].age,
-                 data.pir_slots[i].occupied);
-      }
-   }
-
-   /* ---- Per-slot Reed telemetry (active slots only) ---- */
-   for (i = 0; i < MAX_REEDS; i++)
-   {
-      if (data.reed_slots[i].active)
-      {
-         log_msg("[PARSE] Reed slot=%d (%s) st=%s batt=%d age=%d gen=%u",
-                 i + 1,
-                 data.reed_slots[i].name,
-                 (1 == data.reed_slots[i].state) ? "open"   :
-                 (0 == data.reed_slots[i].state) ? "closed" : "?",
-                 data.reed_slots[i].batt,
-                 data.reed_slots[i].age,
-                 data.reed_slots[i].gen);
-      }
-   }
-
-   /* ---- Per-slot Temp telemetry (active slots only) ---- */
-   for (i = 0; i < MAX_TEMPS; i++)
-   {
-      if (data.temp_slots[i].active)
-      {
-         log_msg("[PARSE] Temp slot=%d %d.%dC batt=%d age=%d",
-                 i + 1,
-                 data.temp_slots[i].temp_decidegc / 10,
-                 data.temp_slots[i].temp_decidegc % 10,
-                 data.temp_slots[i].batt,
-                 data.temp_slots[i].age);
-      }
-   }
-
-   /* ---- Event log lines — one per events[] entry, frame_seq for join ---- */
-   for (i = 0; i < MAX_PIRS; i++)
-   {
-      if (data.pir_slots[i].event_id != 0)
-         log_msg("[EVENT] frame_seq=%u type=PIR  slot=%d event_id=%llu",
-                 frame_seq, i + 1,
-                 (unsigned long long)data.pir_slots[i].event_id);
-   }
-
-   for (i = 0; i < MAX_REEDS; i++)
-   {
-      if (data.reed_slots[i].event_id != 0)
-         log_msg("[EVENT] frame_seq=%u type=REED slot=%d event_id=%llu",
-                 frame_seq, i + 1,
-                 (unsigned long long)data.reed_slots[i].event_id);
-   }
-
-   for (i = 0; i < MAX_TEMPS; i++)
-   {
-      if (data.temp_slots[i].event_id != 0)
-         log_msg("[EVENT] frame_seq=%u type=TEMP slot=%d event_id=%llu",
-                 frame_seq, i + 1,
-                 (unsigned long long)data.temp_slots[i].event_id);
-   }
-
-   if (data.lock_event_id != 0)
-      log_msg("[EVENT] frame_seq=%u type=LOCK event_id=%llu",
-              frame_seq,
-              (unsigned long long)data.lock_event_id);
-
-   if (data.light_event_id != 0)
-      log_msg("[EVENT] frame_seq=%u type=LIGHT event_id=%llu",
-              frame_seq,
-              (unsigned long long)data.light_event_id);
-
-   /* ---- Doorbells — online set only ---- */
-   {
-      char db_buf[64] = {0};
-      int  pos        = 0;
-      for (i = 0; i < MAX_DOORBELL_CAMS; i++)
-      {
-         if (data.doorbell_slots[i].online)
-            pos += snprintf(db_buf + pos, sizeof(db_buf) - pos,
-                            " id=%d age=%d", i, data.doorbell_slots[i].age_s);
-      }
-      if (pos > 0)
-         log_msg("[PARSE] Doorbells online:%s", db_buf);
-   }
-
-   /* ---- Cams — online set only ---- */
-   {
-      char cam_buf[64] = {0};
-      int  pos         = 0;
-      for (i = 0; i < MAX_CAMS; i++)
-      {
-         if (data.cam_slots[i].online)
-            pos += snprintf(cam_buf + pos, sizeof(cam_buf) - pos,
-                            " slot=%d age=%d", i, data.cam_slots[i].age_s);
-      }
-      if (pos > 0)
-         log_msg("[PARSE] Cams online:%s", cam_buf);
-   }
-
-   /* ---- Rooms ---- */
-   for (i = 0; i < data.room_count; i++)
-   {
-      log_msg("[PARSE] Room id=%d %s/%s=%s",
-              data.rooms[i].sensor_id,
-              data.rooms[i].room_name,
-              data.rooms[i].location,
-              data.rooms[i].state);
-   }
+   /* ---- Routed output ---- */
+   emit_telemetry(&data, frame_seq);
+   emit_events(&data, frame_seq);
 }

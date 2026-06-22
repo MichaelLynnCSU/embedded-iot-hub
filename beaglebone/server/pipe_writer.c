@@ -139,7 +139,7 @@ void pipe_write(struct SensorData *p_data, uint32_t frame_seq)
    {
       return;
    }
-
+   p_data->frame_seq = frame_seq;
    w = write(g_pipe_fd, p_data, sizeof(*p_data));
    if (w != (ssize_t)sizeof(*p_data))
    {

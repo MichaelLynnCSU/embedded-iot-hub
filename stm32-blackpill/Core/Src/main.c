@@ -66,6 +66,42 @@
  *          Placing it first minimises tap-to-view-switch latency.
  *          The function is debounced internally; it returns immediately
  *          when no touch is present or debounce is active.
+ *
+ * \note    Full-duplex UART1 / HB transmit (2026-06-20):
+ *          USART1 is configured UART_MODE_TX_RX and physically wired
+ *          full-duplex to the BeagleBone:
+ *            BlackPill PA9  (USART1 TX) -> BeagleBone /dev/ttyS1 RX
+ *            BlackPill PA10 (USART1 RX) -> BeagleBone /dev/ttyS1 TX
+ *
+ *          heartbeat_tick() transmits "HB:1,<tx_id>\n" to the BeagleBone
+ *          once per HB_CHECK_MS (1 s). The BeagleBone uart_parse_line()
+ *          handler calls heartbeat_stamp(DEV_LCD) on receipt, keeping
+ *          DEV_LCD alive in the heartbeat monitor.
+ *
+ *          tx_id is a static uint16_t incremented before each transmit.
+ *          Gaps in the tx_id sequence in the BeagleBone log indicate
+ *          missed HB frames.
+ *
+ *          HAL_UART_Transmit() is blocking but safe here: the payload
+ *          is ~12 bytes (~1 ms at 115200 baud) and fires only once per
+ *          second. The ISR ring buffer absorbs any RX bytes that arrive
+ *          during the transmit window. The 10 ms timeout is a hard
+ *          ceiling — if the transmit stalls (e.g. TX pin floating) it
+ *          returns HAL_TIMEOUT and the main loop continues unblocked.
+ *
+ * \note    Structured event tracing — tx_id (2026-06-20):
+ *          Mirrors the pattern established in the nRF52840 reed sensor's
+ *          ble_adv.c::ble_broadcast(). HAL_UART_Transmit()'s return status
+ *          is now checked (previously discarded via (void)), and tx_id is
+ *          logged locally via log_enqueue() immediately after every HB
+ *          transmit attempt — success or failure. This gives both ends a
+ *          shared correlation key without needing BeagleBone access to
+ *          confirm a frame went out:
+ *            [HB_TX]  tx_id=1844                    <- BlackPill console
+ *            [UART]   ... id=HB val=1 tx_id=1844     <- BeagleBone log
+ *          A failed transmit now produces a visible
+ *          "[HB_TX] tx_id=N FAILED (status=...)" line instead of
+ *          vanishing silently.
  ******************************************************************************/
 #include "SEGGER_RTT.h"
 #include "crash_log.h"
@@ -84,15 +120,18 @@
 
 /******************************** CONSTANTS ***********************************/
 
-#define HB_CHECK_MS      1000ul  /**< Heartbeat check interval in ms          */
-#define MAIN_LOOP_DELAY_MS  5u   /**< Main loop sleep between iterations (ms) */
-#define PING_BUF_LEN       80u   /**< Heartbeat log string buffer length       */
+#define HB_CHECK_MS       1000ul  /**< Heartbeat check interval in ms         */
+#define HB_TX_TIMEOUT_MS    10u   /**< HAL_UART_Transmit hard ceiling ms       */
+#define MAIN_LOOP_DELAY_MS   5u   /**< Main loop sleep between iterations (ms) */
+#define PING_BUF_LEN        80u   /**< Heartbeat log string buffer length       */
+#define HB_TX_BUF_LEN       24u   /**< HB transmit buffer length               */
 
 /************************** STATIC (PRIVATE) DATA *****************************/
 
 static SPI_HandleTypeDef  g_hspi1;  /**< SPI1 — ILI9341 display              */
 static SPI_HandleTypeDef  g_hspi2;  /**< SPI2 — XPT2046 touch controller      */
-UART_HandleTypeDef        g_huart1; /**< USART1 — ESP32 telemetry             */
+UART_HandleTypeDef        g_huart1; /**< USART1 — ESP32 telemetry RX,
+                                      *   BeagleBone HB TX (full-duplex)      */
 I2C_HandleTypeDef         g_hi2c1;  /**< I2C1 — FRAM chip PB6/PB7            */
 
 static uint8_t  g_uart_rx_byte = 0u;  /**< Single-byte DMA target             */
@@ -129,12 +168,34 @@ static void drain_uart_queue(void)
 }
 
 /**
- * \brief  Emit a periodic heartbeat log line and refresh the UI.
+ * \brief  Emit a periodic heartbeat log line, refresh the UI, and transmit
+ *         HB frame to BeagleBone over USART1 (full-duplex).
+ *
+ * \details Fires once per HB_CHECK_MS (1 s). Transmits "HB:1,<tx_id>\n"
+ *          to the BeagleBone so uart_parse_line() can call
+ *          heartbeat_stamp(DEV_LCD) and keep DEV_LCD alive in the
+ *          heartbeat monitor. tx_id increments per transmission — gaps
+ *          in the BeagleBone log indicate missed frames.
+ *
+ *          HAL_UART_Transmit() is blocking with a HB_TX_TIMEOUT_MS (10 ms)
+ *          ceiling. Safe here because the payload is ~12 bytes (~1 ms at
+ *          115200 baud) and fires only once per second. See file header
+ *          note "Full-duplex UART1 / HB transmit (2026-06-20)".
+ *
+ *          Structured event tracing: the transmit status is checked and
+ *          tx_id is logged locally via log_enqueue() right after the
+ *          transmit attempt, mirroring ble_adv.c::ble_broadcast() on the
+ *          reed sensor. See file header note "Structured event tracing
+ *          — tx_id (2026-06-20)".
  */
 static void heartbeat_tick(void)
 {
-   static char g_ping[PING_BUF_LEN];
-   uint32_t    now = 0ul;
+   static uint16_t    s_tx_id = 0u;     /**< per-session HB transmit counter  */
+   static char        g_ping[PING_BUF_LEN];  /**< BB-side log string          */
+   static char        g_hb_tx[HB_TX_BUF_LEN]; /**< HB wire payload            */
+   static char        g_hb_log[PING_BUF_LEN]; /**< tx_id correlation log line */
+   HAL_StatusTypeDef   hb_status;
+   uint32_t            now = 0ul;
 
    now = HAL_GetTick();
 
@@ -143,6 +204,7 @@ static void heartbeat_tick(void)
    g_last_hb = now;
    trinity_check_stack();
    ui_update();
+
    (void)snprintf(g_ping, sizeof(g_ping),
                "[HB] t=%lu reeds=%u pir_slots=%u lgt=%u lck=%u mtr=%u view=%u\r\n",
                (unsigned long)now,
@@ -153,6 +215,35 @@ static void heartbeat_tick(void)
                (unsigned int)ui_get_dev_online(eDEV_MOTOR),
                (unsigned int)ui_get_view());
    log_enqueue(g_ping);
+
+   /* Transmit HB to BeagleBone over USART1 TX (full-duplex).
+    * Stamps DEV_LCD alive in the BeagleBone heartbeat monitor.
+    * tx_id gaps in BB log = missed HB frames.
+    * See file header note "Full-duplex UART1 / HB transmit (2026-06-20)". */
+   s_tx_id++;
+   (void)snprintf(g_hb_tx, sizeof(g_hb_tx), "HB:1,%u\n", (unsigned)s_tx_id);
+   hb_status = HAL_UART_Transmit(&g_huart1,
+                                  (uint8_t *)g_hb_tx,
+                                  (uint16_t)strlen(g_hb_tx),
+                                  HB_TX_TIMEOUT_MS);
+
+   /* Structured event tracing — tx_id, mirrors ble_adv.c::ble_broadcast().
+    * Logged locally so the BlackPill console alone can correlate against
+    * the BeagleBone's "id=HB val=%d tx_id=%d" log line, and so a failed
+    * transmit is visible here instead of vanishing silently. See file
+    * header note "Structured event tracing — tx_id (2026-06-20)".        */
+   if (HAL_OK == hb_status)
+   {
+      (void)snprintf(g_hb_log, sizeof(g_hb_log), "[HB_TX] tx_id=%u\r\n",
+                  (unsigned)s_tx_id);
+   }
+   else
+   {
+      (void)snprintf(g_hb_log, sizeof(g_hb_log),
+                  "[HB_TX] tx_id=%u FAILED (status=%d)\r\n",
+                  (unsigned)s_tx_id, (int)hb_status);
+   }
+   log_enqueue(g_hb_log);
 }
 
 static void mx_spi1_init(void)
@@ -193,6 +284,9 @@ static void mx_spi2_init(void)
 
 static void mx_usart1_uart_init(void)
 {
+   /* USART1 is full-duplex — RX receives ESP32 telemetry via ISR,
+    * TX sends HB frames to BeagleBone from heartbeat_tick().
+    * See file header note "Full-duplex UART1 / HB transmit (2026-06-20)". */
    g_huart1.Instance          = USART1;
    g_huart1.Init.BaudRate     = 115200u;
    g_huart1.Init.WordLength   = UART_WORDLENGTH_8B;
@@ -304,7 +398,6 @@ int main(void)
 
    MX_USB_DEVICE_Init();
    mx_i2c1_init();
-
 
    /* I2C bus scan -- remove after FRAM confirmed */
    {
