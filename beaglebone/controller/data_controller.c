@@ -51,6 +51,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include "config.h"
+#include "build_info.h"
 #include "sensor_types.h"
 #include "shared_data.h"
 #include "log.h"
@@ -296,6 +297,8 @@ int main(void)
    LOG_INF("=========================================");
    LOG_INF("Data Controller starting");
    LOG_INF("=========================================");
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_date);
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_target);
 
    (void)signal(SIGINT,  signal_handler);
    (void)signal(SIGTERM, signal_handler);

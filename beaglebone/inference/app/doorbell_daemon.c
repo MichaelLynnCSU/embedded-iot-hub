@@ -72,6 +72,7 @@
 #include <fcntl.h>
 #include "inference_worker.h"
 #include "inference_core.h"
+#include "build_info.h"
 #include "doorbell_result_shm.h"
 
 /******************************** CONFIG **************************************/
@@ -452,6 +453,8 @@ int main(void)
 
    g_log = fopen(LOG_PATH, "a");
    log_msg("doorbell_daemon starting on port %d", LISTEN_PORT);
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_date);
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_target);
 
    if (inference_worker_init(MODEL_PATH, LABEL_PATH) < 0)
    {

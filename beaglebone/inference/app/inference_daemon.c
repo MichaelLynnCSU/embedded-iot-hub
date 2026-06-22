@@ -108,6 +108,7 @@
 #include <sqlite3.h>
 #include "inference_worker.h"
 #include "inference_core.h"
+#include "build_info.h"
 
 /******************************** CONFIG **************************************/
 #define MODEL_PATH      "/opt/inference/models/detect.tflite"
@@ -532,6 +533,8 @@ int main(void)
 
    g_log = fopen(LOG_PATH, "a");
    log_msg("inference_daemon starting on port %d", LISTEN_PORT);
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_date);
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_target);
 
    if (inference_worker_init(MODEL_PATH, LABEL_PATH) < 0)
    {

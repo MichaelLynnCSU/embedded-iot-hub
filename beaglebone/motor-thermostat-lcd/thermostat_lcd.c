@@ -55,6 +55,7 @@
 #include <pthread.h>
 #include <time.h>
 #include "lcd_driver.h"
+#include "build_info.h"
 #include "../controller/shared_data.h"
 
 /******************************** CONSTANTS ***********************************/
@@ -101,6 +102,8 @@ int main(void)
 
    LOG("=========================================");
    LOG("Thermostat LCD starting");
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_date);
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_target);
    LOG("NOT the smart home dashboard (that is the STM32 BlackPill/LVGL)");
    LOG("=========================================");
 

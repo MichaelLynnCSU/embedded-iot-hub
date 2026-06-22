@@ -132,6 +132,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <pthread.h>
+#include "build_info.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -709,6 +710,8 @@ int main(void)
 
    g_log = fopen(LOG_PATH, "a");
    log_msg("doorbell_stream_daemon starting on port %d", LISTEN_PORT);
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_date);
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_target);
 
    tcp_server_init();
 

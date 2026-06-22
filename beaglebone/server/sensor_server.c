@@ -104,6 +104,7 @@
 #include "json_parser.h"
 #include "pipe_writer.h"
 #include "server_log.h"
+#include "build_info.h"
 
 #define LOG_FILE      "/var/log/sensor_server.log" /**< operational log        */
 #define TEL_LOG_FILE  "/var/log/telemetry.log"     /**< numeric state snapshots */
@@ -286,6 +287,8 @@ int main(void)
    log_msg("=========================================");
    log_msg("[SERVER] start");
    log_msg("=========================================");
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_date);
+   fprintf(stdout, "[BOOT] %s\n", bbb_build_target);
 
    (void)signal(SIGINT,  signal_handler);
    (void)signal(SIGTERM, signal_handler);
