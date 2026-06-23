@@ -36,7 +36,7 @@
 #include "ble_manager.h"
 #include "wifi_manager.h"
 #include "tcp_manager.h"
-#include "aws_manager.h"
+#include "device_gateway.h"
 #include "uart_manager.h"
 #include "vroom_bus.h"
 #include "trinity_log.h"
@@ -323,6 +323,6 @@ static void aws_task(void *p_arg)
    wait_for_wifi_kicked();
    trinity_wdt_add();
 
-   aws_manager_task(g_wifi_eg, p_params->sub);
+   device_gateway_task(g_wifi_eg, p_params->sub);
    vTaskDelete(NULL);
 }

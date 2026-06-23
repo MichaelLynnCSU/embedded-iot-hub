@@ -1,5 +1,5 @@
 /******************************************************************************
- * \file aws_manager.c
+ * \file device_gateway.c
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  * \date 01-01-2025
  *
@@ -22,7 +22,7 @@
  *
  *          Lambda response fields (PI controller):
  *          kp, ki, kd, setpoint
- *          Consumed by tcp_manager.c via aws_get_kp/ki/kd/setpoint().
+ *          Consumed by tcp_manager.c via gateway_get_kp/ki/kd/setpoint().
  *
  * \note    WDT fix (2026-03-21): (unchanged)
  * \note    PI controller params (2026-05-04): (unchanged)
@@ -31,14 +31,15 @@
  *          batt tracked in g_state.temp_slots[]. "temps" array added to
  *          Lambda payload. "temp" field is whole degrees C matching
  *          avg_temp convention — divide by 10 at serialization only.
+ * \note    AWS decoupled (2026-06-23):
+ *          Direct Lambda send removed pending BeagleBone /ingest endpoint.
+ *          Task loop and queue drain preserved. PI controller continues on
+ *          compile-time defaults from config.h. Re-enable with ENABLE_AWS.
  ******************************************************************************/
 
 #include "config.h"
 #include "network_config.h"
 #include "esp_log.h"
-#include "esp_http_client.h"
-#include "esp_crt_bundle.h"
-#include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -46,24 +47,27 @@
 #include "ble_manager.h"
 #include "ble_temp.h"
 #include "uart_manager.h"
-#include "aws_manager.h"
+#include "device_gateway.h"
 #include "vroom_bus.h"
 #include "trinity_log.h"
 
-#define DRAIN_INTERVAL_MS   2000   /**< queue drain / WDT kick interval ms */
+#ifdef ENABLE_AWS
+#include "esp_http_client.h"
+#include "esp_crt_bundle.h"
+#include "cJSON.h"
+#endif
+
+#define DRAIN_INTERVAL_MS   2000   /**< queue drain interval ms */
 #define HTTP_TIMEOUT_MS     10000  /**< HTTP request timeout ms */
 #define HTTP_STATUS_OK      200    /**< expected HTTP success status */
 
-static const char *TAG = "AWS_MGR"; /**< ESP log tag */
+static const char *TAG = "DEV_GW"; /**< ESP log tag */
 
 /* PI controller parameters — updated by Lambda response, read by tcp_manager */
 static float g_aws_kp       = DEFAULT_AWS_KP;
 static float g_aws_ki       = DEFAULT_AWS_KI;
 static float g_aws_kd       = DEFAULT_AWS_KD;
 static int   g_aws_setpoint = DEFAULT_AWS_SETPOINT;
-
-static char g_response_buffer[HTTP_RESPONSE_BUFFER_SIZE];
-static int  g_response_len = 0;
 
 typedef struct
 {
@@ -167,6 +171,11 @@ static void drain_queues(BUS_SUBSCRIBER_T sub)
 
 /*----------------------------------------------------------------------------*/
 
+#ifdef ENABLE_AWS
+
+static char g_response_buffer[HTTP_RESPONSE_BUFFER_SIZE];
+static int  g_response_len = 0;
+
 static esp_err_t http_event_handler(esp_http_client_event_t *p_evt)
 {
    if ((HTTP_EVENT_ON_DATA == p_evt->event_id) &&
@@ -184,8 +193,6 @@ static esp_err_t http_event_handler(esp_http_client_event_t *p_evt)
 
    return ESP_OK;
 }
-
-/*----------------------------------------------------------------------------*/
 
 static bool send_to_aws(const char *p_post_data)
 {
@@ -246,8 +253,6 @@ static bool send_to_aws(const char *p_post_data)
    return success;
 }
 
-/*----------------------------------------------------------------------------*/
-
 static void parse_control_response(void)
 {
    cJSON *p_json     = NULL;
@@ -280,8 +285,6 @@ static void parse_control_response(void)
    cJSON_Delete(p_json);
 }
 
-/*----------------------------------------------------------------------------*/
-
 static void send_state_to_aws(void)
 {
    cJSON *p_root  = NULL;
@@ -294,11 +297,7 @@ static void send_state_to_aws(void)
    int    i       = 0;
 
    p_root = cJSON_CreateObject();
-   if (NULL == p_root)
-   {
-      ESP_LOGE(TAG, "cJSON root alloc failed");
-      return;
-   }
+   if (NULL == p_root) { ESP_LOGE(TAG, "cJSON root alloc failed"); return; }
 
    (void)cJSON_AddNumberToObject(p_root, "avg_temp",     g_state.avg_temp);
    (void)cJSON_AddNumberToObject(p_root, "motion_count", g_state.motion_count);
@@ -310,7 +309,6 @@ static void send_state_to_aws(void)
    (void)cJSON_AddNumberToObject(p_root, "batt_lck",     g_state.lock_batt);
    (void)cJSON_AddNumberToObject(p_root, "motor_online", g_state.motor_online);
 
-   /* temps — "temp" field is whole degrees C, matches avg_temp convention */
    p_temps = cJSON_CreateArray();
    if (NULL != p_temps)
    {
@@ -320,8 +318,7 @@ static void send_state_to_aws(void)
          p_entry = cJSON_CreateObject();
          if (NULL != p_entry)
          {
-            (void)cJSON_AddNumberToObject(p_entry, "id",
-                                          i + 1);
+            (void)cJSON_AddNumberToObject(p_entry, "id",   i + 1);
             (void)cJSON_AddNumberToObject(p_entry, "temp",
                                           g_state.temp_slots[i].temp_decidegc / 10);
             (void)cJSON_AddNumberToObject(p_entry, "batt",
@@ -361,65 +358,64 @@ static void send_state_to_aws(void)
 
    ok = send_to_aws(p_post);
 
-   if (ok)
-   {
-      parse_control_response();
-      ESP_LOGI(TAG, "AWS sent successfully");
-   }
-   else
-   {
-      ESP_LOGE(TAG, "AWS send failed");
-      trinity_log_event("EVENT: AWS_SEND_FAIL\n");
-   }
+   if (ok) { parse_control_response(); ESP_LOGI(TAG, "AWS sent successfully"); }
+   else    { ESP_LOGE(TAG, "AWS send failed"); trinity_log_event("EVENT: AWS_SEND_FAIL\n"); }
 
    cJSON_free(p_post);
 }
+
+#endif /* ENABLE_AWS */
 
 /*******************************************************************************
  * Public getter functions
  ******************************************************************************/
 
-float aws_get_kp(void)       { return g_aws_kp;       }
-float aws_get_ki(void)       { return g_aws_ki;       }
-float aws_get_kd(void)       { return g_aws_kd;       }
-int   aws_get_setpoint(void) { return g_aws_setpoint; }
+float gateway_get_kp(void)       { return g_aws_kp;       }
+float gateway_get_ki(void)       { return g_aws_ki;       }
+float gateway_get_kd(void)       { return g_aws_kd;       }
+int   gateway_get_setpoint(void) { return g_aws_setpoint; }
 
-void aws_manager_init(void)
+void device_gateway_init(void)
 {
+#ifdef ENABLE_AWS
    ESP_LOGI(TAG, "AWS manager initialized");
+#else
+   ESP_LOGI(TAG, "AWS manager stubbed — ENABLE_AWS not set");
+#endif
 }
 
-void aws_manager_task(EventGroupHandle_t p_wifi_eg,
+void device_gateway_task(EventGroupHandle_t p_wifi_eg,
                       BUS_SUBSCRIBER_T   sub)
 {
-   EventBits_t bits      = 0;
-   TickType_t  last_send = 0;
-   TickType_t  now       = 0;
-
-   (void)bits;
+#ifdef ENABLE_AWS
+   TickType_t last_send = 0;
+   TickType_t now       = 0;
+#endif
 
    (void)xEventGroupWaitBits(p_wifi_eg, WIFI_CONNECTED_BIT,
-                               pdFALSE, pdTRUE, portMAX_DELAY);
+                              pdFALSE, pdTRUE, portMAX_DELAY);
 
-   ESP_LOGI(TAG, "AWS task running");
+   ESP_LOGI(TAG, "AWS task running (stub mode — drain only)");
 
+#ifdef ENABLE_AWS
    last_send = xTaskGetTickCount();
+#endif
 
    while (1)
    {
       trinity_wdt_kick();
 
       (void)xEventGroupWaitBits(sub.events, sub.mask, pdTRUE, pdFALSE,
-                           pdMS_TO_TICKS(DRAIN_INTERVAL_MS));
+                                pdMS_TO_TICKS(DRAIN_INTERVAL_MS));
       drain_queues(sub);
 
+#ifdef ENABLE_AWS
       now = xTaskGetTickCount();
-      if ((now - last_send) < pdMS_TO_TICKS(AWS_SEND_INTERVAL_MS))
+      if ((now - last_send) >= pdMS_TO_TICKS(AWS_SEND_INTERVAL_MS))
       {
-         continue;
+         last_send = now;
+         send_state_to_aws();
       }
-
-      last_send = now;
-      send_state_to_aws();
+#endif
    }
 }

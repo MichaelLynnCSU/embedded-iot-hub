@@ -26,7 +26,7 @@
  * \note    Mailbox refactor (2026-05-05):
  *          Replaced single shared queues with per-subscriber private
  *          mailboxes (depth 1, xQueueOverwrite). Eliminates the race
- *          condition where tcp_manager and aws_manager competed for the
+ *          condition where tcp_manager and device_gateway competed for the
  *          same queue item. bus_register_subscriber() now takes an
  *          EventBits_t mask so each subscriber is only woken for the
  *          bits it cares about. Return type changed from

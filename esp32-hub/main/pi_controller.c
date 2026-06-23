@@ -21,7 +21,7 @@
 #include "uart_manager.h"
 #include "pi_controller.h"
 #include "config.h"
-#include "aws_manager.h"
+#include "device_gateway.h"
 #include "esp_log.h"
 
 static const char *TAG = "TCP_MGR";
@@ -42,10 +42,10 @@ static PI_STATE_T g_pi = { 0.0f, 0.0f, 0u };
 
 float run_pi_controller(uint32_t now_ms)
 {
-   float kp       = aws_get_kp();
-   float ki       = aws_get_ki();
-   float kd       = aws_get_kd();
-   int   setpoint = aws_get_setpoint();
+   float kp       = gateway_get_kp();
+   float ki       = gateway_get_ki();
+   float kd       = gateway_get_kd();
+   int   setpoint = gateway_get_setpoint();
    int   avg_temp = uart_get_avg_temp();
    float error    = 0.0f;
    float dt       = 0.0f;

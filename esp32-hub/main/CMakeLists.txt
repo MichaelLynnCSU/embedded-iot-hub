@@ -15,7 +15,7 @@ idf_component_register(
         "motor_sm.c"
         "pir_window.c"
         "pi_controller.c"
-        "aws_manager.c"
+        "device_gateway.c"
         "build_info.c"
         "vroom_bus.c"
         "trinity_wdt_idf.c"

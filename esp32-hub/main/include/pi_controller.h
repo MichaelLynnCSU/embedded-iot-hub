@@ -23,7 +23,7 @@
  *
  * \return Effective PWM output [0.0, 100.0] percent.
  *
- * \details Reads setpoint and gains from aws_manager getters. Accumulates
+ * \details Reads setpoint and gains from device_gateway getters. Accumulates
  *          integral with anti-windup clamp. Safe to call every TCP loop
  *          iteration -- dt is derived from elapsed time since last call.
  ******************************************************************************/

@@ -13,7 +13,7 @@
  * \note    PI controller defaults (2026-05-04):
  *          DEFAULT_AWS_LOW, DEFAULT_AWS_HIGH, DEFAULT_AWS_MOTOR removed.
  *          Replaced with DEFAULT_AWS_KP/KI/KD/SETPOINT consumed by
- *          aws_manager.c and forwarded to tcp_manager.c via getters.
+ *          device_gateway.c and forwarded to tcp_manager.c via getters.
  *          PWM_DUTY_MAX added — maximum duty count sent to C3 motor node.
  *
  * \note    PIR slot table (2026-05-20):
@@ -182,7 +182,7 @@
  * \brief Room sensor descriptor — shared across hub modules.
  *
  * \details Populated at startup in hello_uart.c. Read by tcp_manager.c
- *          and aws_manager.c to build JSON payloads.
+ *          and device_gateway.c to build JSON payloads.
  */
 typedef struct
 {

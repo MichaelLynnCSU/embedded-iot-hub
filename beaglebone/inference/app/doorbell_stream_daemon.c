@@ -548,12 +548,21 @@ static void *conn_thread(void *arg)
            (unsigned)cs->device_id, cs->peer_ip);
 
    /* --- 2. Spawn ffmpeg --------------------------------------------- */
+   /* Low-latency ffmpeg flags (2026-06-22):
+    * -fflags nobuffer   — pass frames to muxer immediately, no input buffering
+    * -flags low_delay   — disable muxer look-ahead buffering in RTSP output
+    * -flush_packets 1   — flush RTP packet buffer after every frame
+    * Combined with VLC --network-caching=100 --clock-jitter=0 these reduce
+    * end-to-end latency from ~2s to ~200-400ms on a local network. */
    snprintf(cmd, sizeof(cmd),
          "ffmpeg -loglevel info"
+         " -fflags nobuffer"
+         " -flags low_delay"
          " -analyzeduration 0 -probesize 32"
          " -f mjpeg"
          " -i pipe:0"
          " -c:v copy"
+         " -flush_packets 1"
          " -rtsp_transport tcp"
          " -f rtsp %s%u"
          " 2>>%s",

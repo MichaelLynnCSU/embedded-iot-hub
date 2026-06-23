@@ -63,7 +63,7 @@
 #include "ble_temp.h"
 #include "uart_manager.h"
 #include "tcp_manager.h"
-#include "aws_manager.h"
+#include "device_gateway.h"
 #include "vroom_bus.h"
 #include "trinity_log.h"
 #include "pi_controller.h"
