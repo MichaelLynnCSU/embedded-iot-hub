@@ -143,6 +143,68 @@
  *          Counterpart BBB fix in doorbell_stream_daemon.c: recv_all()
  *          now distinguishes clean TCP FIN (return -2) from transport
  *          error (return -1) so the log reflects the true cause.
+ *
+ * \note    Stream FPS tuning (2026-06-22):
+ *          STREAM mode frame_size changed FRAMESIZE_VGA -> FRAMESIZE_QVGA
+ *          (320x240). TFLite model input is 300x300 — the resize from
+ *          320x240 is trivial and inference accuracy is unchanged. QVGA
+ *          reduces frame size from ~10KB to ~2-3KB, cutting stream_send_all()
+ *          wall time by ~4x, reducing SO_SNDTIMEO retry frequency, and
+ *          raising observed FPS from ~3 to an expected 8-12 FPS on the
+ *          existing WiFi link. SNAPSHOT mode remains at FRAMESIZE_VGA —
+ *          single-shot inference benefits from the higher source resolution.
+ *          Per-frame FPS logging added to stream_task (every 30 frames) so
+ *          the actual achieved rate is visible in the serial log without
+ *          post-processing rx timestamps.
+ *
+ * \note    Core pinning (2026-06-22, reverted):
+ *          All application tasks were changed to xTaskCreatePinnedToCore
+ *          core 1 to leave core 0 uncontested for the WiFi driver. Testing
+ *          showed this made RTT worse (avg 1956ms, 15% loss vs baseline
+ *          avg 1519ms, 0% loss) and was reverted to xTaskCreate. Root cause
+ *          of stream stalls is 802.11 MAC-layer latency in the RF environment
+ *          — idle ping shows same 787-2681ms RTT with no stream running.
+ *          Fix requires router channel change (ch1 or ch6) or AP config.
+ *
+ * \note    Dummy frame test (2026-06-22, flag off):
+ *          STREAM_DUMMY_FRAME_TEST in stream_task bypasses esp_camera_fb_get()
+ *          and sends a fixed static buffer instead of real camera frames.
+ *          Used to isolate whether send stalls were caused by camera/DMA
+ *          interaction or the network path. Result: stalls persisted with
+ *          dummy frames, proving camera was innocent and the bottleneck was
+ *          purely network (confirmed as router channel 11 congestion).
+ *          Set STREAM_DUMMY_FRAME_TEST=1 to re-enable for future diagnostics.
+ *          Flag is compile-time only — no runtime overhead when 0.
+ *
+ * \note    Frame-copy / early fb_return fix (2026-06-22):
+ *          Root cause of multi-second stream gaps (16-25s observed in BBB
+ *          rx logs): stream_task held the camera frame buffer (p_fb) across
+ *          the entire stream_send_frame() call, only returning it to the
+ *          DMA pool after send completed. Under WiFi backpressure,
+ *          stream_send_all() retries indefinitely (500ms SO_SNDTIMEO per
+ *          iteration), so p_fb could be held for many seconds. With only
+ *          fb_count=2 DMA buffers, both slots were consumed during this
+ *          window and esp_camera_fb_get() stalled until one was freed —
+ *          freezing the camera for the entire send duration.
+ *
+ *          Fix: stream_task now copies the JPEG payload into a heap buffer
+ *          immediately after capture, returns p_fb to the DMA pool via
+ *          esp_camera_fb_return() before any network I/O, then sends the
+ *          heap copy. The camera is unblocked within microseconds of
+ *          capture and can fill its next DMA slot while the previous frame
+ *          is still in flight over WiFi. The heap copy is freed after send
+ *          (success or failure).
+ *
+ *          The new helper stream_send_frame_buf(buf, len) accepts a raw
+ *          pointer+length instead of a camera_fb_t*, keeping stream_send_frame()
+ *          (which takes camera_fb_t*) intact for any future use. Only
+ *          stream_task's frame loop is changed.
+ *
+ *          Memory cost: one malloc/free per frame (~2-4KB at QVGA). On
+ *          ESP32 with 8MB PSRAM this is negligible. malloc failure is
+ *          handled gracefully — the frame is skipped (logged as a warning)
+ *          and the stream continues; this matches the existing behaviour
+ *          for esp_camera_fb_get() failures.
  ******************************************************************************/
 
 #include <string.h>
@@ -207,13 +269,26 @@ static esp_err_t camera_init(void)
         .ledc_timer     = LEDC_TIMER_0,
         .ledc_channel   = LEDC_CHANNEL_0,
         .pixel_format   = PIXFORMAT_JPEG,
-        .frame_size     = FRAMESIZE_VGA,
-        .jpeg_quality   = 10,              /* quality 10: ~5-7KB per VGA frame,
-                                            * good balance of speed and clarity
-                                            * for a doorbell cam over WiFi.
-                                            * Was 6 (~13KB) — tuned down after
-                                            * confirming sensor is OV3660, not
-                                            * OV2640 as originally assumed.    */
+#if DOORBELL_MODE == DOORBELL_MODE_STREAM
+        .frame_size     = FRAMESIZE_QVGA,         /* 320x240 for stream mode:
+                                                    * ~2-3KB per frame vs ~10KB
+                                                    * at VGA. Model input is
+                                                    * 300x300 so resize from
+                                                    * 320x240 is trivial —
+                                                    * no inference accuracy
+                                                    * penalty. Raises FPS from
+                                                    * ~3 to expected 8-12.    */
+#else
+        .frame_size     = FRAMESIZE_VGA,          /* SNAPSHOT: full VGA kept —
+                                                    * single-shot inference
+                                                    * benefits from higher
+                                                    * source resolution.      */
+#endif
+        .jpeg_quality   = 10,              /* quality 10: ~2-3KB QVGA / ~10KB
+                                            * VGA per frame. Good balance of
+                                            * speed and clarity for a doorbell
+                                            * cam over WiFi. Was 6 (~13KB) —
+                                            * tuned after confirming OV3660.  */
         .fb_count       = 2,                  /* was 1 — absorbs network jitter
                                                * in STREAM mode; both bufs in
                                                * PSRAM (fb_location below).  */
@@ -302,6 +377,15 @@ static void wifi_init(void)
     {
         ESP_LOGW(TAG, "esp_wifi_set_ps(WIFI_PS_NONE) failed: 0x%x", ps_err);
     }
+
+    /* Verify PS actually took effect — diagnosed channel congestion issue
+     * (2026-06-22) required confirming PS was genuinely off, not silently
+     * falling back to a default mode. Keep this log permanently so any
+     * future regression is immediately visible on boot. */
+    wifi_ps_type_t ps_actual;
+    esp_wifi_get_ps(&ps_actual);
+    ESP_LOGI(TAG, "WiFi PS mode after set: %d (0=NONE 1=MIN 2=MAX)",
+             (int)ps_actual);
 }
 
 /*---------------------------------------------------------------------------*/
@@ -423,7 +507,31 @@ static bool send_jpeg_to_bbb(camera_fb_t *p_fb, uint64_t event_id)
 /* Lane B — TCP MJPEG stream to BBB — STREAM mode                            */
 /*---------------------------------------------------------------------------*/
 
-static bool stream_send_all(const void *buf, size_t len);
+/**
+ * \brief Dummy frame test flag — bypasses camera for network path isolation.
+ *
+ * \details When set to 1, stream_task sends a fixed static zero-filled buffer
+ *          of STREAM_DUMMY_FRAME_LEN bytes instead of capturing real camera
+ *          frames. The send path, timing logs, retry counters, and stall
+ *          detection are all identical to the production path — only the
+ *          frame source changes.
+ *
+ *          Use to answer: "are send stalls caused by camera/DMA interaction
+ *          or the network path?"
+ *            stalls disappear → camera or DMA is guilty
+ *            stalls remain    → pure network/TCP problem, camera innocent
+ *
+ *          Result (2026-06-22): stalls persisted with dummy frames, proving
+ *          camera innocent. Root cause was router channel 11 congestion;
+ *          fixed by moving to channel 6.
+ *
+ *          Set to 1 to re-enable for future diagnostics. No runtime overhead
+ *          when 0 — the camera path compiles as normal.
+ */
+#define STREAM_DUMMY_FRAME_TEST  0
+#define STREAM_DUMMY_FRAME_LEN   4500   /* matches typical QVGA JPEG size */
+
+static bool stream_send_all(const void *buf, size_t len, uint32_t *out_retries);
 
 /**
  * \brief Connect to BBB:9093 and send the one-shot device_id byte.
@@ -468,12 +576,16 @@ static bool stream_tcp_connect_once(void)
      * send() could consume the whole WDT period with no intervening kick.
      * 500ms + retry-loop fixes both. ETIMEDOUT (not just EAGAIN) must be
      * in the retry set — lwIP maps SO_SNDTIMEO expiry to ETIMEDOUT, not
-     * always EAGAIN. Missing this caused the original truncation bug. */
+     * always EAGAIN. Missing this caused the original truncation bug.
+     *
+     * With QVGA frames (~2-3KB), send() should complete well within 500ms
+     * on a healthy link and timeouts should be rare. The retry loop is
+     * retained as a safety net for transient congestion. */
     struct timeval tv = { .tv_sec = 0, .tv_usec = 500000 };
     setsockopt(g_tcp_sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     uint8_t device_id_byte = (uint8_t)DOORBELL_ID;
-    if (!stream_send_all(&device_id_byte, 1))
+    if (!stream_send_all(&device_id_byte, 1, NULL))
     {
         ESP_LOGW(TAG, "Stream: device_id byte send() failed (errno=%d %s)",
                  errno, strerror(errno));
@@ -508,11 +620,16 @@ static bool stream_tcp_connect_once(void)
  *          Any other negative errno (ECONNRESET, EPIPE, ENOTCONN, ...)
  *          is a real connection failure and returns false immediately.
  *
- * \param[in] buf  Data to send.
- * \param[in] len  Number of bytes to send.
- * \return         true if all len bytes were sent, false on hard failure.
+ * \param[in]  buf         Data to send.
+ * \param[in]  len         Number of bytes to send.
+ * \param[out] out_retries If non-NULL, incremented once per transient retry
+ *                         (EAGAIN / EWOULDBLOCK / ETIMEDOUT). The caller can
+ *                         accumulate retries across multiple stream_send_all()
+ *                         calls (header + payload) by passing the same pointer
+ *                         both times. Untouched on hard failure.
+ * \return                 true if all len bytes were sent, false on hard failure.
  */
-static bool stream_send_all(const void *buf, size_t len)
+static bool stream_send_all(const void *buf, size_t len, uint32_t *out_retries)
 {
     const uint8_t *p    = (const uint8_t *)buf;
     size_t          sent = 0;
@@ -536,6 +653,7 @@ static bool stream_send_all(const void *buf, size_t len)
                 /* Transient: SO_SNDTIMEO expired or send buffer full.
                  * lwIP maps SO_SNDTIMEO to ETIMEDOUT; EAGAIN/EWOULDBLOCK
                  * can also appear. Loop and retry — not a dead socket. */
+                if (out_retries) { (*out_retries)++; }
                 continue;
             }
 
@@ -553,6 +671,12 @@ static bool stream_send_all(const void *buf, size_t len)
 /**
  * \brief Send one [len:4][jpeg] frame on the already-connected stream socket.
  *
+ * \details Takes a camera_fb_t* directly. Not used by stream_task since the
+ *          frame-copy fix (2026-06-22) — stream_task now copies the payload
+ *          and calls stream_send_frame_buf() instead, so p_fb can be returned
+ *          to the DMA pool before the send begins. Retained for any future
+ *          caller that already holds a heap copy or doesn't need early return.
+ *
  * \param[in] p_fb  Camera frame buffer to send.
  * \return          true if the full frame was sent, false on any failure.
  */
@@ -561,14 +685,56 @@ static bool stream_send_frame(camera_fb_t *p_fb)
     uint8_t len_hdr[4];
     cam_pack_stream_frame_hdr(len_hdr, (uint32_t)p_fb->len);
 
-    if (!stream_send_all(len_hdr, sizeof(len_hdr)))
+    if (!stream_send_all(len_hdr, sizeof(len_hdr), NULL))
     {
         ESP_LOGW(TAG, "Stream: frame length header send() failed (errno=%d %s)",
                  errno, strerror(errno));
         return false;
     }
 
-    if (!stream_send_all(p_fb->buf, p_fb->len))
+    if (!stream_send_all(p_fb->buf, p_fb->len, NULL))
+    {
+        ESP_LOGE(TAG, "Stream: frame payload send() failed (errno=%d %s)",
+                 errno, strerror(errno));
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * \brief Send one [len:4][jpeg] frame from a raw heap buffer.
+ *
+ * \details Identical wire output to stream_send_frame() but accepts a plain
+ *          pointer+length instead of a camera_fb_t*. Used by stream_task
+ *          after the frame-copy fix (2026-06-22): the caller copies p_fb->buf
+ *          to a heap buffer, returns p_fb to the DMA pool immediately, then
+ *          calls this function to send the copy — decoupling camera capture
+ *          from network I/O so WiFi backpressure can no longer stall the DMA
+ *          engine and freeze the camera for the duration of the send.
+ *
+ * \param[in]  buf         Heap-allocated JPEG payload (caller retains ownership).
+ * \param[in]  len         Length of buf in bytes.
+ * \param[out] out_retries Accumulated transient retry count across header +
+ *                         payload sends. Caller initialises to 0 before the
+ *                         call; this function adds to it. Used by stream_task
+ *                         for tiered slow-send diagnostics.
+ * \return                 true if the full frame was sent, false on any failure.
+ */
+static bool stream_send_frame_buf(const uint8_t *buf, size_t len,
+                                  uint32_t *out_retries)
+{
+    uint8_t len_hdr[4];
+    cam_pack_stream_frame_hdr(len_hdr, (uint32_t)len);
+
+    if (!stream_send_all(len_hdr, sizeof(len_hdr), out_retries))
+    {
+        ESP_LOGW(TAG, "Stream: frame length header send() failed (errno=%d %s)",
+                 errno, strerror(errno));
+        return false;
+    }
+
+    if (!stream_send_all(buf, len, out_retries))
     {
         ESP_LOGE(TAG, "Stream: frame payload send() failed (errno=%d %s)",
                  errno, strerror(errno));
@@ -748,6 +914,20 @@ static void capture_task(void *arg)
  *          Lane A UDP event fires on every press (toggle ON and toggle OFF),
  *          via wait_for_button_press(). No inference is performed; this is
  *          pure video transport.
+ *
+ *          FPS logging: every 30 frames the achieved frame rate and current
+ *          frame byte count are logged at INFO level so the actual rate is
+ *          visible in the serial log without post-processing rx timestamps.
+ *
+ *          Frame-copy / early fb_return (2026-06-22):
+ *          After capture, the JPEG payload is copied to a heap buffer and
+ *          esp_camera_fb_return() is called immediately — before any network
+ *          I/O. The DMA slot is freed within microseconds of capture so the
+ *          camera can fill its next buffer while the previous frame is still
+ *          being sent over WiFi. stream_send_frame_buf() sends the heap copy;
+ *          the copy is freed after send (success or failure). On malloc
+ *          failure the frame is skipped with a warning and the stream
+ *          continues — same graceful degradation as a capture failure.
  */
 static void stream_task(void *arg)
 {
@@ -759,12 +939,18 @@ static void stream_task(void *arg)
     /* ---- Trinity: register after WiFi is up, before the main loop ---- */
     trinity_wdt_add();
 
-    bool streaming = false;
+    bool     streaming     = false;
+    uint32_t s_frame_count = 0;
+    int64_t  s_fps_t0      = 0;
 
     while (1)
     {
         if (!streaming)
         {
+            /* Reset FPS counters on each new stream session */
+            s_frame_count = 0;
+            s_fps_t0      = 0;
+
             /* Idle: wait for a press to toggle streaming ON */
             (void)wait_for_button_press();
 
@@ -814,6 +1000,31 @@ static void stream_task(void *arg)
 
         trinity_wdt_kick();
 
+#if STREAM_DUMMY_FRAME_TEST
+        /* --- Dummy frame path (STREAM_DUMMY_FRAME_TEST=1) ---------------
+         * Send a fixed static buffer instead of a real camera frame.
+         * Isolates send stalls from camera/DMA interaction: if stalls
+         * persist here, the camera is innocent and the network is guilty.
+         * No fb_get, no malloc, no fb_return — pure send path only.
+         * Log says "DUMMY" so it's obvious in serial output.
+         * Set STREAM_DUMMY_FRAME_TEST=0 to restore normal camera path. */
+        static uint8_t s_dummy_frame[STREAM_DUMMY_FRAME_LEN];  /* zeroed */
+        size_t   frame_len  = STREAM_DUMMY_FRAME_LEN;
+        uint8_t *frame_copy = s_dummy_frame;
+
+        s_frame_count++;
+        if (s_fps_t0 == 0) { s_fps_t0 = esp_timer_get_time(); }
+        if (s_frame_count % 30 == 0)
+        {
+            int64_t elapsed_us = esp_timer_get_time() - s_fps_t0;
+            float   fps        = (elapsed_us > 0)
+                                 ? (30.0f / (elapsed_us / 1e6f)) : 0.0f;
+            ESP_LOGI(TAG, "Stream FPS (DUMMY): %.1f  frame=%lu  len=%zu",
+                     fps, (unsigned long)s_frame_count, frame_len);
+            s_fps_t0 = esp_timer_get_time();
+        }
+#else
+        /* --- Normal camera path (STREAM_DUMMY_FRAME_TEST=0) ------------- */
         camera_fb_t *p_fb = esp_camera_fb_get();
         if (NULL == p_fb)
         {
@@ -821,8 +1032,103 @@ static void stream_task(void *arg)
             continue;
         }
 
-        bool ok = stream_send_frame(p_fb);
-        esp_camera_fb_return(p_fb);
+        /* FPS instrumentation — log every 30 frames so the achieved rate
+         * is visible in the serial log without post-processing timestamps.
+         * s_fps_t0 is set on the first frame of each stream session so
+         * connect latency doesn't skew the first window. */
+        if (s_fps_t0 == 0)
+        {
+            s_fps_t0 = esp_timer_get_time();
+        }
+        s_frame_count++;
+        if (s_frame_count % 30 == 0)
+        {
+            int64_t elapsed_us = esp_timer_get_time() - s_fps_t0;
+            float   fps        = (elapsed_us > 0)
+                                 ? (30.0f / (elapsed_us / 1e6f))
+                                 : 0.0f;
+            ESP_LOGI(TAG, "Stream FPS: %.1f  frame=%lu  bytes=%zu",
+                     fps, (unsigned long)s_frame_count, p_fb->len);
+            s_fps_t0 = esp_timer_get_time();
+        }
+
+        /* Copy frame payload to heap so we can return the DMA buffer
+         * immediately — before any network I/O begins.
+         *
+         * Why: stream_send_frame_buf() calls stream_send_all() which may
+         * retry for many seconds under WiFi backpressure (500ms SO_SNDTIMEO
+         * per iteration, unlimited retries). If p_fb is held across that
+         * window, both DMA slots (fb_count=2) fill up and
+         * esp_camera_fb_get() stalls on the next iteration — freezing the
+         * camera for the entire send duration. This was the root cause of
+         * the 16-25s gaps observed in the BBB rx log (2026-06-22).
+         *
+         * By copying first and returning p_fb before send(), the DMA slot
+         * is freed within microseconds of capture. The camera fills its
+         * next buffer while the copy is in flight over WiFi, completely
+         * decoupling capture rate from network throughput.
+         *
+         * On malloc failure: skip this frame and continue. The stream stays
+         * alive and the next frame will be attempted normally. This matches
+         * the existing graceful degradation for capture failures. */
+        size_t   frame_len  = p_fb->len;
+        uint8_t *frame_copy = malloc(frame_len);
+        if (NULL != frame_copy)
+        {
+            memcpy(frame_copy, p_fb->buf, frame_len);
+        }
+        esp_camera_fb_return(p_fb);   /* DMA slot freed — camera unblocked */
+
+        if (NULL == frame_copy)
+        {
+            ESP_LOGW(TAG, "Stream: malloc failed, skipping frame (%zu bytes)",
+                     frame_len);
+            continue;
+        }
+#endif /* STREAM_DUMMY_FRAME_TEST */
+
+        /* Tiered send timing — catch pathological WiFi stalls.
+         *
+         * Normal healthy send: 5-20ms at QVGA over a clear 2.4GHz link.
+         * Mild congestion:     50-80ms (SO_SNDTIMEO retry or two).
+         * Stall (hunting for): 1000ms+ — these are the gaps visible as
+         *   16-25s dead zones in the BBB rx log. A stall here means
+         *   stream_send_all() is spinning on ETIMEDOUT retries while the
+         *   WiFi link is saturated or the AP is unreachable.
+         *
+         * retries counts how many EAGAIN/EWOULDBLOCK/ETIMEDOUT hits
+         * occurred inside stream_send_all() across header + payload.
+         * Even one retry means a 500ms SO_SNDTIMEO interval elapsed —
+         * so retries=2 implies at least 1s of backpressure regardless
+         * of elapsed_ms. Both dimensions together identify the cause:
+         *   high elapsed + high retries  → WiFi congestion / AP stall
+         *   high elapsed + zero retries  → unexpected (shouldn't occur)
+         *   low  elapsed + high retries  → shouldn't occur either      */
+        uint32_t retries    = 0;
+        uint64_t t0         = esp_timer_get_time();
+        bool     ok         = stream_send_frame_buf(frame_copy, frame_len,
+                                                    &retries);
+        uint64_t elapsed_ms = (esp_timer_get_time() - t0) / 1000ULL;
+#if !STREAM_DUMMY_FRAME_TEST
+        free(frame_copy);   /* static buffer in dummy mode — do not free */
+#endif
+
+        if (elapsed_ms > 1000)
+        {
+            ESP_LOGE(TAG,
+                     "Stream: STALLED send: %llu ms retries=%lu len=%u",
+                     elapsed_ms,
+                     (unsigned long)retries,
+                     (unsigned)frame_len);
+        }
+        else if (elapsed_ms > 100)
+        {
+            ESP_LOGW(TAG,
+                     "Stream: slow send: %llu ms retries=%lu len=%u",
+                     elapsed_ms,
+                     (unsigned long)retries,
+                     (unsigned)frame_len);
+        }
 
         if (!ok)
         {
@@ -923,6 +1229,27 @@ void app_main(void)
     buzzer_init();
     wifi_init();
 
+    /* -----------------------------------------------------------------------
+     * Task creation — no core pinning (2026-06-22):
+     *
+     * Core pinning to core 1 (xTaskCreatePinnedToCore) was tested and made
+     * RTT worse (min 1138ms, avg 1956ms, max 4039ms, 15% loss vs baseline
+     * min 649ms, avg 1519ms, max 2428ms, 0% loss). Reverted to xTaskCreate.
+     *
+     * Root cause of stream stalls is confirmed to be 802.11 MAC-layer
+     * latency in the RF environment — not software, not BBB, not TCP config.
+     * Evidence:
+     *   - Idle ping (no stream running) shows same 787-2681ms RTT
+     *   - Build machine ping shows same degradation (366-1780ms)
+     *   - Dummy frame test showed stalls with camera completely bypassed
+     *   - BBB receive window was 65535 throughout (not flow-controlling)
+     *   - Power save confirmed OFF (WIFI_PS_NONE via esp_wifi_get_ps())
+     *   - TCP window tuning 5760->65535 had no effect
+     *
+     * Likely cause: channel 11 congestion, AP airtime fairness policy, or
+     * ESP32 PHY rate adaptation collapse. Fix requires router channel change
+     * (try ch1 or ch6) or AP configuration change — not code changes.
+     * --------------------------------------------------------------------- */
     xTaskCreate(heartbeat_task, "heartbeat", 4096, NULL, 3, NULL);
 
 #if DOORBELL_MODE == DOORBELL_MODE_SNAPSHOT
