@@ -50,7 +50,7 @@
 /*---------------------------------------------------------------------------*/
 /* Network config                                                               */
 /*---------------------------------------------------------------------------*/
-#define BBB_HOST            "10.0.0.206"  /**< BeagleBone Wifi Hub IP address */
+#define BBB_HOST            "10.0.1.1"  /**< BeagleBone Wifi Hub IP address */
 #define BBB_PORT            9091          /**< BBB TCP port — snapshot mode   */
 #define BBB_STREAM_PORT     9093          /**< BBB TCP port — stream mode     */
 #define RECONNECT_MS        3000          /**< TCP reconnect delay ms         */
