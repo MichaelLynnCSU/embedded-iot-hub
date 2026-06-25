@@ -151,6 +151,34 @@ static void update_shm_cam_liveness(const struct SensorData *p_data)
 
    pthread_mutex_unlock(&shm_data->shm_mutex);
 }
+static void update_shm_reed_liveness(const struct SensorData *p_data)
+{
+   int i = 0;
+
+   pthread_mutex_lock(&shm_data->shm_mutex);
+
+   for (i = 0; i < MAX_REEDS; i++)
+   {
+      shm_data->reed_age_s[i]  = p_data->reed_slots[i].age;
+      shm_data->reed_online[i] = p_data->reed_slots[i].active;
+   }
+
+   pthread_mutex_unlock(&shm_data->shm_mutex);
+}
+static void update_shm_pir_liveness(const struct SensorData *p_data)
+{
+   int i = 0;
+
+   pthread_mutex_lock(&shm_data->shm_mutex);
+
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      shm_data->pir_age_s[i]  = p_data->pir_slots[i].age;
+      shm_data->pir_online[i] = p_data->pir_slots[i].active;
+   }
+
+   pthread_mutex_unlock(&shm_data->shm_mutex);
+}
 
 /******************************************************************************
  * \brief Log each active device's event_id individually from p_data.
@@ -315,4 +343,6 @@ void shm_update_frame(const struct LatestData *p_snapshot,
    update_shm_rooms(p_data);
    update_shm_doorbell_liveness(p_data);
    update_shm_cam_liveness(p_data);
+   update_shm_reed_liveness(p_data);
+   update_shm_pir_liveness(p_data);
 }

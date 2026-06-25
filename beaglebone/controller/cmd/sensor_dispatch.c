@@ -107,6 +107,18 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
    {
       heartbeat_stamp(DEV_MOTOR);
    }
+   if (p_data->age_pir < 30)
+   {
+      heartbeat_stamp(DEV_PIR);
+   }
+   if (p_data->age_lgt < 300)
+   {
+      heartbeat_stamp(DEV_LIGHT);
+   }
+   if (p_data->age_lck < 300)
+   {
+      heartbeat_stamp(DEV_LOCK);
+   }
 
    update_snapshot(p_data);
    get_snapshot(&snapshot);

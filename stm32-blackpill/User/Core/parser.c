@@ -196,6 +196,11 @@ static void parse_reed_sensor(int slot, const char *p_rest)
    {
       ui_stamp_reed_online((uint8_t)slot, now);
    }
+
+   (void)snprintf(tmp, sizeof(tmp),
+                  "[REED] slot=%d st=%d batt=%d age=%d\r\n",
+                  slot, state, batt, age);
+   log_enqueue(tmp);
 }
 
 static void parse_pir_slot(int slot, const char *p_rest)

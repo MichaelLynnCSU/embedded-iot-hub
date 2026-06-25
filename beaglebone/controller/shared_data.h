@@ -52,6 +52,7 @@
 #include <time.h>
 #include <stdint.h>
 #include <pthread.h>
+#include "config.h"
 
 /******************************** CONSTANTS ***********************************/
 
@@ -160,6 +161,14 @@ struct SharedSensorData
    /* Inference camera liveness */
    uint16_t cam_age_s[CAM_COUNT];
    uint8_t  cam_online[CAM_COUNT];
+
+   /* Reed slot liveness */
+   uint16_t reed_age_s[MAX_REEDS];
+   uint8_t  reed_online[MAX_REEDS];
+
+   /* PIR slot liveness */
+   uint16_t pir_age_s[MAX_PIRS];
+   uint8_t  pir_online[MAX_PIRS];
 
    /* Structured event tracing finish line (2026-06-16):
     * Originally: VROOM-assigned event_id from the last sensor frame,

@@ -1,0 +1,17 @@
+[Unit]
+Description=BeagleBone HTTP Observability API
+After=network.target data-controller.service sensor-server.service
+Wants=data-controller.service sensor-server.service
+
+[Service]
+Type=simple
+User=debian
+ExecStart=/usr/bin/python3 /opt/api-server/api_server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
