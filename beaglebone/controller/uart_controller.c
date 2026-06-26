@@ -330,16 +330,16 @@ static void build_and_push(double temp, int motion, int lgt, int lck,
                       i + 1, p_r_state[i], p_r_batt[i], p_r_age[i]);
    }
 
-   pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos, "LGT:%d\n", lgt);
+   pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos, "LGT:%d,%d\n", lgt, age_lgt);
 
    if (0 <= batt_lck)
    {
       pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
-                      "LCK:%d,%d\n", lck, batt_lck);
+                      "LCK:%d,%d,%d\n", lck, batt_lck, age_lck);
    }
    else
    {
-      pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos, "LCK:%d\n", lck);
+      pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos, "LCK:%d,-1,%d\n", lck, age_lck);
    }
 
    if (batt_motor > 0)
@@ -730,18 +730,18 @@ void uart_update_frame(const struct LatestData *p_snapshot,
    }
 
    pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
-                   "LGT:%d\n", p_snapshot->light_state);
+                   "LGT:%d,%d\n", p_snapshot->light_state, p_snapshot->age_lgt);
 
    if (p_snapshot->batt_lck >= 0)
    {
       pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
-                      "LCK:%d,%d\n",
-                      p_snapshot->lock_state, p_snapshot->batt_lck);
+                      "LCK:%d,%d,%d\n",
+                      p_snapshot->lock_state, p_snapshot->batt_lck, p_snapshot->age_lck);
    }
    else
    {
       pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
-                      "LCK:%d\n", p_snapshot->lock_state);
+                      "LCK:%d,-1,%d\n", p_snapshot->lock_state, p_snapshot->age_lck);
    }
 
    if (p_snapshot->batt_motor > 0)
@@ -840,8 +840,9 @@ void uart_update_frame(const struct LatestData *p_snapshot,
       for (i = 0; i < MAX_CAMS; i++)
       {
          pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
-                         "CAM%d:%d\n", i + 1,
-                         p_raw_frame->cam_slots[i].online);
+                         "CAM%d:%d,%d\n", i + 1,
+                         p_raw_frame->cam_slots[i].online,
+                         p_raw_frame->cam_slots[i].age_s);
       }
    }
 
