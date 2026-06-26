@@ -118,8 +118,7 @@
  *          compounding the RF degradation. Send stalls of 500-740ms
  *          observed, FPS dropping to 10-11. Post-person RF settling takes
  *          10-30 seconds, during which stalls continue at baseline frame
- *          sizes. This is the primary motivation for H.264 encode — see
- *          ffmpeg command note below.
+ *          sizes.
  *
  * \note    Logging contract and fflush fix (2026-06-15):
  *          All lifecycle events use flat [STREAM] tags. No cross-process
@@ -138,13 +137,22 @@
  *            [STREAM] ffmpeg_failed device_id=%u
  *            [STREAM] write_failed  ip=%s
  *
+ *          Queue starvation diagnostics:
+ *            [STREAM] queue_empty    ip=%s  (logged once on transition to empty)
+ *            [STREAM] queue_refilled ip=%s  (logged once on transition back)
+ *          These transition-only logs allow correlation of queue starvation
+ *          windows against ESP32 slow-send timestamps without flooding the
+ *          log at QUEUE_WAIT_MS frequency.
+ *
  *          Failure taxonomy is grep-deterministic:
- *            recv_closed  = ESP32 closed socket (expected on stream end or
- *                           send-side timeout — see truncation fix note)
- *            recv_error   = BBB-side transport error (unexpected)
- *            decode_failed = frame rejected before queue push (bad length
- *                           or allocation failure)
- *            write_failed = ffmpeg exited or pipe broken
+ *            recv_closed    = ESP32 closed socket (expected on stream end or
+ *                             send-side timeout — see truncation fix note)
+ *            recv_error     = BBB-side transport error (unexpected)
+ *            decode_failed  = frame rejected before queue push (bad length
+ *                             or allocation failure)
+ *            write_failed   = ffmpeg exited or pipe broken
+ *            queue_empty    = consumer starved; no frames for QUEUE_WAIT_MS
+ *            queue_refilled = consumer recovered after starvation
  *
  *          fflush fix (2026-06-25):
  *          Root cause of residual 100-400ms slow sends: log_msg() called
@@ -159,39 +167,60 @@
  *
  *          Fix: fflush(g_log) removed from log_msg(). Explicit fflush()
  *          calls added only at lifecycle event sites (connect, disconnect,
- *          ffmpeg_start, ffmpeg_failed, write_failed, recv_error). The
- *          per-frame rx_frame log line is disabled entirely — it was the
- *          primary driver of flush frequency and is not needed for
- *          production diagnosis. Re-enable temporarily for frame-level
- *          debugging if needed.
+ *          ffmpeg_start, ffmpeg_failed, write_failed, recv_error,
+ *          queue_empty, queue_refilled). The per-frame rx_frame log line
+ *          is disabled entirely — it was the primary driver of flush
+ *          frequency and is not needed for production diagnosis. Re-enable
+ *          temporarily for frame-level debugging if needed.
  *
- * \note    H.264 encode (2026-06-25):
- *          ffmpeg command changed from MJPEG passthrough (-c:v copy) to
- *          H.264 software encode via libx264. Requires ffmpeg built with
- *          --enable-gpl --enable-libx264 (see meta-bbb bbappend).
+ * \note    H.264 encode — NOT VIABLE on AM335x (2026-06-25):
+ *          libx264 software encode was evaluated and rejected for this
+ *          platform. The motivation was real: MJPEG frame size scales
+ *          directly with scene complexity, and a person at the door
+ *          increases frame size from ~2600 to 4000-5000 bytes exactly when
+ *          the 2.4GHz RF link is already degraded by body absorption.
+ *          H.264 at crf=28 would deliver ~800-1200 bytes/frame regardless
+ *          of scene complexity — a compelling ~4x reduction at worst case.
  *
- *          Motivation: MJPEG frame size scales directly with scene
- *          complexity. A person present at the door (the primary use case)
- *          increases frame size from ~2600 to 4000-5000 bytes, which is
- *          exactly when the 2.4GHz link is already degraded by the person's
- *          body absorbing RF. H.264 at crf=28 delivers equivalent visual
- *          quality at ~800-1200 bytes/frame regardless of scene complexity,
- *          reducing on-air time by ~4x at the worst-case moment.
+ *          However, the AM335x (single Cortex-A8 core) cannot sustain
+ *          libx264 encode at 27.8fps even at -preset ultrafast. Measured
+ *          result on the target hardware:
+ *            speed=0.000473x   drop=2354 frames
+ *          That is 0.047% of realtime — a fundamental throughput ceiling
+ *          violation, not a tuning problem. The encode budget per frame at
+ *          27.8fps is ~36ms. libx264 ultrafast on AM335x at 320x240
+ *          exceeds this budget by roughly 3 orders of magnitude due to:
+ *          - Single core with no parallelism available
+ *          - No hardware media blocks (no VPU, no DSP path for H.264)
+ *          - Memory bandwidth saturation on MJPEG decode + H.264 encode path
+ *          - x264 GOP structure serializes encoding even with thread flags
  *
- *          Encode parameters:
- *          -preset ultrafast   — minimum CPU cost; verified <15% on BBB
- *                                AM335x at 320x240/27.8fps
- *          -tune zerolatency   — disables lookahead buffering; frame in,
- *                                frame out, no pipeline delay
- *          -crf 28             — constant quality; tune down (24-26) for
- *                                higher quality at cost of bitrate
- *          -g 30               — keyframe every 30 frames (~1s at 27.8fps);
- *                                limits seek latency for RTSP clients
+ *          Adding ffmpeg thread flags (-threads N) has no effect: the
+ *          bottleneck is instruction throughput on a single in-order core,
+ *          not thread-level parallelism. Extra threads add overhead without
+ *          increasing throughput.
  *
- *          BBB CPU budget at time of change (with VLC client active):
- *          mediamtx 11.4%, ffmpeg 5.0% (passthrough), doorbell_stream 2.1%
- *          Total ~20% load. ultrafast H.264 encode estimated +10-15%,
- *          leaving comfortable headroom on the single AM335x core.
+ *          The pipeline failure mode when x264 is used:
+ *            ffmpeg falls behind → drop count climbs → RTP output stalls
+ *            → mediamtx i/o timeout after 60s → session destroyed.
+ *          This is indistinguishable from queue starvation in mediamtx logs
+ *          but has a completely different root cause.
+ *
+ *          Production config: -c:v copy (MJPEG passthrough). CPU cost is
+ *          near zero — ffmpeg becomes a pure RTP packetizer. The RF
+ *          degradation under human presence remains a known limitation of
+ *          this hardware class. H.264 encode requires either a SoC with a
+ *          hardware VPU (e.g. AM5729, i.MX8, RK3399) or offloading encode
+ *          to the ESP32-S3 before transmission.
+ *
+ * \note    Queue starvation instrumentation (2026-06-25):
+ *          Transition-only logging added to ffmpeg_thread to correlate
+ *          queue starvation windows against ESP32 slow-send timestamps.
+ *          queue_empty is logged once when the queue first goes empty
+ *          (fq_pop timeout). queue_refilled is logged once when the next
+ *          frame arrives after a starvation period. This answers whether
+ *          mediamtx timeouts coincide with queue starvation (RF dropout)
+ *          or occur while the queue is healthy (investigate ffmpeg pipeline).
  ******************************************************************************/
 
 #include <stdio.h>
@@ -529,8 +558,12 @@ typedef struct
  * \brief Consumer thread: drain queue and write frames to ffmpeg stdin.
  *
  * \details Pops frames from the queue with a bounded wait (QUEUE_WAIT_MS).
- *          On timeout with empty queue, loops immediately — this keeps the
- *          thread alive during ESP32 jitter gaps without blocking indefinitely.
+ *          On timeout with empty queue, logs a queue_empty transition (once)
+ *          and loops — keeping the thread alive during ESP32 jitter gaps.
+ *          When the next frame arrives after a starvation period, logs
+ *          queue_refilled (once). These transition logs allow correlation
+ *          of starvation windows against ESP32 slow-send timestamps without
+ *          flooding the log at QUEUE_WAIT_MS frequency.
  *          Exits when fq_pop() returns -2 (producer done, queue empty).
  *
  *          fwrite() to ffmpeg is done outside the queue mutex so the producer
@@ -541,9 +574,10 @@ typedef struct
  */
 static void *ffmpeg_thread(void *arg)
 {
-   conn_state_t *cs  = (conn_state_t *)arg;
-   uint8_t      *buf = NULL;
-   size_t        len = 0;
+   conn_state_t *cs               = (conn_state_t *)arg;
+   uint8_t      *buf              = NULL;
+   size_t        len              = 0;
+   int           queue_empty_logged = 0;  /**< starvation transition flag    */
 
    while (1)
    {
@@ -551,9 +585,15 @@ static void *ffmpeg_thread(void *arg)
 
       if (-1 == rc)
       {
-         /* Timeout — queue empty but producer still running (ESP32 jitter
-          * gap). Loop immediately. The bounded wait ensures we never block
-          * indefinitely, so ffmpeg stays alive and mediamtx sees activity. */
+         /* Timeout — queue empty, ESP32 jitter gap.
+          * Log the transition to empty once so the starvation window start
+          * is visible in the log without flooding at QUEUE_WAIT_MS rate. */
+         if (!queue_empty_logged)
+         {
+            log_msg("[STREAM] queue_empty ip=%s", cs->peer_ip);
+            fflush(g_log);
+            queue_empty_logged = 1;
+         }
          continue;
       }
 
@@ -561,6 +601,14 @@ static void *ffmpeg_thread(void *arg)
       {
          /* Producer done and queue drained — exit. */
          break;
+      }
+
+      /* Frame received — log recovery from starvation if applicable. */
+      if (queue_empty_logged)
+      {
+         log_msg("[STREAM] queue_refilled ip=%s", cs->peer_ip);
+         fflush(g_log);
+         queue_empty_logged = 0;
       }
 
       /* Write frame to ffmpeg stdin — outside mutex.
@@ -592,8 +640,12 @@ static void *ffmpeg_thread(void *arg)
  *          and pushing them into the queue. On exit (ESP32 disconnect or
  *          error), signals fq_done() and joins ffmpeg_thread before cleanup.
  *
- *          ffmpeg command encodes MJPEG input to H.264 via libx264.
- *          See file header H.264 encode note for parameter rationale.
+ *          ffmpeg command uses MJPEG passthrough (-c:v copy). H.264 software
+ *          encode via libx264 was evaluated and rejected — see file header
+ *          H.264 encode note for full rationale. Short version: libx264
+ *          runs at speed=0.000473x on AM335x (0.047% realtime), dropping
+ *          thousands of frames and triggering mediamtx i/o timeout within
+ *          60 seconds. Not a tuning problem; a hardware ceiling.
  *
  *          Logging contract (flat [STREAM] tags — no cross-process boundary
  *          in this daemon so no directional arrow tags are used):
@@ -605,6 +657,8 @@ static void *ffmpeg_thread(void *arg)
  *            [STREAM] recv_error    — BBB-side transport error
  *            [STREAM] write_failed  — fwrite to ffmpeg stdin failed (in
  *                                     ffmpeg_thread, not here)
+ *            [STREAM] queue_empty   — consumer starved (transition log)
+ *            [STREAM] queue_refilled — consumer recovered (transition log)
  *            [STREAM] disconnect    — connection fully torn down
  *
  *          Per-frame rx_frame logging is intentionally disabled. It was the
@@ -647,26 +701,18 @@ static void *conn_thread(void *arg)
    fflush(g_log);
 
    /* --- 2. Spawn ffmpeg --------------------------------------------- */
-   /* H.264 encode via libx264 (2026-06-25):
-    * Replaces MJPEG passthrough (-c:v copy). See file header for full
-    * rationale. Key benefit: ~4x frame size reduction when a person is
-    * present at the door, exactly when the 2.4GHz RF link is most stressed
-    * by body absorption/reflection.
+   /* MJPEG passthrough (-c:v copy): validated production config for AM335x.
     *
-    * Low-latency flags retained from passthrough config:
+    * H.264 software encode (libx264) was evaluated and rejected.
+    * See file header "H.264 encode — NOT VIABLE on AM335x" note.
+    * Do not attempt to re-enable x264 on this hardware without a measured
+    * encode budget. The failure mode (mediamtx i/o timeout after 60s) is
+    * not obviously attributable to encode overhead in the mediamtx log.
+    *
+    * Low-latency flags:
     * -fflags nobuffer   — pass frames to muxer immediately
     * -flags low_delay   — disable muxer look-ahead buffering
-    * -flush_packets 1   — flush RTP packet buffer after every frame
-    *
-    * H.264 encode flags:
-    * -preset ultrafast  — minimum CPU; ~10-15% on BBB AM335x at 320x240
-    * -tune zerolatency  — no lookahead; frame-in frame-out
-    * -crf 28            — constant quality target; tune to 24-26 for higher
-    *                      quality at cost of bitrate if desired
-    * -g 30              — keyframe every ~1s; limits RTSP client seek latency
-    *
-    * Requires ffmpeg built with --enable-gpl --enable-libx264.
-    * See meta-bbb/recipes-multimedia/ffmpeg/ffmpeg_%.bbappend. */
+    * -flush_packets 1   — flush RTP packet buffer after every frame */
    snprintf(cmd, sizeof(cmd),
          "ffmpeg -loglevel info"
          " -fflags nobuffer"
@@ -674,11 +720,7 @@ static void *conn_thread(void *arg)
          " -analyzeduration 0 -probesize 32"
          " -f mjpeg"
          " -i pipe:0"
-         " -c:v libx264"
-         " -preset ultrafast"
-         " -tune zerolatency"
-         " -crf 28"
-         " -g 30"
+         " -c:v copy"
          " -flush_packets 1"
          " -rtsp_transport tcp"
          " -f rtsp %s%u"
