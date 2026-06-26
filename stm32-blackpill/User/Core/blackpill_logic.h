@@ -102,4 +102,24 @@ static inline uint8_t logic_state_field_count(void)
    return STATE_FIELD_COUNT;
 }
 
+/* ---- Device slot counts ---- */
+#define MAX_PIRS              5u
+#define MAX_TEMPS             4u
+#define MAX_CAMS              3u
+#define MAX_DOORBELL_CAMS     4u
+
+/* ---- Age sentinel ---- */
+#define AGE_UNKNOWN_VAL    0xFFFFu
+
+/* ---- Device ID enum ---- */
+typedef enum
+{
+   eDEV_PIR   = 0u,
+   eDEV_TEMP  = 1u,
+   eDEV_LIGHT = 2u,
+   eDEV_LOCK  = 3u,
+   eDEV_MOTOR = 4u,
+   eDEV_COUNT = 5u,
+} DEVICE_ID_E;
+
 #endif /* BLACKPILL_LOGIC_H */

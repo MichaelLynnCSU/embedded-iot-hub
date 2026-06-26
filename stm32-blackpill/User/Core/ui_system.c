@@ -131,31 +131,62 @@ void create_sys_list(lv_obj_t *p_scr)
 
 void system_list_refresh(void)
 {
-   char    buf[48];
+   char     buf[48];
+   uint32_t now    = HAL_GetTick();
+   uint32_t age_ms = 0ul;
+   uint16_t age_s  = AGE_UNKNOWN_VAL;
    uint8_t row = 0u;
    uint8_t i   = 0u;
 
    /* Row 0 — aggregate TEMP */
-   (void)snprintf(buf, sizeof(buf), "TEMP   %s  %uC %u%%",
-                  g_dev_online[eDEV_TEMP] ? "[ON]" : "[--]",
-                  g_home.temp, g_home.hum);
+   age_ms = (g_dev_last_seen[eDEV_TEMP] > 0ul) ? (now - g_dev_last_seen[eDEV_TEMP]) : 0ul;
+   age_s  = (g_dev_last_seen[eDEV_TEMP] > 0ul) ? (uint16_t)(age_ms / 1000ul) : AGE_UNKNOWN_VAL;
+   if (age_s != AGE_UNKNOWN_VAL)
+      (void)snprintf(buf, sizeof(buf), "TEMP   %s  %uC %u%%  A:%us",
+                     g_dev_online[eDEV_TEMP] ? "[ON]" : "[--]",
+                     g_home.temp, g_home.hum, (unsigned int)age_s);
+   else
+      (void)snprintf(buf, sizeof(buf), "TEMP   %s  %uC %u%%  A:--",
+                     g_dev_online[eDEV_TEMP] ? "[ON]" : "[--]",
+                     g_home.temp, g_home.hum);
    sys_row_set(row++, buf, g_dev_online[eDEV_TEMP]);
 
    /* Row 1 — MOTOR */
-   (void)snprintf(buf, sizeof(buf), "MOTOR  %s  B:%d%%",
-                  g_dev_online[eDEV_MOTOR] ? "[ON]" : "[--]",
-                  g_home.motor_batt);
+   age_ms = (g_dev_last_seen[eDEV_MOTOR] > 0ul) ? (now - g_dev_last_seen[eDEV_MOTOR]) : 0ul;
+   age_s  = (g_dev_last_seen[eDEV_MOTOR] > 0ul) ? (uint16_t)(age_ms / 1000ul) : AGE_UNKNOWN_VAL;
+   if (age_s != AGE_UNKNOWN_VAL)
+      (void)snprintf(buf, sizeof(buf), "MOTOR  %s  B:%d%%  A:%us",
+                     g_dev_online[eDEV_MOTOR] ? "[ON]" : "[--]",
+                     g_home.motor_batt, (unsigned int)age_s);
+   else
+      (void)snprintf(buf, sizeof(buf), "MOTOR  %s  B:%d%%  A:--",
+                     g_dev_online[eDEV_MOTOR] ? "[ON]" : "[--]",
+                     g_home.motor_batt);
    sys_row_set(row++, buf, g_dev_online[eDEV_MOTOR]);
 
    /* Row 2 — LIGHT */
-   (void)snprintf(buf, sizeof(buf), "LIGHT  %s",
-                  g_dev_online[eDEV_LIGHT] ? "[ON]" : "[--]");
+   age_ms = (g_dev_last_seen[eDEV_LIGHT] > 0ul) ? (now - g_dev_last_seen[eDEV_LIGHT]) : 0ul;
+   age_s  = (g_dev_last_seen[eDEV_LIGHT] > 0ul) ? (uint16_t)(age_ms / 1000ul) : AGE_UNKNOWN_VAL;
+   if (age_s != AGE_UNKNOWN_VAL)
+      (void)snprintf(buf, sizeof(buf), "LIGHT  %s  A:%us",
+                     g_dev_online[eDEV_LIGHT] ? "[ON]" : "[--]",
+                     (unsigned int)age_s);
+   else
+      (void)snprintf(buf, sizeof(buf), "LIGHT  %s  A:--",
+                     g_dev_online[eDEV_LIGHT] ? "[ON]" : "[--]");
    sys_row_set(row++, buf, g_dev_online[eDEV_LIGHT]);
 
    /* Row 3 — LOCK */
-   (void)snprintf(buf, sizeof(buf), "LOCK   %s  B:%d%%",
-                  g_dev_online[eDEV_LOCK] ? "[ON]" : "[--]",
-                  g_home.lock_batt);
+   age_ms = (g_dev_last_seen[eDEV_LOCK] > 0ul) ? (now - g_dev_last_seen[eDEV_LOCK]) : 0ul;
+   age_s  = (g_dev_last_seen[eDEV_LOCK] > 0ul) ? (uint16_t)(age_ms / 1000ul) : AGE_UNKNOWN_VAL;
+   if (age_s != AGE_UNKNOWN_VAL)
+      (void)snprintf(buf, sizeof(buf), "LOCK   %s  B:%d%%  A:%us",
+                     g_dev_online[eDEV_LOCK] ? "[ON]" : "[--]",
+                     g_home.lock_batt, (unsigned int)age_s);
+   else
+      (void)snprintf(buf, sizeof(buf), "LOCK   %s  B:%d%%  A:--",
+                     g_dev_online[eDEV_LOCK] ? "[ON]" : "[--]",
+                     g_home.lock_batt);
    sys_row_set(row++, buf, g_dev_online[eDEV_LOCK]);
 
    /* BLE temp slots */
@@ -218,10 +249,17 @@ void system_list_refresh(void)
    {
       if (i < g_reed_count)
       {
-         (void)snprintf(buf, sizeof(buf), "DOOR%-2u %s  B:%d%%",
-                        (unsigned int)(i + 1u),
-                        g_reed_online[i] ? "[ON]" : "[--]",
-                        (int)g_home.reed_batt[i]);
+         if (g_home.reed_age[i] != AGE_UNKNOWN_VAL)
+            (void)snprintf(buf, sizeof(buf), "DOOR%-2u %s  B:%d%%  A:%us",
+                           (unsigned int)(i + 1u),
+                           g_reed_online[i] ? "[ON]" : "[--]",
+                           (int)g_home.reed_batt[i],
+                           (unsigned int)g_home.reed_age[i]);
+         else
+            (void)snprintf(buf, sizeof(buf), "DOOR%-2u %s  B:%d%%  A:--",
+                           (unsigned int)(i + 1u),
+                           g_reed_online[i] ? "[ON]" : "[--]",
+                           (int)g_home.reed_batt[i]);
          lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
          sys_row_set(row, buf, g_reed_online[i]);
       }
@@ -254,9 +292,17 @@ void system_list_refresh(void)
    /* Inference camera slots — always visible, colour driven by g_cam_online[] */
    for (i = 0u; i < (uint8_t)MAX_CAMS; i++)
    {
-      (void)snprintf(buf, sizeof(buf), "CAM%u  %s",
-                     (unsigned int)(i + 1u),
-                     g_cam_online[i] ? "[ON]" : "[--]");
+      age_ms = (g_cam_last_seen[i] > 0ul) ? (now - g_cam_last_seen[i]) : 0ul;
+      age_s  = (g_cam_last_seen[i] > 0ul) ? (uint16_t)(age_ms / 1000ul) : AGE_UNKNOWN_VAL;
+      if (age_s != AGE_UNKNOWN_VAL)
+         (void)snprintf(buf, sizeof(buf), "CAM%u  %s  A:%us",
+                        (unsigned int)(i + 1u),
+                        g_cam_online[i] ? "[ON]" : "[--]",
+                        (unsigned int)age_s);
+      else
+         (void)snprintf(buf, sizeof(buf), "CAM%u  %s  A:--",
+                        (unsigned int)(i + 1u),
+                        g_cam_online[i] ? "[ON]" : "[--]");
       lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
       sys_row_set(row, buf, g_cam_online[i]);
       row++;
