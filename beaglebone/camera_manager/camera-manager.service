@@ -1,0 +1,17 @@
+[Unit]
+Description=Camera Manager Service
+After=network.target
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/home/debian/camera_manager
+ExecStart=/home/debian/camera_manager/camera_manager
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+LimitCORE=infinity
+
+[Install]
+WantedBy=multi-user.target
