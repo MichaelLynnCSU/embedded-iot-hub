@@ -396,8 +396,8 @@ static void send_udp_event(uint64_t event_id)
 {
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons(HUB_UDP_PORT);
-    inet_pton(AF_INET, HUB_HOST, &addr.sin_addr);
+    addr.sin_port   = htons(CAMERA_MANAGER_PORT);
+    inet_pton(AF_INET, CAMERA_MANAGER_HOST, &addr.sin_addr);
 
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0)
@@ -1166,8 +1166,8 @@ static void send_heartbeat(void)
 {
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons(HUB_UDP_PORT);
-    inet_pton(AF_INET, HUB_HOST, &addr.sin_addr);
+    addr.sin_port   = htons(CAMERA_MANAGER_PORT);
+    inet_pton(AF_INET, CAMERA_MANAGER_HOST, &addr.sin_addr);
 
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) { return; }

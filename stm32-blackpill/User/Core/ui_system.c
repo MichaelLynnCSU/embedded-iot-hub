@@ -18,6 +18,35 @@
  *           13..18   DOOR1..DOOR6
  *           19..22   DB0..DB3      (hidden until first DB frame)
  *           23..25   CAM1..CAM3
+ *
+ * \note    Wire age vs last-seen elapsed (2026-06-26):
+ *          Rows 0-3 (TEMP, MOTOR, LIGHT, LOCK) previously computed "A:Xs"
+ *          by taking (now - g_dev_last_seen[]) / 1000. This measured how
+ *          long ago the STM32 received a frame — i.e. local elapsed time —
+ *          NOT the age the ESP32 hub reported for its BLE/WiFi device.
+ *
+ *          Fixed: rows 0-3 now read g_home.{temp,motor,light,lock}_age,
+ *          which are the wire age values stored by ui_set_<dev>_age() in
+ *          parser.c. This matches the pattern already used by PIR slots,
+ *          reed/door slots, and doorbell slots.
+ *
+ *          The green/red dot colour for these rows is still driven by
+ *          g_dev_online[], which is computed in ui_update() from
+ *          g_dev_last_seen[] + HB_TIMEOUT_MS. That is correct and unchanged.
+ *          Wire age and online/offline dot are independent.
+ *
+ *          CAM rows are unaffected: they have no wire age field (the CAM
+ *          frame carries only online=0/1) so they continue using local
+ *          elapsed from g_cam_last_seen[]. That elapsed value is accurate
+ *          for cameras because it is the only age information available.
+ *
+ * \note    TEMP slot age display (2026-06-27):
+ *          TEMP slot rows now show "A:Xs" from g_home.temp_slot_age[],
+ *          matching the pattern used by PIR and reed slot rows.
+ *          Previously the slot rows showed only temp and batt with no age.
+ *          g_home.temp_age (aggregate row 0) is now promoted from slot 0
+ *          inside ui_set_temp_slot_age() in ui.c — see that file's note
+ *          "Slot-to-scalar promotion (2026-06-27)".
  ******************************************************************************/
 
 #include "ui_priv.h"
@@ -118,11 +147,12 @@ void create_sys_list(lv_obj_t *p_scr)
       row++;
    }
 
-   /* Inference camera slots */
+   /* Inference camera slots — hidden until first heartbeat received.
+    * Shown once g_cam_last_seen[] is stamped by ui_stamp_cam_online(). */
    for (i = 0u; i < (uint8_t)MAX_CAMS; i++)
    {
       (void)snprintf(name, sizeof(name), "CAM%u", (unsigned int)(i + 1u));
-      sys_row_create(g_sys_list, &g_sys_rows[row], name, 0u);
+      sys_row_create(g_sys_list, &g_sys_rows[row], name, 1u);
       row++;
    }
 
@@ -131,16 +161,16 @@ void create_sys_list(lv_obj_t *p_scr)
 
 void system_list_refresh(void)
 {
-   char     buf[48];
-   uint32_t now    = HAL_GetTick();
-   uint32_t age_ms = 0ul;
+   char     buf[64];
    uint16_t age_s  = AGE_UNKNOWN_VAL;
-   uint8_t row = 0u;
-   uint8_t i   = 0u;
+   uint8_t  row    = 0u;
+   uint8_t  i      = 0u;
 
-   /* Row 0 — aggregate TEMP */
-   age_ms = (g_dev_last_seen[eDEV_TEMP] > 0ul) ? (now - g_dev_last_seen[eDEV_TEMP]) : 0ul;
-   age_s  = (g_dev_last_seen[eDEV_TEMP] > 0ul) ? (uint16_t)(age_ms / 1000ul) : AGE_UNKNOWN_VAL;
+   /* Row 0 — aggregate TEMP
+    * age_s from g_home.temp_age, promoted from slot 0 by
+    * ui_set_temp_slot_age() in ui.c. See ui.c note "Slot-to-scalar
+    * promotion (2026-06-27)". Dot from g_dev_online[eDEV_TEMP].      */
+   age_s = g_home.temp_age;
    if (age_s != AGE_UNKNOWN_VAL)
       (void)snprintf(buf, sizeof(buf), "TEMP   %s  %uC %u%%  A:%us",
                      g_dev_online[eDEV_TEMP] ? "[ON]" : "[--]",
@@ -151,9 +181,9 @@ void system_list_refresh(void)
                      g_home.temp, g_home.hum);
    sys_row_set(row++, buf, g_dev_online[eDEV_TEMP]);
 
-   /* Row 1 — MOTOR */
-   age_ms = (g_dev_last_seen[eDEV_MOTOR] > 0ul) ? (now - g_dev_last_seen[eDEV_MOTOR]) : 0ul;
-   age_s  = (g_dev_last_seen[eDEV_MOTOR] > 0ul) ? (uint16_t)(age_ms / 1000ul) : AGE_UNKNOWN_VAL;
+   /* Row 1 — MOTOR
+    * Wire age from g_home.motor_age. Dot from g_dev_online[eDEV_MOTOR]. */
+   age_s = g_home.motor_age;
    if (age_s != AGE_UNKNOWN_VAL)
       (void)snprintf(buf, sizeof(buf), "MOTOR  %s  B:%d%%  A:%us",
                      g_dev_online[eDEV_MOTOR] ? "[ON]" : "[--]",
@@ -164,9 +194,9 @@ void system_list_refresh(void)
                      g_home.motor_batt);
    sys_row_set(row++, buf, g_dev_online[eDEV_MOTOR]);
 
-   /* Row 2 — LIGHT */
-   age_ms = (g_dev_last_seen[eDEV_LIGHT] > 0ul) ? (now - g_dev_last_seen[eDEV_LIGHT]) : 0ul;
-   age_s  = (g_dev_last_seen[eDEV_LIGHT] > 0ul) ? (uint16_t)(age_ms / 1000ul) : AGE_UNKNOWN_VAL;
+   /* Row 2 — LIGHT
+    * Wire age from g_home.light_age. Dot from g_dev_online[eDEV_LIGHT]. */
+   age_s = g_home.light_age;
    if (age_s != AGE_UNKNOWN_VAL)
       (void)snprintf(buf, sizeof(buf), "LIGHT  %s  A:%us",
                      g_dev_online[eDEV_LIGHT] ? "[ON]" : "[--]",
@@ -176,9 +206,9 @@ void system_list_refresh(void)
                      g_dev_online[eDEV_LIGHT] ? "[ON]" : "[--]");
    sys_row_set(row++, buf, g_dev_online[eDEV_LIGHT]);
 
-   /* Row 3 — LOCK */
-   age_ms = (g_dev_last_seen[eDEV_LOCK] > 0ul) ? (now - g_dev_last_seen[eDEV_LOCK]) : 0ul;
-   age_s  = (g_dev_last_seen[eDEV_LOCK] > 0ul) ? (uint16_t)(age_ms / 1000ul) : AGE_UNKNOWN_VAL;
+   /* Row 3 — LOCK
+    * Wire age from g_home.lock_age. Dot from g_dev_online[eDEV_LOCK]. */
+   age_s = g_home.lock_age;
    if (age_s != AGE_UNKNOWN_VAL)
       (void)snprintf(buf, sizeof(buf), "LOCK   %s  B:%d%%  A:%us",
                      g_dev_online[eDEV_LOCK] ? "[ON]" : "[--]",
@@ -189,7 +219,9 @@ void system_list_refresh(void)
                      g_home.lock_batt);
    sys_row_set(row++, buf, g_dev_online[eDEV_LOCK]);
 
-   /* BLE temp slots */
+   /* BLE temp slots
+    * Wire age from g_home.temp_slot_age[], set by ui_set_temp_slot_age().
+    * Dot from g_temp_online[]. Both independent — see ui.c note.        */
    for (i = 0u; i < (uint8_t)MAX_TEMPS; i++)
    {
       if (i < g_temp_count_slots)
@@ -199,11 +231,20 @@ void system_list_refresh(void)
          int     deg_frac = (int)(dg % 10);
          if (deg_frac < 0) { deg_frac = -deg_frac; }
 
-         (void)snprintf(buf, sizeof(buf), "TEMP%-2u %s  %d.%dC  B:%d%%",
-                        (unsigned int)(i + 1u),
-                        g_temp_online[i] ? "[ON]" : "[--]",
-                        deg_int, deg_frac,
-                        (int)g_home.temp_slot_batt[i]);
+         age_s = g_home.temp_slot_age[i];
+         if (age_s != AGE_UNKNOWN_VAL)
+            (void)snprintf(buf, sizeof(buf), "TEMP%-2u %s  %d.%dC  B:%d%%  A:%us",
+                           (unsigned int)(i + 1u),
+                           g_temp_online[i] ? "[ON]" : "[--]",
+                           deg_int, deg_frac,
+                           (int)g_home.temp_slot_batt[i],
+                           (unsigned int)age_s);
+         else
+            (void)snprintf(buf, sizeof(buf), "TEMP%-2u %s  %d.%dC  B:%d%%  A:--",
+                           (unsigned int)(i + 1u),
+                           g_temp_online[i] ? "[ON]" : "[--]",
+                           deg_int, deg_frac,
+                           (int)g_home.temp_slot_batt[i]);
          lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
          sys_row_set(row, buf, g_temp_online[i]);
       }
@@ -220,20 +261,16 @@ void system_list_refresh(void)
       if (i < g_pir_count_slots)
       {
          if (g_home.pir_slot_age[i] != AGE_UNKNOWN_VAL)
-         {
             (void)snprintf(buf, sizeof(buf), "PIR%-2u  %s  B:%d%%  A:%us",
                            (unsigned int)(i + 1u),
                            g_pir_online[i] ? "[ON]" : "[--]",
                            (int)g_home.pir_slot_batt[i],
                            (unsigned int)g_home.pir_slot_age[i]);
-         }
          else
-         {
             (void)snprintf(buf, sizeof(buf), "PIR%-2u  %s  B:%d%%  A:--",
                            (unsigned int)(i + 1u),
                            g_pir_online[i] ? "[ON]" : "[--]",
                            (int)g_home.pir_slot_batt[i]);
-         }
          lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
          sys_row_set(row, buf, g_pir_online[i]);
       }
@@ -289,20 +326,23 @@ void system_list_refresh(void)
       row++;
    }
 
-   /* Inference camera slots — always visible, colour driven by g_cam_online[] */
+   /* Inference camera slots — hidden until first wire frame received.
+    * Visibility gated on cam_age == AGE_UNKNOWN_VAL, matching the
+    * pattern used by doorbell, PIR, reed, and temp slot rows.
+    * Age from g_home.cam_age[] (wire age_s from hub), not local
+    * elapsed — consistent with all other device rows.               */
    for (i = 0u; i < (uint8_t)MAX_CAMS; i++)
    {
-      age_ms = (g_cam_last_seen[i] > 0ul) ? (now - g_cam_last_seen[i]) : 0ul;
-      age_s  = (g_cam_last_seen[i] > 0ul) ? (uint16_t)(age_ms / 1000ul) : AGE_UNKNOWN_VAL;
-      if (age_s != AGE_UNKNOWN_VAL)
-         (void)snprintf(buf, sizeof(buf), "CAM%u  %s  A:%us",
-                        (unsigned int)(i + 1u),
-                        g_cam_online[i] ? "[ON]" : "[--]",
-                        (unsigned int)age_s);
-      else
-         (void)snprintf(buf, sizeof(buf), "CAM%u  %s  A:--",
-                        (unsigned int)(i + 1u),
-                        g_cam_online[i] ? "[ON]" : "[--]");
+      if (g_home.cam_age[i] == AGE_UNKNOWN_VAL)
+      {
+         lv_obj_add_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
+         row++;
+         continue;
+      }
+      (void)snprintf(buf, sizeof(buf), "CAM%u  %s  A:%us",
+                     (unsigned int)(i + 1u),
+                     g_cam_online[i] ? "[ON]" : "[--]",
+                     (unsigned int)g_home.cam_age[i]);
       lv_obj_clear_flag(g_sys_rows[row], LV_OBJ_FLAG_HIDDEN);
       sys_row_set(row, buf, g_cam_online[i]);
       row++;

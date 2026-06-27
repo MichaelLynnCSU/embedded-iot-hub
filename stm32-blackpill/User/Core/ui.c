@@ -20,6 +20,40 @@
  *          timeout closes it. Inference fields (person/conf_pct/asset)
  *          are accepted only while pending==1.
  *          See arch spec: doorbell_ui_arch_spec.md
+ *
+ * \note    Wire age setters (2026-06-26):
+ *          ui_set_lock_age(), ui_set_light_age(), ui_set_pir_age(),
+ *          ui_set_motor_age(), ui_set_temp_age() added.
+ *
+ *          These store the age value carried in the incoming ESP32 wire
+ *          frame — i.e. how many seconds ago the ESP32 hub last heard
+ *          from that BLE/WiFi device. They are display-only: shown as
+ *          "A:Xs" in the SYSTEM view rows (ui_system.c).
+ *
+ *          They have NO effect on online/offline status. That is driven
+ *          exclusively by ui_stamp_dev_online() / ui_stamp_reed_online()
+ *          / etc., which write a local HAL_GetTick() timestamp consumed
+ *          by the HB_TIMEOUT_MS watchdog in ui_update().
+ *
+ *          Initialised to AGE_UNKNOWN_VAL (0xFFFF) in g_home so that
+ *          ui_system.c renders "A:--" until the first wire frame arrives.
+ *
+ * \note    Slot-to-scalar promotion (2026-06-27):
+ *          ui_set_temp_slot_age() now promotes slot 0 to g_home.temp_age
+ *          so that ui_system.c row 0 (aggregate TEMP) reflects the wire
+ *          age carried in TEMP1 frames. Previously temp_age was never
+ *          written from the wire — only temp_slot_age[] was written —
+ *          so the SYSTEM view always showed "A:--" for the aggregate row.
+ *
+ *          ui_set_temp_slot_decidegc() similarly promotes slot 0 to
+ *          g_home.temp so the aggregate TEMP row shows the correct value.
+ *
+ *          TWO SEPARATE CONCERNS — do not conflate:
+ *          1. ui_set_<dev>_age(age)       — stores the wire age VALUE for
+ *             display ("A:Xs"). No effect on online/offline dot.
+ *          2. ui_stamp_<dev>_online(tick) — writes a local HAL_GetTick()
+ *             timestamp driving the green/red dot via HB_TIMEOUT_MS.
+ *          Both are called from the same frame handler but are independent.
  ******************************************************************************/
 
 #include "ui_priv.h"
@@ -29,7 +63,6 @@
 #include "main.h"
 
 /************************ SHARED STATE DEFINITIONS ****************************/
-/* All externs declared in ui_priv.h are defined here.                        */
 
 HOME_STATE_X g_home = {
    .pir_slot_batt        = {-1, -1, -1, -1, -1},
@@ -44,6 +77,12 @@ HOME_STATE_X g_home = {
    .doorbell_asset       = {0},
    .doorbell_slot_age    = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF},
    .doorbell_slot_online = {0, 0, 0, 0},
+   .cam_age              = {0xFFFF, 0xFFFF, 0xFFFF},
+   .lock_age             = AGE_UNKNOWN_VAL,
+   .light_age            = AGE_UNKNOWN_VAL,
+   .pir_age              = AGE_UNKNOWN_VAL,
+   .motor_age            = AGE_UNKNOWN_VAL,
+   .temp_age             = AGE_UNKNOWN_VAL,
 };
 
 uint32_t g_dev_last_seen[eDEV_COUNT];
@@ -77,9 +116,6 @@ lv_style_t g_style_online;
 lv_style_t g_style_offline;
 
 /********************* DOORBELL FSM PRIVATE STATE *****************************/
-/* g_doorbell_pending is the sole gate for inference field updates.
- * INVARIANT: only pressed=1 sets it; only timeout clears it.
- * No external caller may read or write these — they are private to ui.c.    */
 
 static uint8_t  g_doorbell_pending    = 0u;
 static uint32_t g_doorbell_last_rx_ms = 0u;
@@ -210,9 +246,6 @@ static void create_nav_bar(lv_obj_t *p_scr)
 
 static void tick_doorbell_timeout(uint32_t now)
 {
-   /* Sole mechanism for closing the doorbell pending window.
-    * Clears g_doorbell_pending and g_home.doorbell so the HOME view
-    * stops rendering the alert. No external caller may do this.       */
    if ((1u == g_doorbell_pending) &&
        ((now - g_doorbell_last_rx_ms) >= DOORBELL_UI_TIMEOUT_MS))
    {
@@ -506,6 +539,16 @@ void ui_set_pir_count_slots(uint8_t count)
 
 void ui_set_temp_count_slots(uint8_t count) { g_temp_count_slots = count; }
 
+/* ---- Online stamping -------------------------------------------------------
+ * Write a local HAL_GetTick() timestamp when a fresh wire frame is received.
+ * These are the ONLY authority for g_dev_online[] / g_reed_online[] / etc.
+ * ui_update() computes online = (now - last_seen) < HB_TIMEOUT_MS.
+ *
+ * SEPARATE CONCERN from ui_set_<dev>_age() — see file-level note.
+ * ui_stamp_*() drives the green/red dot.
+ * ui_set_*_age() drives the "A:Xs" display value.
+ * Never conflate the two.                                                    */
+
 void ui_stamp_dev_online(DEVICE_ID_E dev_id, uint32_t tick)
 {
    if (dev_id < eDEV_COUNT) { g_dev_last_seen[dev_id] = tick; }
@@ -540,9 +583,6 @@ void ui_stamp_cam_online(uint8_t slot, uint32_t tick)
 void ui_set_cam(uint8_t slot)
 {
    if (slot >= (uint8_t)MAX_CAMS) { return; }
-   /* Refresh the row label text. Online colour is applied in
-    * system_list_refresh() using g_cam_online[], which is driven
-    * exclusively by ui_stamp_cam_online() + HB_TIMEOUT_MS.           */
    (void)snprintf(g_cam_buf[slot], sizeof(g_cam_buf[slot]),
                   "CAM%u", (unsigned int)(slot + 1u));
 }
@@ -558,11 +598,27 @@ void ui_set_lock_batt(int8_t val)     { g_home.lock_batt    = val; }
 void ui_set_motor(uint8_t val)        { g_home.motor        = val; }
 void ui_set_motor_batt(int val)       { g_home.motor_batt   = val; }
 
+/* ---- Wire age setters -----------------------------------------------------
+ * Store the age value from the incoming ESP32 wire frame.
+ * Shown as "A:Xs" in SYSTEM view rows (ui_system.c system_list_refresh()).
+ * AGE_UNKNOWN_VAL (0xFFFF) is the initial value; renders as "A:--".
+ *
+ * NO effect on the online/offline dot — that is ui_stamp_*() + HB_TIMEOUT_MS.
+ * See file-level note "TWO SEPARATE CONCERNS".                               */
+void ui_set_lock_age(uint16_t age)    { g_home.lock_age     = age; }
+void ui_set_light_age(uint16_t age)   { g_home.light_age    = age; }
+void ui_set_pir_age(uint16_t age)     { g_home.pir_age      = age; }
+void ui_set_motor_age(uint16_t age)   { g_home.motor_age    = age; }
+void ui_set_temp_age(uint16_t age)    { g_home.temp_age     = age; }
+void ui_set_cam_age(uint8_t slot, uint16_t age)
+{
+   if (slot < (uint8_t)MAX_CAMS) { g_home.cam_age[slot] = age; }
+}
+
 /* ---- Doorbell FSM entry points ------------------------------------------- */
 
 void ui_set_doorbell(uint8_t pressed, uint8_t device_id)
 {
-   /* Legacy shim — zero inference fields */
    ui_set_doorbell_result(pressed, device_id, 0u, 0u, "");
 }
 
@@ -574,9 +630,6 @@ void ui_set_doorbell_result(uint8_t pressed, uint8_t device_id,
 
    if (0u != pressed)
    {
-      /* Open (or re-open) the pending window and snapshot trigger fields.
-       * Clear asset so ui_home_update() shows PENDING... until the
-       * five-field inference frame arrives.                            */
       g_doorbell_pending        = 1u;
       g_doorbell_last_rx_ms     = now;
       g_home.doorbell           = 1u;
@@ -588,11 +641,6 @@ void ui_set_doorbell_result(uint8_t pressed, uint8_t device_id,
 
    if (1u == g_doorbell_pending)
    {
-      /* Late inference binding — accepted while event window is open.
-       * press→inference delta is ~6 s: the STM32 fires pressed=1 immediately
-       * but the BBB inference pipeline (capture → model → SHM → UART) adds
-       * latency. Result arrives in the same bundle as pressed=1 via
-       * doorbell_inject_pending(). Timeout restarts from result arrival. */
       g_home.doorbell_person   = person;
       g_home.doorbell_conf_pct = conf_pct;
       if (NULL != p_asset && '\0' != p_asset[0])
@@ -600,7 +648,7 @@ void ui_set_doorbell_result(uint8_t pressed, uint8_t device_id,
          (void)strncpy(g_home.doorbell_asset, p_asset,
                        sizeof(g_home.doorbell_asset) - 1u);
          g_home.doorbell_asset[sizeof(g_home.doorbell_asset) - 1u] = '\0';
-         g_doorbell_last_rx_ms = now;  /* restart timeout from result arrival */
+         g_doorbell_last_rx_ms = now;
       }
    }
 }
@@ -658,7 +706,12 @@ void ui_set_reed_age(uint8_t slot, uint16_t age)
 
 void ui_set_temp_slot_decidegc(uint8_t slot, int16_t val)
 {
-   if (slot < (uint8_t)MAX_TEMPS) { g_home.temp_slot_decidegc[slot] = val; }
+   if (slot >= (uint8_t)MAX_TEMPS) { return; }
+   g_home.temp_slot_decidegc[slot] = val;
+   /* Promote slot 0 to the aggregate scalar read by ui_system.c row 0
+    * and ui_home_update(). Slot 0 is the primary sensor in most
+    * deployments. See file-level note "Slot-to-scalar promotion".     */
+   if (0u == slot) { g_home.temp = (uint8_t)(val / 10); }
 }
 
 void ui_set_temp_slot_batt(uint8_t slot, int8_t batt)
@@ -668,7 +721,14 @@ void ui_set_temp_slot_batt(uint8_t slot, int8_t batt)
 
 void ui_set_temp_slot_age(uint8_t slot, uint16_t age)
 {
-   if (slot < (uint8_t)MAX_TEMPS) { g_home.temp_slot_age[slot] = age; }
+   if (slot >= (uint8_t)MAX_TEMPS) { return; }
+   g_home.temp_slot_age[slot] = age;
+   /* Promote slot 0 to the aggregate scalar so ui_system.c row 0
+    * (aggregate TEMP) displays the wire age from TEMP1 frames.
+    * Without this, temp_age stays AGE_UNKNOWN_VAL permanently because
+    * parse_temp_slot() calls ui_set_temp_slot_age() but never
+    * ui_set_temp_age() directly. See file-level note.                 */
+   if (0u == slot) { g_home.temp_age = age; }
 }
 
 uint8_t ui_get_dev_online(DEVICE_ID_E dev_id)

@@ -17,7 +17,7 @@
  *          Trigger: GPIO13 button press (active low, internal pull-up disabled
  *          — LED+resistor circuit acts as external pullup).
  *          Destination: BBB port 9091 (separate from S3 PIR cam on 9090).
- *          Hub UDP event: HUB_HOST:HUB_UDP_PORT on each button press.
+ *          Camera manager UDP: CAMERA_MANAGER_HOST:CAMERA_MANAGER_PORT.
  *
  * \note    Internal pullup disabled on GPIO13 (GPIO_PULLUP_DISABLE).
  *          External LED+resistor circuit acts as pullup. Internal pullup
@@ -54,8 +54,8 @@
 #define BBB_PORT            9091          /**< BBB TCP port — snapshot mode   */
 #define BBB_STREAM_PORT     9093          /**< BBB TCP port — stream mode     */
 #define RECONNECT_MS        3000          /**< TCP reconnect delay ms         */
-#define HUB_HOST            "10.0.0.190"  /**< Hub static IP                  */
-#define HUB_UDP_PORT        9092          /**< Hub UDP doorbell event port    */
+#define CAMERA_MANAGER_HOST "10.0.1.1"    /**< BBB camera manager (wlu1 AP)   */
+#define CAMERA_MANAGER_PORT 9094          /**< BBB camera manager UDP port    */
 
 /*---------------------------------------------------------------------------*/
 /* Mode config                                                                  */

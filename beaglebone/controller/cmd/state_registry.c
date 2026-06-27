@@ -78,10 +78,7 @@ void update_snapshot(const struct SensorData *p_data)
 
    for (i = 0; i < MAX_REEDS; i++)
    {
-      if (p_data->reed_slots[i].active)
-      {
-         central_ledger.reed_slots[i] = p_data->reed_slots[i];
-      }
+      central_ledger.reed_slots[i] = p_data->reed_slots[i];
    }
 
    for (i = 0; i < MAX_PIRS; i++)

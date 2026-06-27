@@ -68,6 +68,36 @@ typedef struct _TILE_X
    lv_obj_t *p_status;
 } TILE_X;
 
+/*
+ * TWO KINDS OF AGE — DO NOT CONFUSE THEM
+ * =======================================
+ *
+ * 1. WIRE AGE  (fields: lock_age, light_age, pir_age, motor_age, temp_age,
+ *               pir_slot_age[], temp_slot_age[], reed_age[],
+ *               doorbell_slot_age[])
+ *    - The age value carried in the incoming UART wire frame from the ESP32.
+ *    - Represents how many seconds ago the ESP32 hub last heard from that
+ *      BLE/WiFi device. Set by ui_set_lock_age(), ui_set_light_age(), etc.
+ *    - Used for display only: shown as "A:Xs" in the SYSTEM view rows.
+ *    - AGE_UNKNOWN_VAL (0xFFFF) means the hub has never seen the device.
+ *    - Does NOT drive online/offline dot color — that is the job of
+ *      last-seen stamps (see below).
+ *
+ * 2. ONLINE LAST-SEEN STAMP  (arrays: g_dev_last_seen[], g_reed_last_seen[],
+ *                              g_pir_last_seen[], g_temp_last_seen[],
+ *                              g_doorbell_last_seen[], g_cam_last_seen[])
+ *    - A local HAL_GetTick() timestamp written by ui_stamp_dev_online(),
+ *      ui_stamp_reed_online(), etc., called from parser.c when a fresh
+ *      wire frame arrives with age < WIRE_AGE_ONLINE_THRESHOLD_S.
+ *    - Used ONLY to compute g_dev_online[] / g_reed_online[] / etc. in
+ *      ui_update(): online = (now - last_seen) < HB_TIMEOUT_MS.
+ *    - Drives the green/red dot color and all_online flag.
+ *    - NOT shown directly in the UI — it is an internal liveness clock.
+ *
+ * Rule of thumb:
+ *   "A:Xs" on the display  → wire age field
+ *   green/red dot          → last-seen stamp + HB_TIMEOUT_MS watchdog
+ */
 typedef struct _HOME_STATE_X
 {
    uint8_t  temp;
@@ -75,6 +105,15 @@ typedef struct _HOME_STATE_X
    uint32_t pir_count;
    uint8_t  pir_batt;
    uint8_t  pir_occupied;
+
+   /* Wire ages for scalar (non-slot) devices.
+    * Set by ui_set_<dev>_age(). AGE_UNKNOWN_VAL = never seen. */
+   uint16_t pir_age;    /**< wire age of aggregate PIR from ESP32   */
+   uint16_t light_age;  /**< wire age of smart light from ESP32     */
+   uint16_t lock_age;   /**< wire age of smart lock from ESP32      */
+   uint16_t motor_age;  /**< wire age of motor from ESP32           */
+   uint16_t temp_age;   /**< wire age of aggregate temp from ESP32  */
+
    uint32_t pir_slot_count[MAX_PIRS];
    int8_t   pir_slot_batt[MAX_PIRS];
    uint16_t pir_slot_age[MAX_PIRS];
@@ -97,6 +136,7 @@ typedef struct _HOME_STATE_X
    char     doorbell_asset[20];           /* 16-char ISO token + null, 3 bytes margin */
    uint16_t doorbell_slot_age[MAX_DOORBELL_CAMS];
    uint8_t  doorbell_slot_online[MAX_DOORBELL_CAMS];
+   uint16_t cam_age[MAX_CAMS];            /**< wire age from CAM frame age_s field */
 } HOME_STATE_X;
 
 /************************ EXTERN SHARED STATE *********************************/
@@ -173,3 +213,4 @@ void create_sys_list(lv_obj_t *p_scr);
 void system_list_refresh(void);
 
 #endif /* UI_PRIV_H_ */
+

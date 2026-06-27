@@ -34,6 +34,26 @@
  *          press->inference delta is 1-4 s by design; the UI pending window
  *          (g_doorbell_pending + DOORBELL_UI_TIMEOUT_MS) absorbs this gap.
  *          ui_set_doorbell() is retained as a zero-inference shim.
+ *
+ * \note    Wire age vs online last-seen (2026-06-26):
+ *          TWO SEPARATE CONCEPTS — do not confuse them:
+ *
+ *          WIRE AGE — ui_set_lock_age(), ui_set_light_age(), ui_set_pir_age(),
+ *          ui_set_motor_age(), ui_set_temp_age():
+ *            The age value carried in the incoming UART frame from the ESP32.
+ *            Represents seconds since the ESP32 hub last heard from that
+ *            device over BLE/WiFi. Stored in g_home.*_age fields.
+ *            Used for display only ("A:Xs" in SYSTEM view).
+ *            AGE_UNKNOWN_VAL (0xFFFF) = hub has never seen the device.
+ *            Does NOT drive the online/offline dot — that is last-seen stamps.
+ *
+ *          ONLINE LAST-SEEN STAMP — ui_stamp_dev_online(), ui_stamp_reed_online(),
+ *          ui_stamp_pir_online(), ui_stamp_temp_online(), etc.:
+ *            A local HAL_GetTick() timestamp written when a fresh wire frame
+ *            arrives (age < WIRE_AGE_ONLINE_THRESHOLD_S in parser.c).
+ *            Used in ui_update() to compute g_dev_online[] via HB_TIMEOUT_MS.
+ *            Drives the green/red dot and all_online flag.
+ *            NOT shown directly in the UI.
  ******************************************************************************/
 
 #ifndef INCLUDE_UI_H_
@@ -109,12 +129,28 @@ void    ui_set_reed_count(uint8_t count);
 uint8_t ui_get_pir_count_slots(void);
 void    ui_set_pir_count_slots(uint8_t count);
 
-/* ---- Online stamping ---- */
+/* ---- Online stamping ----
+ * Write a local HAL_GetTick() timestamp when a fresh wire frame is received.
+ * These drive g_dev_online[] / g_reed_online[] / etc. via HB_TIMEOUT_MS.
+ * They are NOT wire ages and are NOT shown in the UI directly.
+ * See "Wire age vs online last-seen" note above.                            */
 void ui_stamp_dev_online(DEVICE_ID_E dev_id, uint32_t tick);
 void ui_stamp_reed_online(uint8_t slot, uint32_t tick);
 void ui_stamp_pir_online(uint8_t slot, uint32_t tick);
 void ui_stamp_doorbell_online(uint8_t slot, uint32_t tick);
 void ui_stamp_cam_online(uint8_t slot, uint32_t tick);
+
+/* ---- Wire age setters ----
+ * Store the age value from the incoming ESP32 wire frame for display.
+ * These are shown as "A:Xs" in the SYSTEM view rows.
+ * They do NOT affect online/offline status — that is stamp functions above.
+ * AGE_UNKNOWN_VAL (0xFFFF) means the hub has never seen the device.
+ * See "Wire age vs online last-seen" note above.                            */
+void ui_set_lock_age(uint16_t age);
+void ui_set_light_age(uint16_t age);
+void ui_set_pir_age(uint16_t age);
+void ui_set_motor_age(uint16_t age);
+void ui_set_temp_age(uint16_t age);
 
 /* ---- Sensor state setters ---- */
 void ui_set_temp(uint8_t val);
@@ -147,6 +183,7 @@ void ui_set_doorbell_slot_online(uint8_t slot, uint8_t online);
  * dual-authority state. Liveness is driven exclusively by ui_stamp_cam_online()
  * and the HB_TIMEOUT_MS watchdog in ui_tick().                               */
 void ui_set_cam(uint8_t slot);
+void ui_set_cam_age(uint8_t slot, uint16_t age); /**< wire age_s from CAM frame; AGE_UNKNOWN_VAL until first frame */
 
 /* ---- Reed setters ---- */
 void ui_set_reed_state(uint8_t slot, uint8_t state);
