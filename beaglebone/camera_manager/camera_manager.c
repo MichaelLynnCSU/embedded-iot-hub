@@ -320,6 +320,7 @@ int main(void)
    int                sock     = -1;
    struct sockaddr_in bind_addr = {0};
 
+   setvbuf(stdout, NULL, _IOLBF, 0);
    signal(SIGINT,  sig_handler);
    signal(SIGTERM, sig_handler);
 
