@@ -38,7 +38,6 @@
 #define MAX_ROOMS          10  /**< max room sensors per frame */
 #define MAX_REEDS          6   /**< must match ESP32 and controller */
 #define MAX_PIRS           5   /**< must match ESP32 and controller */
-#define MAX_DOORBELL_CAMS  4   /**< must match ESP32 and controller */
 #define MAX_CAMS           3   /**< inference cameras — must match controller */
 
 #define REED_NAME_LEN  16  /**< reed BLE name buffer size */
@@ -48,22 +47,6 @@
 
 #define AGE_MAX     0xFFFEu /**< maximum reportable age */
 #define AGE_UNKNOWN 0xFFFFu /**< age sentinel: never seen */
-
-/** \brief Doorbell camera slot — packed wire format. */
-struct __attribute__((packed)) DoorbellSlotData
-{
-   uint16_t age_s;   /*!< seconds since last heartbeat/press, 0xFFFF=never */
-   uint8_t  online;  /*!< 1=alive within threshold, 0=stale or never seen  */
-   uint8_t  _pad;
-};
-
-/** \brief Inference camera slot — packed wire format. */
-struct __attribute__((packed)) CamSlotData
-{
-   uint16_t age_s;   /*!< seconds since last heartbeat, 0xFFFF=never */
-   uint8_t  online;  /*!< 1=alive within threshold, 0=stale          */
-   uint8_t  _pad;
-};
 
 /** \brief Reed sensor slot — packed wire format. */
 struct __attribute__((packed)) ReedSlotData
@@ -144,10 +127,6 @@ struct SensorData
    struct TempSlotData temp_slots[MAX_TEMPS];
    uint8_t             temp_count;
 
-   struct DoorbellSlotData doorbell_slots[MAX_DOORBELL_CAMS];
-   uint8_t                 doorbell_count;
-
-   struct CamSlotData cam_slots[MAX_CAMS];
 
    uint64_t lock_event_id;   /*!< last vroom event_id for BLE lock  */
    uint64_t light_event_id;  /*!< last vroom event_id for BLE light */

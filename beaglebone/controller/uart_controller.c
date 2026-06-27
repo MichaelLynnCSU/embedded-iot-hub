@@ -770,17 +770,6 @@ void uart_update_frame(const struct LatestData *p_snapshot,
                       p_snapshot->temp_slots[i].age);
    }
 
-   if (NULL != p_raw_frame)
-   {
-      for (i = 0; i < MAX_DOORBELL_CAMS; i++)
-      {
-         pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
-                         "DB%d:%d,%d\n",
-                         i,
-                         p_raw_frame->doorbell_slots[i].age_s,
-                         p_raw_frame->doorbell_slots[i].online);
-      }
-   }
 
    doorbell_pending_check();
 
@@ -830,21 +819,6 @@ void uart_update_frame(const struct LatestData *p_snapshot,
                       doorbell_pressed, doorbell_device_id);
    }
 
-   /* CAM liveness — read directly from p_raw_frame->cam_slots[i].online.
-    * Previously read from shm_data->cam_online[] under mutex. Confirmed
-    * equivalent: shm_updater.c line 143 is a direct assignment with no
-    * transformation. Mutex around this loop removed. See file header
-    * note "SHM read path (dst=blackpill_lcd)".                        */
-   if (NULL != p_raw_frame)
-   {
-      for (i = 0; i < MAX_CAMS; i++)
-      {
-         pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
-                         "CAM%d:%d,%d\n", i + 1,
-                         p_raw_frame->cam_slots[i].online,
-                         p_raw_frame->cam_slots[i].age_s);
-      }
-   }
 
    /* Per-device event_id lines, sourced directly from p_raw_frame
     * (SensorData) — see emit_device_event_ids() and file header note

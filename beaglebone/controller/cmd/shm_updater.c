@@ -122,35 +122,6 @@ static void update_shm_rooms(const struct SensorData *p_data)
    pthread_mutex_unlock(&shm_data->shm_mutex);
 }
 
-static void update_shm_doorbell_liveness(const struct SensorData *p_data)
-{
-   int i = 0;
-
-   pthread_mutex_lock(&shm_data->shm_mutex);
-
-   for (i = 0; i < MAX_DOORBELL_CAMS; i++)
-   {
-      shm_data->doorbell_age_s[i]  = p_data->doorbell_slots[i].age_s;
-      shm_data->doorbell_online[i] = p_data->doorbell_slots[i].online;
-   }
-
-   pthread_mutex_unlock(&shm_data->shm_mutex);
-}
-
-static void update_shm_cam_liveness(const struct SensorData *p_data)
-{
-   int i = 0;
-
-   pthread_mutex_lock(&shm_data->shm_mutex);
-
-   for (i = 0; i < MAX_CAMS; i++)
-   {
-      shm_data->cam_age_s[i]  = p_data->cam_slots[i].age_s;
-      shm_data->cam_online[i] = p_data->cam_slots[i].online;
-   }
-
-   pthread_mutex_unlock(&shm_data->shm_mutex);
-}
 static void update_shm_reed_liveness(const struct SensorData *p_data)
 {
    int i = 0;
@@ -341,8 +312,6 @@ void shm_update_frame(const struct LatestData *p_snapshot,
    handle_get_latest(p_snapshot, "pipe_ingress");
    log_shm_device_event_ids(p_data);
    update_shm_rooms(p_data);
-   update_shm_doorbell_liveness(p_data);
-   update_shm_cam_liveness(p_data);
    update_shm_reed_liveness(p_data);
    update_shm_pir_liveness(p_data);
 }

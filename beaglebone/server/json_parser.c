@@ -280,75 +280,6 @@ static void parse_temp_slots(struct json_object *p_temps_arr,
 }
 
 /******************************************************************************
- * \brief Parse "doorbells" JSON array into p_data->doorbell_slots[].
- ******************************************************************************/
-static void parse_doorbell_slots(struct json_object *p_doorbells_arr,
-                                  struct SensorData  *p_data)
-{
-   int                 n      = 0;
-   int                 i      = 0;
-   int                 id     = 0;
-   int                 age    = 0;
-   struct json_object *p_r    = NULL;
-   struct json_object *p_jid  = NULL;
-   struct json_object *p_jval = NULL;
-
-   n = json_object_array_length(p_doorbells_arr);
-
-   for (i = 0; i < n; i++)
-   {
-      p_r = json_object_array_get_idx(p_doorbells_arr, i);
-      if (!json_object_object_get_ex(p_r, "id", &p_jid)) { continue; }
-      id = json_object_get_int(p_jid);
-      if ((0 > id) || (id >= MAX_DOORBELL_CAMS)) { continue; }
-
-      if (json_object_object_get_ex(p_r, "age_s", &p_jval))
-      {
-         age = json_object_get_int(p_jval);
-         p_data->doorbell_slots[id].age_s =
-            (0 > age) ? AGE_UNKNOWN : (uint16_t)age;
-      }
-
-      if (json_object_object_get_ex(p_r, "online", &p_jval))
-         p_data->doorbell_slots[id].online = (uint8_t)json_object_get_int(p_jval);
-   }
-}
-
-/******************************************************************************
- * \brief Parse "cams" JSON array into p_data->cam_slots[].
- ******************************************************************************/
-static void parse_cam_slots(struct json_object *p_cams_arr,
-                             struct SensorData  *p_data)
-{
-   int                 n      = 0;
-   int                 i      = 0;
-   int                 id     = 0;
-   int                 age    = 0;
-   struct json_object *p_r    = NULL;
-   struct json_object *p_jid  = NULL;
-   struct json_object *p_jval = NULL;
-
-   n = json_object_array_length(p_cams_arr);
-
-   for (i = 0; i < n; i++)
-   {
-      p_r = json_object_array_get_idx(p_cams_arr, i);
-      if (!json_object_object_get_ex(p_r, "id", &p_jid)) { continue; }
-      id = json_object_get_int(p_jid);
-      if ((0 > id) || (id >= MAX_CAMS)) { continue; }
-
-      if (json_object_object_get_ex(p_r, "age_s", &p_jval))
-      {
-         age = json_object_get_int(p_jval);
-         p_data->cam_slots[id].age_s = (0 > age) ? AGE_UNKNOWN : (uint16_t)age;
-      }
-
-      if (json_object_object_get_ex(p_r, "online", &p_jval))
-         p_data->cam_slots[id].online = (uint8_t)json_object_get_int(p_jval);
-   }
-}
-
-/******************************************************************************
  * \brief Parse room entries from JSON rooms array into SensorData.
  ******************************************************************************/
 static void parse_rooms(struct json_object *p_rooms_arr,
@@ -535,22 +466,6 @@ static void emit_telemetry(const struct SensorData *p_data, uint32_t seq)
                       i + 1, p_data->temp_slots[i].batt);
    }
 
-   for (i = 0; i < MAX_CAMS; i++)
-   {
-      pos += snprintf(buf + pos, sizeof(buf) - pos,
-                      " cam%d=%d cam%d_age=%d",
-                      i, p_data->cam_slots[i].online,
-                      i, fmt_age(p_data->cam_slots[i].age_s));
-   }
-
-   for (i = 0; i < MAX_DOORBELL_CAMS; i++)
-   {
-      pos += snprintf(buf + pos, sizeof(buf) - pos,
-                      " db%d=%d db%d_age=%d",
-                      i, p_data->doorbell_slots[i].online,
-                      i, fmt_age(p_data->doorbell_slots[i].age_s));
-   }
-
    log_telemetry("%s", buf);
 }
 
@@ -674,19 +589,6 @@ void process_json(const char *p_json_body)
    for (i = 0; i < MAX_TEMPS; i++)
       data.temp_slots[i].event_id = 0;
 
-   for (i = 0; i < MAX_DOORBELL_CAMS; i++)
-   {
-      data.doorbell_slots[i].age_s  = AGE_UNKNOWN;
-      data.doorbell_slots[i].online = 0;
-   }
-   data.doorbell_count = MAX_DOORBELL_CAMS;
-
-   for (i = 0; i < MAX_CAMS; i++)
-   {
-      data.cam_slots[i].age_s  = AGE_UNKNOWN;
-      data.cam_slots[i].online = 0;
-   }
-
    data.lock_event_id  = 0;
    data.light_event_id = 0;
 
@@ -713,8 +615,6 @@ void process_json(const char *p_json_body)
    if (json_object_object_get_ex(p_telemetry, "pirs",       &p_obj)) parse_pir_slots(p_obj,      &data);
    if (json_object_object_get_ex(p_telemetry, "temp_count", &p_obj)) data.temp_count = (uint8_t)json_object_get_int(p_obj);
    if (json_object_object_get_ex(p_telemetry, "temps",      &p_obj)) parse_temp_slots(p_obj,     &data);
-   if (json_object_object_get_ex(p_telemetry, "doorbells",  &p_obj)) parse_doorbell_slots(p_obj, &data);
-   if (json_object_object_get_ex(p_telemetry, "cams",       &p_obj)) parse_cam_slots(p_obj,      &data);
    if (json_object_object_get_ex(p_telemetry, "rooms",      &p_obj)) parse_rooms(p_obj,          &data);
 
    /* ---- Events[] — hub delta gate, novelty guaranteed by protocol ---- */

@@ -72,21 +72,7 @@ struct __attribute__((packed)) TempSlotData
    uint64_t event_id;  /*!< last vroom event_id for this slot */
 };
 
-/** \warning Must match sensor_types.h DoorbellSlotData exactly */
-struct __attribute__((packed)) DoorbellSlotData
-{
-   uint16_t age_s;
-   uint8_t  online;
-   uint8_t  _pad;
-};
 
-/** \warning Must match sensor_types.h CamSlotData exactly */
-struct __attribute__((packed)) CamSlotData
-{
-   uint16_t age_s;   /*!< seconds since last heartbeat, 0xFFFF=never */
-   uint8_t  online;  /*!< 1=alive within threshold, 0=stale          */
-   uint8_t  _pad;    /*!< alignment padding                           */
-};
 
 /**
  * \brief Pipe wire format — ingress from sensor_server.
@@ -125,9 +111,6 @@ struct SensorData
    uint8_t                 pir_count;
    struct TempSlotData     temp_slots[MAX_TEMPS];
    uint8_t                 temp_count;
-   struct DoorbellSlotData doorbell_slots[MAX_DOORBELL_CAMS];
-   uint8_t                 doorbell_count;
-   struct CamSlotData      cam_slots[MAX_CAMS];
 
    uint64_t lock_event_id;   /*!< last vroom event_id for BLE lock  */
    uint64_t light_event_id;  /*!< last vroom event_id for BLE light */

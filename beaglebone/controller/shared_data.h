@@ -64,8 +64,6 @@
 #define ROOM_NAME_SZ      32  /**< room name string buffer size */
 #define ROOM_STATE_SZ     16  /**< room state string buffer size */
 #define ROOM_LOC_SZ       32  /**< room location string buffer size */
-#define MAX_DOORBELL_CAMS 4   /**< number of doorbell camera slots */
-#define CAM_COUNT         3   /**< number of inference cameras */
 
 /** \brief Alert severity levels */
 #define ALERT_SEVERITY_LOW    1
@@ -153,14 +151,6 @@ struct SharedSensorData
    uint8_t  doorbell_pressed;
    uint8_t  doorbell_device_id;
    long     doorbell_timestamp;
-
-   /* Doorbell per-cam liveness */
-   uint16_t doorbell_age_s[MAX_DOORBELL_CAMS];
-   uint8_t  doorbell_online[MAX_DOORBELL_CAMS];
-
-   /* Inference camera liveness */
-   uint16_t cam_age_s[CAM_COUNT];
-   uint8_t  cam_online[CAM_COUNT];
 
    /* Reed slot liveness */
    uint16_t reed_age_s[MAX_REEDS];

@@ -32,7 +32,6 @@
 #include "nvs_flash.h"
 #include "driver/uart.h"
 #include "config.h"
-#include "udp_device_ingress.h"
 #include "ble_manager.h"
 #include "wifi_manager.h"
 #include "tcp_manager.h"
@@ -165,7 +164,6 @@ static void create_tasks(void)
    { trinity_log_event("EVENT: TASK_FAIL | AWS\n"); }
 
    vTaskDelay(pdMS_TO_TICKS(TASK_CREATION_DELAY_MS));
-   udp_device_ingress_start(g_wifi_eg);
 
    ESP_LOGI(TAG, "All tasks created");
    ESP_LOGI(TAG, "Free heap after task creation: %lu bytes",
