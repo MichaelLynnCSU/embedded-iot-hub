@@ -719,8 +719,8 @@ static void heartbeat_task(void *arg)
     while (!g_wifi_up) { vTaskDelay(pdMS_TO_TICKS(500)); }
 
     addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(HUB_HEARTBEAT_PORT);
-    inet_pton(AF_INET, HUB_HOST, &addr.sin_addr);
+    addr.sin_port        = htons(CAMERA_MANAGER_PORT);
+    inet_pton(AF_INET, CAMERA_MANAGER_HOST, &addr.sin_addr);
 
     sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0)
