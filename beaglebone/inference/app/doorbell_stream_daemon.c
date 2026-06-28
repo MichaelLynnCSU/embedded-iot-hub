@@ -103,7 +103,7 @@
  *            hostapd AP on 2.4GHz ch6, dedicated exclusively to camera
  *            traffic. dnsmasq provides DHCP on 10.0.1.0/24. All ESP32
  *            cams connect directly to the BBB AP — no router in the camera
- *            path. SSID: cams_2.4.
+ *            path. SSID: <redacted>
  *
  *          Result: 7-second stalls eliminated. FPS stabilized at 27.8 with
  *          signal -56 dBm to BBB AP. Remaining stalls (100-400ms, periodic)
