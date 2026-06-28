@@ -32,25 +32,23 @@ void cam_frame_dispatch(const struct CamData *p_data)
    for (i = 0; i < MAX_CAMS; i++)
    {
       shm_data->cam_age_s[i]  = p_data->cam_slots[i].age_s;
-      shm_data->cam_online[i] = p_data->cam_slots[i].online;
    }
 
    for (i = 0; i < MAX_DOORBELL_CAMS; i++)
    {
       shm_data->doorbell_age_s[i]  = p_data->doorbell_slots[i].age_s;
-      shm_data->doorbell_online[i] = p_data->doorbell_slots[i].online;
    }
 
    pthread_mutex_unlock(&shm_data->shm_mutex);
 
    for (i = 0; i < MAX_CAMS; i++)
    {
-      LOG("[CAM_DISPATCH] cam slot=%d age_s=%d online=%d",
-          i, p_data->cam_slots[i].age_s, p_data->cam_slots[i].online);
+      LOG("[CAM_DISPATCH] cam slot=%d age_s=%d",
+          i, p_data->cam_slots[i].age_s);
    }
    for (i = 0; i < MAX_DOORBELL_CAMS; i++)
    {
-      LOG("[CAM_DISPATCH] doorbell device_id=%d age_s=%d online=%d",
-          i, p_data->doorbell_slots[i].age_s, p_data->doorbell_slots[i].online);
+      LOG("[CAM_DISPATCH] doorbell device_id=%d age_s=%d",
+          i, p_data->doorbell_slots[i].age_s);
    }
 }

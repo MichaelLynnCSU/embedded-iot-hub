@@ -81,14 +81,12 @@ static void log_msg(const char *fmt, ...);
 struct __attribute__((packed)) CamSlotData
 {
    uint16_t age_s;
-   uint8_t  online;
    uint8_t  _pad;
 };
 
 struct __attribute__((packed)) DoorbellSlotData
 {
    uint16_t age_s;
-   uint8_t  online;
    uint8_t  _pad;
 };
 
@@ -120,7 +118,7 @@ static int g_cam_pipe_fd = -1;
 /* Pipe writer                                                                 */
 /*---------------------------------------------------------------------------*/
 
-static void pipe_write_liveness(void)
+static void pipe_write_cam_frame(void)
 {
    struct CamData frame;
    uint8_t        i   = 0;
@@ -139,7 +137,6 @@ static void pipe_write_liveness(void)
                         ? 0xFFFFu
                         : (uint16_t)(now - g_cam_last_seen[i]);
          frame.cam_slots[i].age_s  = age;
-         frame.cam_slots[i].online = (age < CAMERA_ONLINE_THRESHOLD_S) ? 1 : 0;
       }
       for (i = 0; i < MAX_DOORBELL_CAMS; i++)
       {
@@ -147,7 +144,6 @@ static void pipe_write_liveness(void)
                         ? 0xFFFFu
                         : (uint16_t)(now - g_doorbell_last_seen[i]);
          frame.doorbell_slots[i].age_s   = age;
-         frame.doorbell_slots[i].online  = (age < CAMERA_ONLINE_THRESHOLD_S) ? 1 : 0;
       }
       pthread_mutex_unlock(&g_liveness_mutex);
    }
@@ -387,11 +383,10 @@ static void ingress_loop(int sock)
             continue;
          }
          cam_stamp((uint8_t)device_id);
-         log_msg("[CAM] heartbeat slot=%u age_s=%u online=%d",
+         log_msg("[CAM] heartbeat slot=%u age_s=%u",
                  device_id,
-                 (unsigned)cam_get_age_s((uint8_t)device_id),
-                 cam_is_online((uint8_t)device_id));
-         pipe_write_liveness();
+                 (unsigned)cam_get_age_s((uint8_t)device_id));
+         pipe_write_cam_frame();
       }
       else if (0 == strcmp(device_type, "doorbell"))
       {
@@ -404,18 +399,17 @@ static void ingress_loop(int sock)
          if (0 == strcmp(event_type, "heartbeat"))
          {
             doorbell_stamp((uint8_t)device_id);
-            log_msg("[DOORBELL] heartbeat device_id=%u age_s=%u online=%d",
+            log_msg("[DOORBELL] heartbeat device_id=%u age_s=%u",
                     device_id,
-                    (unsigned)doorbell_get_age_s((uint8_t)device_id),
-                    doorbell_is_online((uint8_t)device_id));
-            pipe_write_liveness();
+                    (unsigned)doorbell_get_age_s((uint8_t)device_id));
+            pipe_write_cam_frame();
          }
          else if (0 == strcmp(event_type, "press"))
          {
             doorbell_stamp((uint8_t)device_id);
             log_msg("[DOORBELL] press device_id=%u — forwarding to hub",
                     device_id);
-            pipe_write_liveness();
+            pipe_write_cam_frame();
             forward_press_to_hub(rx_buf);
          }
          else
@@ -433,6 +427,20 @@ static void ingress_loop(int sock)
 /*---------------------------------------------------------------------------*/
 /* main                                                                        */
 /*---------------------------------------------------------------------------*/
+
+#define CAM_TICK_INTERVAL_S 5
+
+static void *ticker_thread(void *p_arg)
+{
+   (void)p_arg;
+   while (g_running)
+   {
+      sleep(CAM_TICK_INTERVAL_S);
+      if (!g_running) { break; }
+      pipe_write_cam_frame();
+   }
+   return NULL;
+}
 
 int main(void)
 {
@@ -475,7 +483,10 @@ int main(void)
 
    log_msg("[CAMERA_MGR] listening on 0.0.0.0:%d", CAMERA_MANAGER_PORT);
 
+   pthread_t tick_thread;
+   pthread_create(&tick_thread, NULL, ticker_thread, NULL);
    ingress_loop(sock);
+   pthread_join(tick_thread, NULL);
 
    close(sock);
    log_msg("[CAMERA_MGR] shutdown");

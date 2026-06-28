@@ -24,7 +24,7 @@
  *
  * \note    SHM read path (dst=blackpill_lcd):
  *          Both push paths previously read sensor state fields from SHM
- *          (valid, temp, motion, lgt, lck, cam_online). These have been
+ *          (valid, temp, motion, lgt, lck). These have been
  *          removed in favour of state_registry.c via get_snapshot() and
  *          p_raw_frame directly (2026-06-19 cleanup):
  *
@@ -38,12 +38,9 @@
  *              values from state_registry into both SHM and LatestData.
  *
  *          uart_update_frame() (pipe ingress path):
- *            - cam_online[] loop now reads p_raw_frame->cam_slots[i].online
- *              directly instead of shm_data->cam_online[i].
- *            - Mutex lock/unlock around that loop removed.
- *            - Confirmed equivalent: shm_updater.c line 143 is a direct
- *              assignment shm_data->cam_online[i] = p_data->cam_slots[i].online
- *              with no transformation or liveness logic applied.
+ *            - CAM/DB lines now emit age_s only. online/offline derived
+ *              by STM32 from WIRE_AGE_ONLINE_THRESHOLD_S. No online field
+ *              in CamSlotData or DoorbellSlotData.
  *            - doorbell_pressed consume-and-clear remains under SHM mutex
  *              — load-bearing, cannot be moved to snapshot.
  *
@@ -92,7 +89,7 @@
  *          independent streams, not one merged identity).
  *
  *          CAM has no event_id at any layer today (CamSlotData carries
- *          only age_s/online — confirmed via include/sensor_types.h).
+ *          only age_s — confirmed via include/sensor_types.h).
  *          No EID_CAM* lines are emitted. Adding CAM event tracing is a
  *          separate, larger task starting at cam_trigger.c on the
  *          ESP32 side and is out of scope for this change.
@@ -613,19 +610,16 @@ void *uart_push_thread(void *p_arg)
  *
  * \param p_snapshot  - Frozen read model from get_snapshot(). Not modified.
  * \param p_raw_frame - Raw wire frame from sensor pipe. Used for
- *                      doorbell_slots[] (DB<n> per-cam liveness lines),
- *                      cam_slots[] (CAM<n> liveness lines), and
+ *                      doorbell_slots[] (DB<n> per-cam age lines),
+ *                      cam_slots[] (CAM<n> age lines), and
  *                      per-device event_id (PIR/reed/temp/lock/light).
  *
  * \return void
  *
  * \details Called from sensor_frame_dispatch() on every pipe ingress frame.
  *          Reads doorbell state from SHM under shm_mutex (consume-and-clear
- *          only). cam_online[] is read directly from
- *          p_raw_frame->cam_slots[i].online — confirmed equivalent to
- *          shm_data->cam_online[i] (shm_updater.c line 143 is a direct
- *          assignment with no transformation). SHM mutex is no longer held
- *          around the CAM loop — see file header note "SHM read path".
+ *          only). CAM/DB age_s read from shm_data under mutex.
+ *          online/offline derived by STM32 from age threshold.
  *
  *          Per-device event_id values come directly from p_raw_frame
  *          (SensorData) — see file header note "Per-device event_id
@@ -775,17 +769,15 @@ void uart_update_frame(const struct LatestData *p_snapshot,
    for (int ci = 0; ci < MAX_DOORBELL_CAMS; ci++)
    {
       pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
-                      "DB%d:%d,%d\n",
+                      "DB%d:%d\n",
                       ci,
-                      shm_data->doorbell_age_s[ci],
-                      shm_data->doorbell_online[ci]);
+                      shm_data->doorbell_age_s[ci]);
    }
    for (int ci = 0; ci < MAX_CAMS; ci++)
    {
       pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
-                      "CAM%d:%d,%d\n",
+                      "CAM%d:%d\n",
                       ci + 1,
-                      shm_data->cam_online[ci],
                       shm_data->cam_age_s[ci]);
    }
    pthread_mutex_unlock(&shm_data->shm_mutex);

@@ -83,7 +83,9 @@
 /* Heartbeat                                                                   */
 /*---------------------------------------------------------------------------*/
 
-#define CAM_SLOT             0             /**< this camera's slot index 0-2  */
+#ifndef CAM_SLOT
+#define CAM_SLOT             0             /**< override at build time: idf.py -DCAM_SLOT=N build  */
+#endif
 #define CAMERA_MANAGER_HOST  "10.0.1.1"    /**< BBB camera manager (wlu1 AP)  */
 #define CAMERA_MANAGER_PORT  9094          /**< BBB camera manager UDP port   */
 #define CAM_HEARTBEAT_MS     30000         /**< heartbeat interval ms         */

@@ -337,7 +337,6 @@ static void parse_doorbell_slot(int slot, const char *p_rest)
    char     tmp[UART_LINE_LEN] = {0};
    char    *p_tok              = NULL;
    int      age_s              = 0xFFFF;
-   int      online             = 0;
    uint32_t now                = 0u;
 
    if ((slot < 0) || (slot >= (int)MAX_DOORBELL_CAMS)) { return; }
@@ -349,23 +348,19 @@ static void parse_doorbell_slot(int slot, const char *p_rest)
    p_tok = strtok(tmp, ",");
    if (NULL != p_tok) { (void)parse_int(p_tok, &age_s); }
 
-   p_tok = strtok(NULL, ",");
-   if (NULL != p_tok) { (void)parse_int(p_tok, &online); }
-
    now = HAL_GetTick();
 
-   ui_set_doorbell_slot_age((uint8_t)slot,    (uint16_t)age_s);
-   ui_set_doorbell_slot_online((uint8_t)slot, (uint8_t)online);
+   ui_set_doorbell_slot_age((uint8_t)slot, (uint16_t)age_s);
 
-   if (1 == online)
+   if (age_s < (int)WIRE_AGE_ONLINE_THRESHOLD_S)
    {
       ui_stamp_doorbell_online((uint8_t)slot, now);
    }
 
    char dbg[64];
    snprintf(dbg, sizeof(dbg),
-            "[DB] slot=%d age_s=%d online=%d\r\n",
-            slot, age_s, online);
+            "[DB] slot=%d age_s=%d\r\n",
+            slot, age_s);
    log_enqueue(dbg);
 }
 
@@ -373,7 +368,6 @@ static void parse_cam_slot(int slot, const char *p_rest)
 {
    char     tmp[UART_LINE_LEN] = {0};
    char    *p_tok              = NULL;
-   int      online             = 0;
    int      age                = 0xFFFF;
    uint32_t now                = 0u;
 
@@ -384,30 +378,30 @@ static void parse_cam_slot(int slot, const char *p_rest)
    tmp[sizeof(tmp) - 1u] = '\0';
 
    p_tok = strtok(tmp, ",");
-   if (NULL != p_tok) { (void)parse_int(p_tok, &online); }
-
-   p_tok = strtok(NULL, ",");
    if (NULL != p_tok) { (void)parse_int(p_tok, &age); }
 
    now = HAL_GetTick();
 
    ui_set_cam((uint8_t)slot);
 
-   /* Store wire age_s from hub cam_slots[i].age_s — seconds since the
-    * camera last sent a UDP heartbeat. Used for "A:Xs" display and CAM
-    * row visibility in ui_system.c (AGE_UNKNOWN_VAL -> hidden).
-    * SEPARATE from ui_stamp_cam_online() below — see parser.c note.  */
+   /* age_s = seconds since camera last sent UDP heartbeat to camera_manager.
+    * Computed on BBB side: now - last_seen. Counts 0->N, resets on heartbeat.
+    * Used for "A:Xs" display and CAM row visibility in ui_system.c.  */
+
+
+
+
    ui_set_cam_age((uint8_t)slot, (uint16_t)age);
 
-   if (1 == online)
+   if (age < (int)WIRE_AGE_ONLINE_THRESHOLD_S)
    {
       ui_stamp_cam_online((uint8_t)slot, now);
    }
 
    char dbg[64];
    snprintf(dbg, sizeof(dbg),
-            "[CAM] slot=%d online=%d age=%d\r\n",
-            slot, online, age);
+            "[CAM] slot=%d age=%d\r\n",
+            slot, age);
    log_enqueue(dbg);
 }
 

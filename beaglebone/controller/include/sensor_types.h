@@ -59,19 +59,17 @@ struct __attribute__((packed)) PirSlotData
    uint64_t event_id;  /*!< last vroom event_id for this slot */
 };
 
-/** \brief Camera slot liveness — pipe wire format. */
+/** \brief Camera slot age transport — pipe wire format. age_s only; online/offline derived by consumer from age threshold. */
 struct __attribute__((packed)) CamSlotData
 {
    uint16_t age_s;   /*!< seconds since last heartbeat, 0xFFFF=never */
-   uint8_t  online;  /*!< 1=alive within threshold, 0=stale          */
    uint8_t  _pad;
 };
 
-/** \brief Doorbell slot liveness — pipe wire format. */
+/** \brief Doorbell slot age transport — pipe wire format. age_s only; online/offline derived by consumer from age threshold. */
 struct __attribute__((packed)) DoorbellSlotData
 {
    uint16_t age_s;   /*!< seconds since last heartbeat/press, 0xFFFF=never */
-   uint8_t  online;  /*!< 1=alive within threshold, 0=stale                */
    uint8_t  _pad;
 };
 

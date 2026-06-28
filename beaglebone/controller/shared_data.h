@@ -15,12 +15,12 @@
  *          PTHREAD_PROCESS_SHARED) embedded as the first field.
  *          Initialized once by data_controller.c:init_shared_memory().
  *
- * \note    Doorbell liveness (2026-06-09):
- *          doorbell_age_s[] and doorbell_online[] added. Projected from
+ * \note    Doorbell age tracking (2026-06-09):
+ *          doorbell_age_s[] added. online/offline derived by STM32 from age threshold. Projected from
  *          SensorData.doorbell_slots[] by shm_updater.c:shm_update_frame().
  *
- * \note    Inference camera liveness (2026-06-10):
- *          cam_age_s[] and cam_online[] added. CAM_COUNT=3.
+ * \note    Inference camera age (2026-06-10):
+ *          cam_age_s[] added. CAM_COUNT=3. online/offline derived by STM32 from age threshold.
  *          Projected from SensorData.cam_slots[] by shm_updater.c.
  *          Heartbeat stamped by esp32-cam, forwarded by hub TCP frame.
  *
@@ -152,13 +152,11 @@ struct SharedSensorData
    uint8_t  doorbell_device_id;
    long     doorbell_timestamp;
 
-   /* Doorbell per-cam liveness */
+   /* Doorbell per-cam age */
    uint16_t doorbell_age_s[MAX_DOORBELL_CAMS];
-   uint8_t  doorbell_online[MAX_DOORBELL_CAMS];
 
-   /* Inference camera liveness */
+   /* Inference camera age */
    uint16_t cam_age_s[MAX_CAMS];
-   uint8_t  cam_online[MAX_CAMS];
 
    /* Reed slot liveness */
    uint16_t reed_age_s[MAX_REEDS];
