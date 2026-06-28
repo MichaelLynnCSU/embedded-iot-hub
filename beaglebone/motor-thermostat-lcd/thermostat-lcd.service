@@ -1,5 +1,7 @@
 [Unit]
 Description=Thermostat LCD — PID average temp and motor status display
+# DEADLOCK PREVENTION: thermostat_lcd reads SHM written by data-controller.
+# Must start after data-controller to guarantee SHM is initialized.
 After=network.target data-controller.service
 
 [Service]

@@ -20,12 +20,26 @@
  *            [PIPE] write        frame_seq=<n>  -- SensorData written to pipe
  *            [PIPE] write_failed frame_seq=<n>  -- write short/error, will reconnect
  *            [PIPE] reconnect    frame_seq=<n>  -- pipe was closed, retry attempted
- ******************************************************************************/
+ *
+ *          CHICKEN-AND-EGG NOTE (named FIFO startup ordering):
+ *          A named FIFO open(O_RDONLY) blocks until a writer opens the other end.
+ *          A named FIFO open(O_WRONLY|O_NONBLOCK) returns ENXIO if no reader is
+ *          present yet. To break the deadlock:
+ *            - data-controller creates sensor_pipe and opens the read end in
+ *              pipe_reader_thread before sensor-server starts.
+ *            - sensor-server.service uses ExecStartPre to poll until the pipe
+ *              file exists, guaranteeing the reader is blocking on open() before
+ *              sensor-server attempts its first write.
+ *          Once open, g_pipe_fd is kept alive for the process lifetime.
+ *          On EPIPE/write failure the fd is closed and reopened on next frame.
+ *          EAGAIN (buffer full) drops the frame but keeps the fd open.
+ *****************************************************************************/
 
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <time.h>
 #include "pipe_writer.h"
 #include "sensor_types.h"
@@ -141,14 +155,32 @@ void pipe_write(struct SensorData *p_data, uint32_t frame_seq)
    }
    p_data->frame_seq = frame_seq;
    w = write(g_pipe_fd, p_data, sizeof(*p_data));
-   if (w != (ssize_t)sizeof(*p_data))
+   if (w == (ssize_t)sizeof(*p_data))
    {
-      log_msg("[PIPE] write_failed frame_seq=%u bytes=%zd", frame_seq, w);
-      close(g_pipe_fd);
-      g_pipe_fd = -1;
+      log_msg("[PIPE] write frame_seq=%u", frame_seq);
+   }
+   else if (w < 0)
+   {
+      switch (errno)
+      {
+         case EAGAIN: /* FIFO buffer full — transient, drop frame, keep fd */
+         case EINTR:  /* interrupted by signal — drop frame, keep fd      */
+            log_msg("[PIPE] write_dropped frame_seq=%u errno=%d", frame_seq, errno);
+            break;
+         case EPIPE:  /* reader closed its end                            */
+         case ENXIO:  /* no reader present                                */
+         default:     /* unknown error — close and reconnect next frame   */
+            log_msg("[PIPE] write_failed frame_seq=%u errno=%d", frame_seq, errno);
+            close(g_pipe_fd);
+            g_pipe_fd = -1;
+            break;
+      }
    }
    else
    {
-      log_msg("[PIPE] write frame_seq=%u", frame_seq);
+      /* partial write — should not happen on a FIFO, treat as error */
+      log_msg("[PIPE] write_partial frame_seq=%u bytes=%zd", frame_seq, w);
+      close(g_pipe_fd);
+      g_pipe_fd = -1;
    }
 }

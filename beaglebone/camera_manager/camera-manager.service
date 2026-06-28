@@ -1,17 +1,22 @@
 [Unit]
 Description=Camera Manager Service
-After=network.target
-
+# DEADLOCK PREVENTION: cam_pipe is created by data-controller at startup.
+# camera-manager writes to cam_pipe (pipe_write_liveness). If camera-manager
+# starts before data-controller opens the read end, O_WRONLY|O_NONBLOCK returns
+# ENXIO and all liveness frames are silently dropped forever. ExecStartPre
+# blocks until the pipe exists, guaranteeing the reader is ready.
+After=network.target data-controller.service
+Requires=data-controller.service
 [Service]
 Type=simple
 User=debian
 WorkingDirectory=/home/debian/camera_manager
+ExecStartPre=/bin/bash -c 'until [ -p /tmp/cam_pipe ]; do sleep 1; done'
 ExecStart=/home/debian/camera_manager/camera_manager
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
 LimitCORE=infinity
-
 [Install]
 WantedBy=multi-user.target

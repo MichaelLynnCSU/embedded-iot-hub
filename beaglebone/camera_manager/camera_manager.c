@@ -40,6 +40,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -49,6 +50,7 @@
 /*---------------------------------------------------------------------------*/
 
 #define CAMERA_MANAGER_PORT       9094
+#define CAM_PIPE                  "/tmp/cam_pipe"
 #define MAX_CAMS                  3
 #define MAX_DOORBELL_CAMS         4
 #define CAMERA_ONLINE_THRESHOLD_S 90     /**< seconds before slot goes offline */
@@ -66,6 +68,114 @@
 static time_t          g_cam_last_seen[MAX_CAMS]          = {0};
 static time_t          g_doorbell_last_seen[MAX_DOORBELL_CAMS] = {0};
 static pthread_mutex_t g_liveness_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Forward declarations */
+static uint16_t cam_get_age_s(uint8_t slot);
+static uint16_t doorbell_get_age_s(uint8_t device_id);
+static void log_msg(const char *fmt, ...);
+
+/*---------------------------------------------------------------------------*/
+/* Pipe wire types — must match controller/include/sensor_types.h CamData     */
+/*---------------------------------------------------------------------------*/
+
+struct __attribute__((packed)) CamSlotData
+{
+   uint16_t age_s;
+   uint8_t  online;
+   uint8_t  _pad;
+};
+
+struct __attribute__((packed)) DoorbellSlotData
+{
+   uint16_t age_s;
+   uint8_t  online;
+   uint8_t  _pad;
+};
+
+struct CamData
+{
+   struct CamSlotData      cam_slots[MAX_CAMS];
+   struct DoorbellSlotData doorbell_slots[MAX_DOORBELL_CAMS];
+};
+
+/*
+ * Persistent write-end fd for /tmp/cam_pipe.
+ *
+ * CHICKEN-AND-EGG NOTE:
+ * A named FIFO open(O_RDONLY) blocks until a writer opens the other end.
+ * A named FIFO open(O_WRONLY|O_NONBLOCK) returns ENXIO if no reader is
+ * present yet. To break the deadlock:
+ *   - data-controller opens the read end in cam_pipe_reader_thread.
+ *   - camera-manager.service uses ExecStartPre to wait until the pipe
+ *     file exists, guaranteeing the reader is already blocking on open()
+ *     before camera-manager attempts its first write.
+ * Once open, the fd is kept alive for the process lifetime. On EPIPE/ENXIO
+ * (reader disappeared) the fd is closed and reopened on the next heartbeat.
+ * EAGAIN (buffer full) and EINTR (signal) are transient — drop the frame,
+ * keep the fd open.
+ */
+static int g_cam_pipe_fd = -1;
+
+/*---------------------------------------------------------------------------*/
+/* Pipe writer                                                                 */
+/*---------------------------------------------------------------------------*/
+
+static void pipe_write_liveness(void)
+{
+   struct CamData frame;
+   uint8_t        i   = 0;
+
+   memset(&frame, 0, sizeof(frame));
+
+   /* Read arrays directly under one lock — do NOT call cam_get_age_s() or
+    * doorbell_get_age_s() here; those re-acquire g_liveness_mutex and deadlock
+    * on the same thread (non-recursive mutex). */
+   {
+      time_t now = time(NULL);
+      pthread_mutex_lock(&g_liveness_mutex);
+      for (i = 0; i < MAX_CAMS; i++)
+      {
+         uint16_t age = (g_cam_last_seen[i] == 0)
+                        ? 0xFFFFu
+                        : (uint16_t)(now - g_cam_last_seen[i]);
+         frame.cam_slots[i].age_s  = age;
+         frame.cam_slots[i].online = (age < CAMERA_ONLINE_THRESHOLD_S) ? 1 : 0;
+      }
+      for (i = 0; i < MAX_DOORBELL_CAMS; i++)
+      {
+         uint16_t age = (g_doorbell_last_seen[i] == 0)
+                        ? 0xFFFFu
+                        : (uint16_t)(now - g_doorbell_last_seen[i]);
+         frame.doorbell_slots[i].age_s   = age;
+         frame.doorbell_slots[i].online  = (age < CAMERA_ONLINE_THRESHOLD_S) ? 1 : 0;
+      }
+      pthread_mutex_unlock(&g_liveness_mutex);
+   }
+
+   if (g_cam_pipe_fd < 0)
+   {
+      g_cam_pipe_fd = open(CAM_PIPE, O_WRONLY | O_NONBLOCK);
+      if (g_cam_pipe_fd < 0) { log_msg("[CAM_PIPE] open_failed errno=%d", errno); return; } /* reader not ready yet — skip */
+   }
+   {
+      ssize_t n = write(g_cam_pipe_fd, &frame, sizeof(frame));
+      if (n < 0)
+      {
+         switch (errno)
+         {
+            case EAGAIN: /* FIFO buffer full — transient, drop frame */
+            case EINTR:  /* interrupted by signal — drop frame       */
+               break;
+            case EPIPE:  /* reader closed its end                    */
+            case ENXIO:  /* no reader present                        */
+            default:     /* unknown error — reopen next heartbeat    */
+               close(g_cam_pipe_fd);
+               g_cam_pipe_fd = -1;
+               break;
+         }
+      }
+   }
+}
 
 /*---------------------------------------------------------------------------*/
 /* Logging                                                                     */
@@ -231,12 +341,18 @@ static void forward_press_to_hub(const char *p_json)
 /* Ingress loop                                                                */
 /*---------------------------------------------------------------------------*/
 
-static volatile int g_running = 1;
+static volatile int g_running     = 1;
+
 
 static void sig_handler(int sig)
 {
    (void)sig;
    g_running = 0;
+   if (g_cam_pipe_fd >= 0)
+   {
+      close(g_cam_pipe_fd);
+      g_cam_pipe_fd = -1;
+   }
 }
 
 static void ingress_loop(int sock)
@@ -275,6 +391,7 @@ static void ingress_loop(int sock)
                  device_id,
                  (unsigned)cam_get_age_s((uint8_t)device_id),
                  cam_is_online((uint8_t)device_id));
+         pipe_write_liveness();
       }
       else if (0 == strcmp(device_type, "doorbell"))
       {
@@ -291,12 +408,14 @@ static void ingress_loop(int sock)
                     device_id,
                     (unsigned)doorbell_get_age_s((uint8_t)device_id),
                     doorbell_is_online((uint8_t)device_id));
+            pipe_write_liveness();
          }
          else if (0 == strcmp(event_type, "press"))
          {
             doorbell_stamp((uint8_t)device_id);
             log_msg("[DOORBELL] press device_id=%u — forwarding to hub",
                     device_id);
+            pipe_write_liveness();
             forward_press_to_hub(rx_buf);
          }
          else

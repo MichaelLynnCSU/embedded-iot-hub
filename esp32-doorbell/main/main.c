@@ -1180,7 +1180,8 @@ static void send_heartbeat(void)
         "\"event_type\":\"heartbeat\",\"timestamp_ms\":%llu}",
         DOORBELL_ID, (unsigned long long)ts_ms);
 
-    sendto(sock, buf, len, 0, (struct sockaddr *)&addr, sizeof(addr));
+    int ret = sendto(sock, buf, len, 0, (struct sockaddr *)&addr, sizeof(addr));
+    ESP_LOGI(TAG, "[HB] sent device_id=%d ret=%d target=%s:%d", DOORBELL_ID, ret, CAMERA_MANAGER_HOST, CAMERA_MANAGER_PORT);
     close(sock);
 }
 

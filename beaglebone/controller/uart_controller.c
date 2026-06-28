@@ -771,6 +771,25 @@ void uart_update_frame(const struct LatestData *p_snapshot,
    }
 
 
+   pthread_mutex_lock(&shm_data->shm_mutex);
+   for (int ci = 0; ci < MAX_DOORBELL_CAMS; ci++)
+   {
+      pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
+                      "DB%d:%d,%d\n",
+                      ci,
+                      shm_data->doorbell_age_s[ci],
+                      shm_data->doorbell_online[ci]);
+   }
+   for (int ci = 0; ci < MAX_CAMS; ci++)
+   {
+      pos += snprintf(msg.buf + pos, sizeof(msg.buf) - pos,
+                      "CAM%d:%d,%d\n",
+                      ci + 1,
+                      shm_data->cam_online[ci],
+                      shm_data->cam_age_s[ci]);
+   }
+   pthread_mutex_unlock(&shm_data->shm_mutex);
+
    doorbell_pending_check();
 
    /* Consume-and-clear doorbell_pressed — must stay under SHM mutex.

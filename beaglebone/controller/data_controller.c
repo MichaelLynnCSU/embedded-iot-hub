@@ -61,6 +61,7 @@
 #include "uart_controller.h"
 #include "cmd/cmd_handler.h"
 #include "cmd/pipe_reader.h"
+#include "cmd/cam_pipe_reader.h"
 
 FILE                    *log_fp    = NULL; /**< log file handle */
 pthread_mutex_t          log_mutex = PTHREAD_MUTEX_INITIALIZER; /**< log serialiser */
@@ -192,7 +193,8 @@ static int create_threads(pthread_t *p_rx_thread,
                            pthread_t *p_cmd_thread,
                            pthread_t *p_uart_thread,
                            pthread_t *p_hb_thread,
-                           pthread_t *p_push_thread)
+                           pthread_t *p_push_thread,
+                           pthread_t *p_cam_thread)
 {
    int ret = 0; /**< pthread return value */
 
@@ -228,6 +230,12 @@ static int create_threads(pthread_t *p_rx_thread,
    if (0 != ret)
    {
       LOG_ERR("uart_push_thread create failed (err=%d)", ret);
+      return -1;
+   }
+   ret = pthread_create(p_cam_thread, NULL, cam_pipe_reader_thread, NULL);
+   if (0 != ret)
+   {
+      LOG_ERR("cam_pipe_reader_thread create failed (err=%d)", ret);
       return -1;
    }
 
@@ -286,6 +294,7 @@ int main(void)
    pthread_t uart_thread; /**< UART reader thread handle */
    pthread_t hb_thread;   /**< heartbeat monitor thread handle */
    pthread_t push_thread; /**< UART push thread handle */
+   pthread_t cam_thread;  /**< camera pipe reader thread handle */
 
    log_fp = fopen(CONTROLLER_LOG, "a");
    if (NULL == log_fp)
@@ -314,12 +323,15 @@ int main(void)
 
    (void)unlink(SENSOR_PIPE);
    (void)mkfifo(SENSOR_PIPE, 0666);
+   (void)unlink(CAM_PIPE);
+   (void)mkfifo(CAM_PIPE, 0666);
 
    if (0 > create_threads(&rx_thread,
                            &cmd_thread,
                            &uart_thread,
                            &hb_thread,
-                           &push_thread))
+                           &push_thread,
+                           &cam_thread))
    {
       LOG_ERR("Thread creation failed");
       cleanup();
@@ -333,6 +345,7 @@ int main(void)
    (void)pthread_join(uart_thread, NULL);
    (void)pthread_join(hb_thread,   NULL);
    (void)pthread_join(push_thread, NULL);
+   (void)pthread_join(cam_thread,  NULL);
 
    LOG_INF("Controller shutting down");
 

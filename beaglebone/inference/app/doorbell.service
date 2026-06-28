@@ -1,7 +1,10 @@
 [Unit]
 Description=Doorbell Ingest and Inference Service
-After=network.target
-
+# DEADLOCK PREVENTION: doorbell_daemon uses /doorbell_result SHM and writes
+# results consumed by data-controller. Must start after data-controller
+# to guarantee SHM is initialized before doorbell results are written.
+After=network.target data-controller.service
+Requires=data-controller.service
 [Service]
 Type=simple
 User=debian
@@ -12,6 +15,5 @@ Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-
 [Install]
 WantedBy=multi-user.target

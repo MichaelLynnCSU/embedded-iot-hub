@@ -59,6 +59,29 @@ struct __attribute__((packed)) PirSlotData
    uint64_t event_id;  /*!< last vroom event_id for this slot */
 };
 
+/** \brief Camera slot liveness — pipe wire format. */
+struct __attribute__((packed)) CamSlotData
+{
+   uint16_t age_s;   /*!< seconds since last heartbeat, 0xFFFF=never */
+   uint8_t  online;  /*!< 1=alive within threshold, 0=stale          */
+   uint8_t  _pad;
+};
+
+/** \brief Doorbell slot liveness — pipe wire format. */
+struct __attribute__((packed)) DoorbellSlotData
+{
+   uint16_t age_s;   /*!< seconds since last heartbeat/press, 0xFFFF=never */
+   uint8_t  online;  /*!< 1=alive within threshold, 0=stale                */
+   uint8_t  _pad;
+};
+
+/** \brief Camera manager pipe frame — written by camera_manager, read by controller. */
+struct CamData
+{
+   struct CamSlotData      cam_slots[MAX_CAMS];
+   struct DoorbellSlotData doorbell_slots[MAX_DOORBELL_CAMS];
+};
+
 /** \warning Must match sensor_types.h TempSlotData exactly — packed wire format */
 struct __attribute__((packed)) TempSlotData
 {

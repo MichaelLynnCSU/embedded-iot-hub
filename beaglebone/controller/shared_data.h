@@ -152,6 +152,14 @@ struct SharedSensorData
    uint8_t  doorbell_device_id;
    long     doorbell_timestamp;
 
+   /* Doorbell per-cam liveness */
+   uint16_t doorbell_age_s[MAX_DOORBELL_CAMS];
+   uint8_t  doorbell_online[MAX_DOORBELL_CAMS];
+
+   /* Inference camera liveness */
+   uint16_t cam_age_s[MAX_CAMS];
+   uint8_t  cam_online[MAX_CAMS];
+
    /* Reed slot liveness */
    uint16_t reed_age_s[MAX_REEDS];
    uint8_t  reed_online[MAX_REEDS];

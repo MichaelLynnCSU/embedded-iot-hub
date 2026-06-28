@@ -17,6 +17,7 @@
 /** \brief IPC and filesystem paths */
 #define SHM_NAME           "/sensor_shm"
 #define SENSOR_PIPE        "/tmp/sensor_pipe"
+#define CAM_PIPE           "/tmp/cam_pipe"
 #define COMMAND_PIPE       "/tmp/controller_cmd"
 #ifndef DB_PATH
 #define DB_PATH            "/home/debian/db/sensors.db"
@@ -29,7 +30,9 @@
 #define MAX_REEDS        6
 #define MAX_PIRS         5
 #define MAX_TEMPS        4
-#define MAX_CAMS          3   /* must match ESP32 udp_device_ingress.c */
+#define MAX_CAMS          3   /* must match camera_manager */
+#define MAX_DOORBELL_CAMS 4   /* must match camera_manager */
+#define CAM_COUNT         3   /* must match MAX_CAMS */
 #define TEMP_NAME_LEN   32
 #define UART_LINE_LEN   64
 /** \brief UART outgoing UartMsg envelope buffer.
