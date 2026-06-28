@@ -150,3 +150,49 @@ They are committed with `git add -f` and must be re-force-added if regenerated:
 - `esp32c3/idf/motor/managed_components/espressif__cjson/cJSON/cJSON.c`
 - `esp32c3/idf/motor/managed_components/espressif__cjson/cJSON/cJSON.h`
   IDF managed component. Re-add if `idf.py` regenerates managed_components.
+
+---
+
+## BeagleBone Build Commands
+
+### Sensor Server
+```bash
+export ARCH=arm
+export CROSS_COMPILE=arm-linux-gnueabihf-
+cd ~/embedded-iot-hub/beaglebone/server
+${CROSS_COMPILE}gcc -g -O0 \
+  sensor_server.c uart_io.c json_parser.c pipe_writer.c build_info.c \
+  -o sensor_server \
+  -I../include \
+  -ljson-c
+```
+
+### Camera Manager
+```bash
+export ARCH=arm
+export CROSS_COMPILE=arm-linux-gnueabihf-
+cd ~/embedded-iot-hub/beaglebone/camera_manager
+arm-linux-gnueabihf-gcc -g -O0 \
+  camera_manager.c build_info.c \
+  -o camera_manager \
+  -I../include \
+  -lpthread
+```
+
+### Data Controller
+```bash
+export ARCH=arm
+export CROSS_COMPILE=arm-linux-gnueabihf-
+cd ~/embedded-iot-hub/beaglebone/controller
+${CROSS_COMPILE}gcc -g -O0 \
+  data_controller.c \
+  pipeline/pipe_reader.c pipeline/cam_pipe_reader.c \
+  pipeline/sensor_dispatch.c pipeline/cam_dispatch.c \
+  state/state_registry.c state/shm_updater.c state/db_persist.c \
+  uart/uart_staging.c uart/uart_transport.c uart/uart_controller.c uart/uart_lock.c \
+  doorbell/doorbell_pending.c doorbell/doorbell_result_reader.c \
+  build_info.c db_manager.c heartbeat.c \
+  -I./include -I. -I../inference/app -I../include \
+  -o data_controller \
+  -lpthread -lrt -lm -lsqlite3
+```

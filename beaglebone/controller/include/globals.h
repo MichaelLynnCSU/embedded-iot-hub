@@ -17,7 +17,7 @@
 #define INCLUDE_GLOBALS_H_
 #include <sqlite3.h>
 #include "sensor_types.h"
-#include "shared_data.h"
+#include "../include/shared_data.h"
 extern struct SharedSensorData *shm_data;
 extern sqlite3                 *db;
 extern volatile int             running;

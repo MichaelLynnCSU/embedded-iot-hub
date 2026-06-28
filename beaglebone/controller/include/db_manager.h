@@ -2,7 +2,7 @@
 #define INCLUDE_DB_MANAGER_H_
 
 #include "sensor_types.h"
-#include "shared_data.h"
+#include "../include/shared_data.h"
 
 void db_open_and_init(void);
 void db_begin(void);

@@ -8,7 +8,6 @@
  * \details Owns all global resources and spawns five worker threads:
  *
  *          - receive_data_thread:    reads SensorData from sensor pipe
- *          - command_handler_thread: reads CommandMsg from command pipe
  *          - uart_reader_thread:     reads STM32 UART data
  *          - heartbeat_monitor_thread: monitors device timeouts
  *          - uart_push_thread:       pushes UART data to sensor pipe
@@ -53,15 +52,14 @@
 #include "config.h"
 #include "build_info.h"
 #include "sensor_types.h"
-#include "shared_data.h"
+#include "../include/shared_data.h"
 #include "log.h"
 #include "globals.h"
 #include "heartbeat.h"
 #include "db_manager.h"
 #include "uart_controller.h"
-#include "cmd/cmd_handler.h"
-#include "cmd/pipe_reader.h"
-#include "cmd/cam_pipe_reader.h"
+#include "pipe_reader.h"
+#include "cam_pipe_reader.h"
 
 FILE                    *log_fp    = NULL; /**< log file handle */
 pthread_mutex_t          log_mutex = PTHREAD_MUTEX_INITIALIZER; /**< log serialiser */
@@ -180,7 +178,6 @@ int init_shared_memory(void)
  * \brief Spawn all controller worker threads.
  *
  * \param p_rx_thread   - Output thread handle for receive_data_thread.
- * \param p_cmd_thread  - Output thread handle for command_handler_thread.
  * \param p_uart_thread - Output thread handle for uart_reader_thread.
  * \param p_hb_thread   - Output thread handle for heartbeat_monitor_thread.
  * \param p_push_thread - Output thread handle for uart_push_thread.
@@ -190,7 +187,6 @@ int init_shared_memory(void)
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
 static int create_threads(pthread_t *p_rx_thread,
-                           pthread_t *p_cmd_thread,
                            pthread_t *p_uart_thread,
                            pthread_t *p_hb_thread,
                            pthread_t *p_push_thread,
@@ -203,13 +199,7 @@ static int create_threads(pthread_t *p_rx_thread,
    {
       LOG_ERR("receive_data_thread create failed (err=%d)", ret);
       return -1;
-   }
 
-   ret = pthread_create(p_cmd_thread, NULL, command_handler_thread, NULL);
-   if (0 != ret)
-   {
-      LOG_ERR("command_handler_thread create failed (err=%d)", ret);
-      return -1;
    }
 
    ret = pthread_create(p_uart_thread, NULL, uart_reader_thread, NULL);
@@ -290,7 +280,6 @@ static void cleanup(void)
 int main(void)
 {
    pthread_t rx_thread;   /**< receive data thread handle */
-   pthread_t cmd_thread;  /**< command handler thread handle */
    pthread_t uart_thread; /**< UART reader thread handle */
    pthread_t hb_thread;   /**< heartbeat monitor thread handle */
    pthread_t push_thread; /**< UART push thread handle */
@@ -327,7 +316,6 @@ int main(void)
    (void)mkfifo(CAM_PIPE, 0666);
 
    if (0 > create_threads(&rx_thread,
-                           &cmd_thread,
                            &uart_thread,
                            &hb_thread,
                            &push_thread,
@@ -341,7 +329,6 @@ int main(void)
    LOG_INF("All threads started, controller ready");
 
    (void)pthread_join(rx_thread,   NULL);
-   (void)pthread_join(cmd_thread,  NULL);
    (void)pthread_join(uart_thread, NULL);
    (void)pthread_join(hb_thread,   NULL);
    (void)pthread_join(push_thread, NULL);

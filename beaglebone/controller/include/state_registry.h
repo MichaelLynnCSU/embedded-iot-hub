@@ -13,7 +13,7 @@
 #ifndef INCLUDE_CMD_STATE_REGISTRY_H_
 #define INCLUDE_CMD_STATE_REGISTRY_H_
 
-#include "../sensor_types.h"
+#include "sensor_types.h"
 
 void update_snapshot(const struct SensorData *p_data);
 void get_snapshot   (struct LatestData *p_out);

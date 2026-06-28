@@ -13,7 +13,7 @@
 #ifndef INCLUDE_CMD_UART_STAGING_H_
 #define INCLUDE_CMD_UART_STAGING_H_
 
-#include "../sensor_types.h"
+#include "sensor_types.h"
 
 void uart_stage_lock  (int lock_state, int batt);
 void uart_stage_pir   (int val);

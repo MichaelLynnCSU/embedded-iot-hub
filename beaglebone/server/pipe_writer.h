@@ -13,7 +13,7 @@
 #define PIPE_WRITER_H
 
 #include <stdint.h>
-#include "sensor_types.h"
+#include "../include/ipc_proto.h"
 
 /******************************************************************************
  * \brief Attempt to open the sensor named pipe in non-blocking write mode.

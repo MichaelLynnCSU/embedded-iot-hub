@@ -232,7 +232,6 @@ void handle_get_latest(const struct LatestData *p_snapshot, const char *p_src)
           p_snapshot->doorbell_device_id);
    }
 
-   shm_data->last_command   = CMD_GET_LATEST;
    shm_data->command_result = 0;
 
    pthread_mutex_unlock(&shm_data->shm_mutex);
@@ -245,65 +244,6 @@ void handle_get_latest(const struct LatestData *p_snapshot, const char *p_src)
        p_snapshot->avg_temp,
        p_snapshot->motion_count,
        p_snapshot->valid);
-}
-
-void handle_get_device_status(struct CommandMsg *p_cmd)
-{
-   (void)p_cmd;
-
-   pthread_mutex_lock(&shm_data->shm_mutex);
-   heartbeat_snapshot_online(shm_data->device_online, DEV_COUNT);
-   shm_data->last_command   = CMD_GET_DEVICE_STATUS;
-   shm_data->command_result = 0;
-   shm_data->sequence++;
-   pthread_mutex_unlock(&shm_data->shm_mutex);
-
-   LOG("[SHM] get_device_status seq=%u", shm_data->sequence);
-}
-
-void handle_get_room_status(struct CommandMsg *p_cmd)
-{
-   struct RoomStatus rooms[ROOM_BUF_SIZE];
-   int               count = 0;
-   int               i     = 0;
-
-   (void)p_cmd;
-   (void)memset(rooms, 0, sizeof(rooms));
-
-   count = db_query_rooms(rooms, ROOM_BUF_SIZE);
-
-   pthread_mutex_lock(&shm_data->shm_mutex);
-
-   if (0 > count)
-   {
-      shm_data->command_result = -1;
-   }
-   else
-   {
-      for (i = 0; i < count; i++)
-      {
-         shm_data->rooms[i].sensor_id = rooms[i].sensor_id;
-         shm_data->rooms[i].timestamp = rooms[i].timestamp;
-         (void)strncpy(shm_data->rooms[i].room_name,
-                       rooms[i].room_name,
-                       ROOM_NAME_SIZE - 1);
-         (void)strncpy(shm_data->rooms[i].state,
-                       rooms[i].state,
-                       ROOM_STATE_SIZE - 1);
-         (void)strncpy(shm_data->rooms[i].location,
-                       rooms[i].location,
-                       ROOM_LOC_SIZE - 1);
-      }
-
-      shm_data->room_count     = count;
-      shm_data->last_command   = CMD_GET_ROOM_STATUS;
-      shm_data->command_result = 0;
-      shm_data->sequence++;
-   }
-
-   pthread_mutex_unlock(&shm_data->shm_mutex);
-
-   LOG("[SHM] get_room_status count=%d", count);
 }
 
 void shm_update_frame(const struct LatestData *p_snapshot,

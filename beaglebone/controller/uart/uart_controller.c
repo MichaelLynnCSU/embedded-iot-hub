@@ -115,15 +115,15 @@
 #include <stdint.h>
 #include "config.h"
 #include "sensor_types.h"
-#include "shared_data.h"
+#include "../../include/shared_data.h"
 #include "log.h"
 #include "globals.h"
 #include "uart_controller.h"
 #include "uart_transport.h"
 #include "uart_lock.h"
 #include "doorbell_pending.h"
-#include "cmd/shm_updater.h"
-#include "cmd/state_registry.h"
+#include "shm_updater.h"
+#include "state_registry.h"
 #include "doorbell_result_reader.h"
 #include "doorbell_result_shm.h"
 

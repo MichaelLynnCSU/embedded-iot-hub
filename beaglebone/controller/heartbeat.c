@@ -26,7 +26,7 @@
 #include <unistd.h>
 #include "config.h"
 #include "sensor_types.h"
-#include "shared_data.h"
+#include "../include/shared_data.h"
 #include "log.h"
 #include "globals.h"
 #include "heartbeat.h"

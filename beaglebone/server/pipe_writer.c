@@ -42,7 +42,7 @@
 #include <errno.h>
 #include <time.h>
 #include "pipe_writer.h"
-#include "sensor_types.h"
+#include "../include/ipc_proto.h"
 #include "server_log.h"
 
 #define SENSOR_PIPE    "/tmp/sensor_pipe" /**< named pipe to controller */

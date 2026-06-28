@@ -13,7 +13,7 @@
 #ifndef INCLUDE_CMD_DB_PERSIST_H_
 #define INCLUDE_CMD_DB_PERSIST_H_
 
-#include "../sensor_types.h"
+#include "sensor_types.h"
 
 void db_persist_frame(const struct SensorData *p_data);
 

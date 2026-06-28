@@ -1,7 +1,0 @@
-cmd/
-====
-Command dispatcher and sensor data receiver for the data_controller.
-Handles all IPC commands (CMD_GET_LATEST, CMD_GET_DEVICE_STATUS, etc.)
-and the sensor data pipe from the BeagleBone server.
-
-NOT specific to any LCD — serves the whole controller subsystem.

@@ -15,7 +15,7 @@
 #include "sensor_types.h"
 #include "log.h"
 #include "globals.h"
-#include "../../shared_data.h"
+#include "../../include/shared_data.h"
 #include "cam_dispatch.h"
 
 /******************************************************************************

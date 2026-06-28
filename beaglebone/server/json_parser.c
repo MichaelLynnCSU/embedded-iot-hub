@@ -93,7 +93,7 @@
 #include <json-c/json.h>
 #include "json_parser.h"
 #include "pipe_writer.h"
-#include "sensor_types.h"
+#include "../include/ipc_proto.h"
 #include "server_log.h"
 
 static uint32_t g_frame_seq = 0;

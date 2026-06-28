@@ -13,7 +13,7 @@
 #ifndef INCLUDE_CMD_SENSOR_DISPATCH_H_
 #define INCLUDE_CMD_SENSOR_DISPATCH_H_
 
-#include "../sensor_types.h"
+#include "sensor_types.h"
 
 void sensor_frame_dispatch(const struct SensorData *p_data);
 

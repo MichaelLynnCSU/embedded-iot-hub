@@ -21,7 +21,7 @@
 #include "db_manager.h"
 #include "uart_lock.h"
 #include "controller_logic.h"
-#include "cmd/uart_staging.h"
+#include "uart_staging.h"
 
 /**
  * \brief Lock state machine — owned here, protected by g_lock_mutex.

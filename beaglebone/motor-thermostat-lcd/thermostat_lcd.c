@@ -56,7 +56,7 @@
 #include <time.h>
 #include "lcd_driver.h"
 #include "build_info.h"
-#include "../controller/shared_data.h"
+#include "../include/shared_data.h"
 
 /******************************** CONSTANTS ***********************************/
 

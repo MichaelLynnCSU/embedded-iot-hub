@@ -1,6 +1,6 @@
 # Smart Home IoT System
 
-A fault-tolerant distributed IoT system across 10 MCUs — sensing, control,
+A fault-tolerant distributed IoT system across 10+ MCUs — sensing, control,
 persistence, networking, inference, and display each run as isolated processes
 or dedicated hardware nodes for independent failure recovery.
 
@@ -89,10 +89,10 @@ Seven-process architecture, each an independent systemd service:
 ```
 esp01-tcp-server  — AT command setup for ESP-01 WiFi module (oneshot)
 sensor_server     — UART rx from ESP32, JSON parse, named pipe write
+camera_manager    — UDP ingress for camera + doorbell devices, pipe write
 data_controller   — pipe read, SQLite write, shared memory update
 uart_controller   — UART tx to STM32F411 every 5s
 heartbeat         — device online/offline tracking
-cmd_handler       — IPC command dispatch
 db_manager        — SQLite persistence
 inference_daemon  — TCP server for ESP32-CAM JPEG, TFLite person detection
 ```
@@ -152,19 +152,35 @@ idf.py build flash monitor
 
 ### BeagleBone
 ```bash
-cd beaglebone/controller
-gcc data_controller.c commands.c db_manager.c heartbeat.c \
-    uart_controller.c cmd_handler.c \
-    -o data_controller -lpthread -lrt -lsqlite3
+export ARCH=arm
+export CROSS_COMPILE=arm-linux-gnueabihf-
 
-cd ../server
-gcc sensor_server.c -o sensor_server -ljson-c
+# Sensor Server
+cd beaglebone/server
+${CROSS_COMPILE}gcc -g -O0 \
+  sensor_server.c uart_io.c json_parser.c pipe_writer.c build_info.c \
+  -o sensor_server -I../include -ljson-c
 
-cd ../inference/app
-gcc inference_daemon.c -o inference_daemon \
-    -L../lib -ltensorflowlite_c -lm
+# Camera Manager
+cd ../camera_manager
+arm-linux-gnueabihf-gcc -g -O0 \
+  camera_manager.c build_info.c \
+  -o camera_manager -I../include -lpthread
 
-sudo systemctl restart data-controller sensor-server inference
+# Data Controller
+cd ../controller
+${CROSS_COMPILE}gcc -g -O0 \
+  data_controller.c \
+  pipeline/pipe_reader.c pipeline/cam_pipe_reader.c \
+  pipeline/sensor_dispatch.c pipeline/cam_dispatch.c \
+  state/state_registry.c state/shm_updater.c state/db_persist.c \
+  uart/uart_staging.c uart/uart_transport.c uart/uart_controller.c uart/uart_lock.c \
+  doorbell/doorbell_pending.c doorbell/doorbell_result_reader.c \
+  build_info.c db_manager.c heartbeat.c \
+  -I./include -I. -I../inference/app -I../include \
+  -o data_controller -lpthread -lrt -lm -lsqlite3
+
+sudo systemctl restart data-controller sensor-server camera-manager inference
 ```
 
 ### STM32F411 / STM32F103
@@ -209,8 +225,14 @@ embedded-iot-hub/
 │       └── main.c              # UDP trigger rx, JPEG capture, TCP push
 │
 ├── beaglebone/                 # Embedded Linux pipeline
-│   ├── controller/             # cmd_handler, data_controller, uart_controller
+│   ├── include/                # Shared ABI headers (ipc_proto.h, shared_data.h)
+│   ├── controller/             # Data controller — event processing pipeline
+│   │   ├── pipeline/           # Pipe readers + event dispatchers
+│   │   ├── state/              # State registry, SHM updater, DB persistence
+│   │   ├── uart/               # UART transport, controller, lock, staging
+│   │   └── doorbell/           # Doorbell pending + result reader
 │   ├── server/                 # sensor_server, json_parser
+│   ├── camera_manager/         # UDP ingress for camera + doorbell devices
 │   ├── inference/              # TFLite inference_daemon, detect.tflite
 │   └── wifi/                   # ESP-01 AT setup script
 │

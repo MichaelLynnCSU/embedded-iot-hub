@@ -44,6 +44,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "../include/ipc_proto.h"
 
 /*---------------------------------------------------------------------------*/
 /* Config                                                                      */
@@ -51,8 +52,6 @@
 
 #define CAMERA_MANAGER_PORT       9094
 #define CAM_PIPE                  "/tmp/cam_pipe"
-#define MAX_CAMS                  3
-#define MAX_DOORBELL_CAMS         4
 #define CAMERA_ONLINE_THRESHOLD_S 90     /**< seconds before slot goes offline */
 #define RX_BUF_SIZE               256
 #define LOG_PATH                  "/var/log/camera_manager.log"
@@ -71,30 +70,8 @@ static pthread_mutex_t g_liveness_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Forward declarations */
 static uint16_t cam_get_age_s(uint8_t slot);
-static uint16_t doorbell_get_age_s(uint8_t device_id);
 static void log_msg(const char *fmt, ...);
-
-/*---------------------------------------------------------------------------*/
-/* Pipe wire types — must match controller/include/sensor_types.h CamData     */
-/*---------------------------------------------------------------------------*/
-
-struct __attribute__((packed)) CamSlotData
-{
-   uint16_t age_s;
-   uint8_t  _pad;
-};
-
-struct __attribute__((packed)) DoorbellSlotData
-{
-   uint16_t age_s;
-   uint8_t  _pad;
-};
-
-struct CamData
-{
-   struct CamSlotData      cam_slots[MAX_CAMS];
-   struct DoorbellSlotData doorbell_slots[MAX_DOORBELL_CAMS];
-};
+static uint16_t doorbell_get_age_s(uint8_t device_id);
 
 /*
  * Persistent write-end fd for /tmp/cam_pipe.

@@ -25,7 +25,6 @@
 #include <stdbool.h>
 #include <string.h>
 #include <time.h>
-#include "cmd/commands.h"
 
 /* controller_logic.h is included after controller_internal.h —
  * all sizing constants, DEV_ID_E, and command values are defined there. */
@@ -321,12 +320,6 @@ static inline int logic_history_idx(int count)
 static inline bool logic_batt_valid(int batt)
 {
     return batt >= 0;
-}
-
-/* ---- Pure logic: command is known ---- */
-static inline bool logic_cmd_known(int cmd)
-{
-    return (cmd >= CMD_GET_LATEST) && (cmd <= CMD_GET_DEVICE_STATUS);
 }
 
 /* ---- Pure logic: should reed slot be updated from incoming frame ---- */
