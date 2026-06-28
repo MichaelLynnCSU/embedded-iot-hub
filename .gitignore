@@ -156,3 +156,5 @@ beaglebone/inference/app/doorbell_daemon
 beaglebone/inference/app/doorbell_stream_daemon
 beaglebone/camera_manager/camera_manager
 beaglebone/motor-thermostat-lcd/thermostat_lcd
+nrf52840/smart-light/build_test/
+beaglebone/inference/lib/*.so
