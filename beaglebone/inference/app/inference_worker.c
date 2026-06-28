@@ -157,6 +157,19 @@ int inference_worker_run(const uint8_t *jpeg, size_t jpeg_len,
 
    input_h = TfLiteTensorDim(input_tensor, 1);
    input_w = TfLiteTensorDim(input_tensor, 2);
+   worker_log("Input tensor: type=%d dims=%dx%dx%d",
+       TfLiteTensorType(input_tensor),
+       TfLiteTensorDim(input_tensor, 1),
+       TfLiteTensorDim(input_tensor, 2),
+       TfLiteTensorDim(input_tensor, 3));
+   worker_log("Input quantization: scale=%f zero_point=%d",
+       TfLiteTensorQuantizationParams(input_tensor).scale,
+       TfLiteTensorQuantizationParams(input_tensor).zero_point);
+   worker_log("Output tensor types: 0=%d 1=%d 2=%d 3=%d",
+       TfLiteTensorType(TfLiteInterpreterGetOutputTensor(g_interp, 0)),
+       TfLiteTensorType(TfLiteInterpreterGetOutputTensor(g_interp, 1)),
+       TfLiteTensorType(TfLiteInterpreterGetOutputTensor(g_interp, 2)),
+       TfLiteTensorType(TfLiteInterpreterGetOutputTensor(g_interp, 3)));
 
    img = stbi_load_from_memory(jpeg, (int)jpeg_len,
                                &img_w, &img_h, &img_ch, 3);
@@ -211,7 +224,7 @@ int inference_worker_run(const uint8_t *jpeg, size_t jpeg_len,
 
    for (i = 0; i < num_det; i++)
    {
-      if (!infer_above_threshold(scores[i])) { break; }
+      if (!infer_above_threshold(scores[i])) { continue; }
 
       int         class_idx = (int)classes[i] + 1;
       const char *label     = infer_label_for(g_labels, g_label_count,
