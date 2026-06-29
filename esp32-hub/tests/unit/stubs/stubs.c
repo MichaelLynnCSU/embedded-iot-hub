@@ -17,7 +17,7 @@ int   g_stub_avg_temp = 25;
 void stamp_device(int idx) { (void)idx; }
 uint16_t ble_get_device_age_s(int idx) { (void)idx; return 0; }
 
-/* vroom bus stubs */
+/* wroom bus stubs */
 void bus_publish_pir(uint8_t slot, uint32_t count, int batt)
 { (void)slot;(void)count;(void)batt; }
 

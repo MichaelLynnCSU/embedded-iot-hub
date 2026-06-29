@@ -6,7 +6,7 @@
  * \brief AWS IoT Lambda manager for ESP32 hub node.
  *
  * \details Maintains a local snapshot of all BLE and UART sensor state
- *          by draining the vroom bus queues on every wakeup. Sends a
+ *          by draining the wroom bus queues on every wakeup. Sends a
  *          consolidated JSON payload to AWS Lambda every 5 minutes.
  *          Parses the Lambda response for PI controller parameters and
  *          light control updates.
@@ -48,7 +48,7 @@
 #include "ble_temp.h"
 #include "uart_manager.h"
 #include "device_gateway.h"
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 #include "trinity_log.h"
 
 #ifdef ENABLE_AWS

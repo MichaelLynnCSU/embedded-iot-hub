@@ -1,5 +1,5 @@
 /******************************************************************************
- * \file vroom_bus.c
+ * \file wroom_bus.c
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  * \date 01-01-2025
  *
@@ -34,19 +34,19 @@
  *          bits so idle tasks are not woken unnecessarily.
  *
  * \note    Structured event tracing — Phase 0 (2026-06-15):
- *          [VROOM] ingest log added to every bus_publish_* function.
+ *          [WROOM] ingest log added to every bus_publish_* function.
  *          Normalized prefix style matches [BLE_*], [TCP], [UART].
  *          No struct or ABI changes.
  *
  * \note    Structured event tracing — Phase 1 (2026-06-15):
  *          g_bus_seq static counter added. Increments on every publish.
- *          Included in every [VROOM] ingest log line.
+ *          Included in every [WROOM] ingest log line.
  *          No cross-module propagation. No struct or ABI changes.
  *
  * \note    Structured event tracing — Phase 2 (2026-06-15):
- *          g_event_seq static counter added. vroom_event_id_generate()
+ *          g_event_seq static counter added. wroom_event_id_generate()
  *          static function assigns monotonic event_id per publish.
- *          event_id logged at [VROOM] ingest only — not exported.
+ *          event_id logged at [WROOM] ingest only — not exported.
  *          No external ABI changes.
  *
  * \note    Structured event tracing — Phase 3 (2026-06-15):
@@ -58,18 +58,18 @@
  *          TCP/UART still unaware of event_id. No struct changes.
  ******************************************************************************/
 
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 #include "esp_log.h"
 #include <string.h>
 
-static const char *TAG = "VROOM_BUS";
+static const char *TAG = "WROOM_BUS";
 
 static BUS_SUBSCRIBER_T g_subscribers[BUS_MAX_SUBSCRIBERS];
 static int              g_sub_count  = 0;
 static uint32_t         g_bus_seq    = 0;  /* Phase 1: Local bus sequence counter */
 static uint64_t         g_event_seq  = 0;  /* Phase 2: Authority event_id sequencer */
 
-static uint64_t vroom_event_id_generate(void)
+static uint64_t wroom_event_id_generate(void)
 {
    g_event_seq++;
    return g_event_seq;
@@ -102,7 +102,7 @@ BUS_SUBSCRIBER_T bus_register_subscriber(EventBits_t mask)
 
 void bus_init(void)
 {
-   ESP_LOGI(TAG, "[VROOM] Bus initialized");
+   ESP_LOGI(TAG, "[WROOM] Bus initialized");
 }
 
 static void bus_signal(EventBits_t bits)
@@ -116,7 +116,7 @@ static void bus_signal(EventBits_t bits)
 
 uint64_t bus_publish_pir(uint8_t slot, uint32_t count, int batt)
 {
-   uint64_t eid = vroom_event_id_generate();
+   uint64_t eid = wroom_event_id_generate();
    PIR_PAYLOAD_T p = { .slot = slot, .id = slot, .count = count,
                        .batt = batt, .event_id = eid };
 
@@ -129,7 +129,7 @@ uint64_t bus_publish_pir(uint8_t slot, uint32_t count, int batt)
    }
 
    // Normalized Log Format Matching Spec
-   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=BLE_PIR device_id=%d motion=%u",
+   ESP_LOGI(TAG, "[WROOM] event_id=%llu bus_seq=%u ingest type=BLE_PIR device_id=%d motion=%u",
             (unsigned long long)eid, (unsigned)g_bus_seq, (int)slot, (unsigned)count);
 
    bus_signal(EVT_BLE_PIR);
@@ -138,7 +138,7 @@ uint64_t bus_publish_pir(uint8_t slot, uint32_t count, int batt)
 
 uint64_t bus_publish_reed(uint8_t id, uint8_t state, int batt, const uint8_t *p_mac)
 {
-   uint64_t eid = vroom_event_id_generate();
+   uint64_t eid = wroom_event_id_generate();
    REED_PAYLOAD_T p = { .id = id, .state = state, .batt = batt, .event_id = eid };
    if (p_mac) { memcpy(p.mac, p_mac, 6); }
    g_bus_seq++;
@@ -149,7 +149,7 @@ uint64_t bus_publish_reed(uint8_t id, uint8_t state, int batt, const uint8_t *p_
       }
    }
 
-   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=BLE_REED device_id=%d state=%d",
+   ESP_LOGI(TAG, "[WROOM] event_id=%llu bus_seq=%u ingest type=BLE_REED device_id=%d state=%d",
             (unsigned long long)eid, (unsigned)g_bus_seq, (int)id, (int)state);
 
    bus_signal(EVT_BLE_REED);
@@ -158,7 +158,7 @@ uint64_t bus_publish_reed(uint8_t id, uint8_t state, int batt, const uint8_t *p_
 
 uint64_t bus_publish_lock(uint8_t state, int batt)
 {
-   uint64_t eid = vroom_event_id_generate();
+   uint64_t eid = wroom_event_id_generate();
    LOCK_PAYLOAD_T p = { .state = state, .batt = batt, .event_id = eid };
 
    g_bus_seq++;
@@ -169,7 +169,7 @@ uint64_t bus_publish_lock(uint8_t state, int batt)
       }
    }
 
-   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=BLE_LOCK state=%d",
+   ESP_LOGI(TAG, "[WROOM] event_id=%llu bus_seq=%u ingest type=BLE_LOCK state=%d",
             (unsigned long long)eid, (unsigned)g_bus_seq, (int)state);
 
    bus_signal(EVT_BLE_LOCK);
@@ -178,7 +178,7 @@ uint64_t bus_publish_lock(uint8_t state, int batt)
 
 uint64_t bus_publish_light(uint8_t state)
 {
-   uint64_t eid = vroom_event_id_generate();
+   uint64_t eid = wroom_event_id_generate();
    LIGHT_PAYLOAD_T p = { .state = state, .event_id = eid };
 
    g_bus_seq++;
@@ -189,7 +189,7 @@ uint64_t bus_publish_light(uint8_t state)
       }
    }
 
-   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=BLE_LIGHT state=%d",
+   ESP_LOGI(TAG, "[WROOM] event_id=%llu bus_seq=%u ingest type=BLE_LIGHT state=%d",
             (unsigned long long)eid, (unsigned)g_bus_seq, (int)state);
 
    bus_signal(EVT_BLE_LIGHT);
@@ -198,7 +198,7 @@ uint64_t bus_publish_light(uint8_t state)
 
 uint64_t bus_publish_temp(int avg_temp)
 {
-   uint64_t eid = vroom_event_id_generate();
+   uint64_t eid = wroom_event_id_generate();
    TEMP_PAYLOAD_T p = { .avg_temp = avg_temp };
 
    g_bus_seq++;
@@ -209,7 +209,7 @@ uint64_t bus_publish_temp(int avg_temp)
       }
    }
 
-   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=UART_TEMP avg_temp=%d",
+   ESP_LOGI(TAG, "[WROOM] event_id=%llu bus_seq=%u ingest type=UART_TEMP avg_temp=%d",
             (unsigned long long)eid, (unsigned)g_bus_seq, avg_temp);
 
    bus_signal(EVT_UART_TEMP);
@@ -218,7 +218,7 @@ uint64_t bus_publish_temp(int avg_temp)
 
 uint64_t bus_publish_motor(uint8_t online, int batt)
 {
-   uint64_t eid = vroom_event_id_generate();
+   uint64_t eid = wroom_event_id_generate();
    MOTOR_PAYLOAD_T p = { .online = online, .batt = batt };
 
    g_bus_seq++;
@@ -229,7 +229,7 @@ uint64_t bus_publish_motor(uint8_t online, int batt)
       }
    }
 
-   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=MOTOR online=%d",
+   ESP_LOGI(TAG, "[WROOM] event_id=%llu bus_seq=%u ingest type=MOTOR online=%d",
             (unsigned long long)eid, (unsigned)g_bus_seq, (int)online);
 
    bus_signal(EVT_MOTOR_STATUS);
@@ -238,7 +238,7 @@ uint64_t bus_publish_motor(uint8_t online, int batt)
 
 uint64_t bus_publish_ble_temp(uint8_t slot, int16_t temp_decidegc, int batt)
 {
-   uint64_t eid = vroom_event_id_generate();
+   uint64_t eid = wroom_event_id_generate();
    BLE_TEMP_PAYLOAD_T p = { .id = slot, .temp_decidegc = temp_decidegc,
                              .batt = batt, .event_id = eid };
 
@@ -250,7 +250,7 @@ uint64_t bus_publish_ble_temp(uint8_t slot, int16_t temp_decidegc, int batt)
       }
    }
 
-   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=BLE_TEMP device_id=%d temp_dc=%d",
+   ESP_LOGI(TAG, "[WROOM] event_id=%llu bus_seq=%u ingest type=BLE_TEMP device_id=%d temp_dc=%d",
             (unsigned long long)eid, (unsigned)g_bus_seq, (int)slot, (int)temp_decidegc);
 
    bus_signal(EVT_BLE_TEMP);
@@ -259,7 +259,7 @@ uint64_t bus_publish_ble_temp(uint8_t slot, int16_t temp_decidegc, int batt)
 
 uint64_t bus_publish_doorbell(uint8_t device_id, uint64_t event_id, uint64_t timestamp_ms)
 {
-   uint64_t eid = vroom_event_id_generate();
+   uint64_t eid = wroom_event_id_generate();
    DOORBELL_PAYLOAD_T p = { .device_id = device_id, .event_id = event_id, .timestamp_ms = timestamp_ms };
 
    g_bus_seq++;
@@ -270,7 +270,7 @@ uint64_t bus_publish_doorbell(uint8_t device_id, uint64_t event_id, uint64_t tim
       }
    }
 
-   ESP_LOGI(TAG, "[VROOM] event_id=%llu bus_seq=%u ingest type=DOORBELL device_id=%d cam_event_id=%llu",
+   ESP_LOGI(TAG, "[WROOM] event_id=%llu bus_seq=%u ingest type=DOORBELL device_id=%d cam_event_id=%llu",
             (unsigned long long)eid, (unsigned)g_bus_seq, (int)device_id, (unsigned long long)event_id);
 
    bus_signal(EVT_DOORBELL);

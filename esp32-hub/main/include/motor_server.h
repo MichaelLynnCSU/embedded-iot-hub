@@ -54,7 +54,7 @@ int accept_motor_connection(int listen_sock);
  *                         Left unchanged on timeout or parse failure.
  *
  * Closes client_sock before returning regardless of outcome.
- * Publishes motor state to the vroom bus via bus_publish_motor().
+ * Publishes motor state to the wroom bus via bus_publish_motor().
  */
 void send_pwm_to_c3(int client_sock, float pwm_pct,
                     uint8_t *p_motor_online, int *p_motor_batt);

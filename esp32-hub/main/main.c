@@ -37,14 +37,14 @@
 #include "tcp_manager.h"
 #include "device_gateway.h"
 #include "uart_manager.h"
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 #include "trinity_log.h"
 
 #define UART_BAUD_RATE          115200   /**< STM32 UART baud rate             */
 #define STATS_INTERVAL_MS       60000u   /**< heap/task stats interval          */
 #define WIFI_POLL_INTERVAL_MS   2000u    /**< WiFi-wait polling / WDT kick rate */
 
-static const char *TAG = "VROOM";
+static const char *TAG = "WROOM";
 
 static EventGroupHandle_t g_system_eg;
 static EventGroupHandle_t g_wifi_eg;
@@ -172,7 +172,7 @@ static void create_tasks(void)
 
 void app_main(void)
 {
-   ESP_LOGI(TAG, "Starting VROOM initialization...");
+   ESP_LOGI(TAG, "Starting WROOM initialization...");
 
    nvs_flash_init();
    trinity_log_dump_previous();

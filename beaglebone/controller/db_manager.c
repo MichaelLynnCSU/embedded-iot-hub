@@ -344,7 +344,7 @@ void db_save_reading(const struct SensorData *p_data)
    }
 
    sqlite3_bind_int64 (p_stmt, 1,  (sqlite3_int64)p_data->timestamp);
-   sqlite3_bind_text  (p_stmt, 2,  "vroom", -1, SQLITE_STATIC);
+   sqlite3_bind_text  (p_stmt, 2,  "wroom", -1, SQLITE_STATIC);
    sqlite3_bind_double(p_stmt, 3,  p_data->avg_temp);
    sqlite3_bind_int   (p_stmt, 4,  p_data->motion_count);
    sqlite3_bind_int   (p_stmt, 5,  p_data->light_state);

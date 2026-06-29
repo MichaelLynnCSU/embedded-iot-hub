@@ -15,7 +15,7 @@
  *          grep:
  *
  *            [BLE_PIR]    tx_id=144 event_id=101 slot=0
- *            [VROOM]      event_id=101 ingest type=BLE_PIR
+ *            [WROOM]      event_id=101 ingest type=BLE_PIR
  *            [UDP_CAM_TX] cam_tx_id=42 event_id=101 zone=0
  *            [UDP_CAM_RX] cam_tx_id=42 event_id=101
  *            [INFER]      event_id=101 person=1 conf=92
@@ -30,7 +30,7 @@
 /**
  * \brief Fire a UDP CAPTURE packet to the ESP32-CAM.
  *
- * \param event_id  PIR VROOM event_id that caused this trigger. Carried
+ * \param event_id  PIR WROOM event_id that caused this trigger. Carried
  *                  into the UDP payload and logged at [UDP_CAM_TX] so the
  *                  camera lifecycle is traceable back to the originating
  *                  PIR event with a single grep on event_id.

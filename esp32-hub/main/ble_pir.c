@@ -36,7 +36,7 @@
  * \note    Structured event tracing — Phase 3 (2026-06-15):
  *          bus_publish_pir() now returns uint64_t event_id.
  *          Caller captures and logs event_id at BLE ingress so the
- *          correlation key is visible at both [BLE_PIR] and [VROOM].
+ *          correlation key is visible at both [BLE_PIR] and [WROOM].
  *
  * \note    Structured event tracing — tx_id (2026-06-16):
  *          s_rx_seq removed. tx_id extracted from mfg_data[8..9]
@@ -72,7 +72,7 @@
  *          hop from PIR detection to inference result:
  *
  *            [BLE_PIR]    tx_id=144 event_id=101 slot=0
- *            [VROOM]      event_id=101 ingest type=BLE_PIR
+ *            [WROOM]      event_id=101 ingest type=BLE_PIR
  *            [UDP_CAM_TX] cam_tx_id=42 event_id=101 zone=0
  *            [UDP_CAM_RX] cam_tx_id=42 event_id=101
  *            [INFER]      event_id=101 person=1 conf=92
@@ -84,7 +84,7 @@
 #include "ble_internal.h"
 #include "ble_proto.h"
 #include "config.h"
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 #include "pir_window.h"
 #include "cam_trigger.h"
 #include "esp_log.h"
@@ -171,7 +171,7 @@ void ble_pir_preinit(void)
  *
  * \details Implements PIR slot state machine. Known MACs update their
  *          slot. New MACs are allocated a slot if the table is not full.
- *          Publishes to vroom bus on first seen or data change.
+ *          Publishes to wroom bus on first seen or data change.
  *          Delegates occupancy logic to pir_window_update().
  *          Captures returned event_id from bus_publish_pir() and logs
  *          it at BLE ingress for end-to-end correlation.
@@ -204,7 +204,7 @@ void ble_pir_handle(const uint8_t *p_mfg,
    int      slot     = -1;    /**< slot index                             */
    bool     changed  = false; /**< data changed flag                      */
    uint16_t gen      = 0;     /**< slot generation counter                */
-   uint64_t eid      = 0;     /**< VROOM event_id — carried into cam
+   uint64_t eid      = 0;     /**< WROOM event_id — carried into cam
                                *   trigger so the full camera lifecycle
                                *   shares the originating PIR identity    */
    int      occ      = 0;     /**< hub-computed occupancy after window    */

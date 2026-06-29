@@ -40,14 +40,14 @@
  *          immediately after the ESP32 send. However, uart_print_esp32()
  *          previously discarded HAL_UART_Transmit()'s return value via
  *          (void), so the debug echo unconditionally read "Sent to
- *          VROOM: ..." even when the transmit to the ESP32 actually
+ *          WROOM: ..." even when the transmit to the ESP32 actually
  *          failed/timed out -- the same class of silent-failure gap
  *          found and fixed on the BlackPill's HB transmit
  *          (heartbeat_tick(), see stm32-blackpill/Core/Src/main.c).
  *          uart_print_esp32() now returns HAL_StatusTypeDef, and
  *          StartDefaultTask() branches on it: success still logs
- *          "Sent to VROOM: {...}", failure logs "FAILED to send to
- *          VROOM tx_id=N (status=...)" instead, so a dropped frame is
+ *          "Sent to WROOM: {...}", failure logs "FAILED to send to
+ *          WROOM tx_id=N (status=...)" instead, so a dropped frame is
  *          visible on the debug UART rather than indistinguishable from
  *          a successful one.
  ******************************************************************************/
@@ -523,9 +523,9 @@ static void MX_GPIO_Init(void)
  *          across valid sensors, and sends JSON every DEFAULT_TASK_DELAY ms.
  *
  *          Structured event tracing: uart_print_esp32()'s HAL status is
- *          now checked. Success logs "Sent to VROOM: {...}" (tx_id is
+ *          now checked. Success logs "Sent to WROOM: {...}" (tx_id is
  *          embedded in the JSON itself); failure logs "FAILED to send
- *          to VROOM tx_id=N (status=...)" instead, so a dropped/timed-out
+ *          to WROOM tx_id=N (status=...)" instead, so a dropped/timed-out
  *          transmit to the ESP32 is visible on the debug UART rather than
  *          silently indistinguishable from success. See file header note
  *          "Structured event tracing — tx_id status check (2026-06-20)".
@@ -578,13 +578,13 @@ void StartDefaultTask(void const * argument)
 
       if (HAL_OK == tx_status)
       {
-         uart_print("Sent to VROOM: ");
+         uart_print("Sent to WROOM: ");
          uart_print(json_msg);
       }
       else
       {
          (void)snprintf(fail_msg, sizeof(fail_msg),
-                  "FAILED to send to VROOM tx_id=%u (status=%d)\r\n",
+                  "FAILED to send to WROOM tx_id=%u (status=%d)\r\n",
                   (unsigned)s_tx_id, (int)tx_status);
          uart_print(fail_msg);
       }

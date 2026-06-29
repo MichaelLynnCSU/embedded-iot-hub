@@ -35,7 +35,7 @@
 #include "freertos/task.h"
 #include "ble_manager.h"
 #include "ble_internal.h"
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 #include <string.h>
 
 #define ADV_TYPE_SHORT_NAME  0x08 /**< AD type: shortened local name  */

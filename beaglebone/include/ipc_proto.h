@@ -84,7 +84,7 @@ struct __attribute__((packed)) ReedSlotData
    uint8_t  offline;
    uint16_t gen;
    char     name[REED_NAME_SIZE];
-   uint64_t event_id;   /*!< last vroom event_id for this slot */
+   uint64_t event_id;   /*!< last wroom event_id for this slot */
 };
 
 /** \brief PIR sensor slot — packed wire format.
@@ -98,7 +98,7 @@ struct __attribute__((packed)) PirSlotData
    int8_t   occupied;
    uint8_t  offline;
    uint8_t  _pad[2];    /*!< alignment padding before event_id */
-   uint64_t event_id;   /*!< last vroom event_id for this slot */
+   uint64_t event_id;   /*!< last wroom event_id for this slot */
 };
 
 /** \brief Temperature sensor slot — packed wire format.
@@ -112,7 +112,7 @@ struct __attribute__((packed)) TempSlotData
    uint8_t  offline;
    uint8_t  _pad;
    char     name[TEMP_NAME_SIZE];
-   uint64_t event_id;   /*!< last vroom event_id for this slot */
+   uint64_t event_id;   /*!< last wroom event_id for this slot */
 };
 
 /*---------------------------------------------------------------------------*/
@@ -189,8 +189,8 @@ struct SensorData
    struct TempSlotData     temp_slots[MAX_TEMPS];
    uint8_t                 temp_count;
 
-   uint64_t lock_event_id;    /*!< last vroom event_id for BLE lock  */
-   uint64_t light_event_id;   /*!< last vroom event_id for BLE light */
+   uint64_t lock_event_id;    /*!< last wroom event_id for BLE lock  */
+   uint64_t light_event_id;   /*!< last wroom event_id for BLE light */
    uint32_t frame_seq;        /*!< monotonic frame counter; join key for
                                    telemetry.log and events.log       */
 };

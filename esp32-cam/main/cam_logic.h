@@ -107,7 +107,7 @@
  */
 typedef struct
 {
-    uint64_t event_id;   /**< PIR VROOM event_id — correlation key         */
+    uint64_t event_id;   /**< PIR WROOM event_id — correlation key         */
     uint32_t cam_tx_id;  /**< hub-side UDP transport counter               */
     uint8_t  zone;       /**< PIR slot index (0-based)                     */
 } cam_trigger_t;

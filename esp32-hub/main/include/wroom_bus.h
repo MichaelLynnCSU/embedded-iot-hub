@@ -1,5 +1,5 @@
 /******************************************************************************
- * \file vroom_bus.h
+ * \file wroom_bus.h
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  * \date 01-01-2025
  *
@@ -41,18 +41,18 @@
  * \note    Structured event tracing — Phase 0 (2026-06-15):
  *          Normalized log prefixes across all subsystems:
  *          [BLE_PIR], [BLE_REED], [BLE_TEMP], [BLE_LOCK], [BLE_LIGHT],
- *          [VROOM], [TCP], [UART]. No struct or ABI changes.
+ *          [WROOM], [TCP], [UART]. No struct or ABI changes.
  *
  * \note    Structured event tracing — Phase 1 (2026-06-15):
- *          Local sequence counters added. g_bus_seq in vroom_bus.c
+ *          Local sequence counters added. g_bus_seq in wroom_bus.c
  *          increments on every publish. g_frame_seq in uart_manager.c
  *          increments on every parsed UART frame. No cross-module
  *          propagation. No struct or ABI changes.
  *
  * \note    Structured event tracing — Phase 2 (2026-06-15):
- *          event_id generator introduced inside vroom_bus.c only.
- *          vroom_event_id_generate() is static — not exported.
- *          event_id logged at [VROOM] ingest point only.
+ *          event_id generator introduced inside wroom_bus.c only.
+ *          wroom_event_id_generate() is static — not exported.
+ *          event_id logged at [WROOM] ingest point only.
  *          No external ABI changes. BLE/TCP/UART unaware.
  *
  * \note    Structured event tracing — Phase 3 (2026-06-15):
@@ -65,8 +65,8 @@
  *          TCP/UART still unaware of event_id. No struct changes.
  ******************************************************************************/
 
-#ifndef INCLUDE_VROOM_BUS_H_
-#define INCLUDE_VROOM_BUS_H_
+#ifndef INCLUDE_WROOM_BUS_H_
+#define INCLUDE_WROOM_BUS_H_
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -102,7 +102,7 @@ typedef struct
    uint8_t  slot;   /*!< 0-based PIR slot index  */
    uint32_t count;  /*!< motion event count      */
    int      batt;   /*!< battery SOC percent     */
-   uint64_t event_id;  /* vroom-assigned correlation key */
+   uint64_t event_id;  /* wroom-assigned correlation key */
 } PIR_PAYLOAD_T;
 
 /** \brief Reed sensor bus payload. */
@@ -112,7 +112,7 @@ typedef struct
    uint8_t state;  /*!< 0=closed, 1=open, 0xFF=unknown */
    int     batt;   /*!< battery SOC percent            */
    uint8_t mac[6]; /*!< device MAC address             */
-   uint64_t event_id;  /* vroom-assigned correlation key */
+   uint64_t event_id;  /* wroom-assigned correlation key */
 } REED_PAYLOAD_T;
 
 /** \brief Smart lock bus payload. */
@@ -120,21 +120,21 @@ typedef struct
 {
    uint8_t state; /*!< lock state          */
    int     batt;  /*!< battery SOC percent */
-   uint64_t event_id;  /* vroom-assigned correlation key */
+   uint64_t event_id;  /* wroom-assigned correlation key */
 } LOCK_PAYLOAD_T;
 
 /** \brief Smart light bus payload. */
 typedef struct
 {
    uint8_t state; /*!< relay state */
-   uint64_t event_id;  /* vroom-assigned correlation key */
+   uint64_t event_id;  /* wroom-assigned correlation key */
 } LIGHT_PAYLOAD_T;
 
 /** \brief UART temperature bus payload. */
 typedef struct
 {
    int avg_temp; /*!< average temperature in Celsius */
-   uint64_t event_id;  /* vroom-assigned correlation key */
+   uint64_t event_id;  /* wroom-assigned correlation key */
 } TEMP_PAYLOAD_T;
 
 /** \brief BLE temperature sensor bus payload. */
@@ -185,7 +185,7 @@ typedef struct
 
 /*************************** FUNCTION PROTOTYPES *****************************/
 
-/** \brief Initialize the vroom bus.
+/** \brief Initialize the wroom bus.
  *  \return void
  *  \warning Call once from app_main before any tasks start. */
 void bus_init(void);
@@ -252,4 +252,4 @@ uint64_t bus_publish_doorbell(uint8_t  device_id,
                            uint64_t event_id,
                            uint64_t timestamp_ms);
 
-#endif /* INCLUDE_VROOM_BUS_H_ */
+#endif /* INCLUDE_WROOM_BUS_H_ */

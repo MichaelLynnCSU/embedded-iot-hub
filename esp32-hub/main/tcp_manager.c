@@ -6,7 +6,7 @@
  * \brief TCP manager for ESP32 hub node.
  *
  * \details Maintains a non-blocking TCP client connection to BeagleBone.
- *          Drains vroom bus queues and sends consolidated JSON payloads
+ *          Drains wroom bus queues and sends consolidated JSON payloads
  *          every TCP_SEND_INTERVAL_MS.
  *
  *          BeagleBone connection (outbound client):
@@ -64,7 +64,7 @@
 #include "uart_manager.h"
 #include "tcp_manager.h"
 #include "device_gateway.h"
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 #include "trinity_log.h"
 #include "pi_controller.h"
 #include "motor_sm.h"
@@ -101,7 +101,7 @@ typedef struct
    uint8_t  state;
    uint8_t  offline;
    uint16_t gen;
-   uint64_t event_id;   /*!< last vroom event_id for this slot */
+   uint64_t event_id;   /*!< last wroom event_id for this slot */
 } REED_SLOT_STATE_T;
 
 typedef struct
@@ -112,7 +112,7 @@ typedef struct
    bool     active;
    int      occupied;
    uint8_t  offline;
-   uint64_t event_id;   /*!< last vroom event_id for this slot */
+   uint64_t event_id;   /*!< last wroom event_id for this slot */
 } PIR_SLOT_STATE_T;
 
 typedef struct
@@ -123,7 +123,7 @@ typedef struct
    bool     active;
    uint8_t  offline;
    uint16_t gen;
-   uint64_t event_id;   /*!< last vroom event_id for this slot */
+   uint64_t event_id;   /*!< last wroom event_id for this slot */
 } TEMP_SLOT_STATE_T;
 
 typedef struct

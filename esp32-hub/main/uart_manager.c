@@ -7,7 +7,7 @@
  *
  * \details Receives JSON temperature data from STM32 blue pill over
  *          UART2 at 115200 baud. Parses avg_temp and tx_id fields
- *          publishes to vroom bus for consumption by TCP and AWS managers.
+ *          publishes to wroom bus for consumption by TCP and AWS managers.
  *
  *          Message format: {"avg_temp": <int>, "tx_id": <uint>}\n
  *          tx_id is a per-session monotonic counter incremented by the
@@ -42,7 +42,7 @@
  *          Full trace chain:
  *            [STM32]  tx_id=7 avg_temp=22
  *            [UART]   tx_id=7 event_id=204 avg_temp=22
- *            [VROOM]  event_id=204 bus_seq=8 ingest type=UART_TEMP avg_temp=22
+ *            [WROOM]  event_id=204 bus_seq=8 ingest type=UART_TEMP avg_temp=22
  *            [TCP]    event_id=204 ...
  *
  *          tx_id=0 in hub log indicates old STM32 firmware (field absent) —
@@ -54,7 +54,7 @@
  *          regardless of whether avg_temp changed. Confirmed in hub firmware
  *          log: event_id=11 and event_id=14 both carried avg_temp=20 with
  *          no change between them (~5s apart, one per STM32 transmit cycle).
- *          This generated continuous UART_TEMP events in the vroom bus and
+ *          This generated continuous UART_TEMP events in the wroom bus and
  *          flooded events[] on the wire protocol with no-change publishes.
  *
  *          bus_publish_temp() now fires only when new_temp != g_avg_temp.
@@ -79,7 +79,7 @@
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 #include "trinity_log.h"
 
 #define TEMP_HIGH_THRESHOLD  100  /**< temperature high event threshold C  */

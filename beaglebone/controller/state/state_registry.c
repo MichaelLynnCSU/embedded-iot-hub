@@ -13,7 +13,7 @@
  *          These survive the full chain:
  *
  *            [BLE_LOCK]  event_id=8
- *            [VROOM]     event_id=8
+ *            [WROOM]     event_id=8
  *            [TCP]       event_id=8
  *            [DISPATCH]  event_id=8
  *            [SHM]       transport=sensor_shm write src=pipe_ingress device=LOCK eid=8

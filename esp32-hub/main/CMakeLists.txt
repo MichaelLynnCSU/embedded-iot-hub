@@ -17,7 +17,7 @@ idf_component_register(
         "pi_controller.c"
         "device_gateway.c"
         "build_info.c"
-        "vroom_bus.c"
+        "wroom_bus.c"
         "trinity_wdt_idf.c"
         "trinity_canary_idf.c"
         "trinity_nvs_idf.c"

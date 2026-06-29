@@ -46,7 +46,7 @@
 #include "ble_manager.h"
 #include "ble_internal.h"
 #include "trinity_log.h"
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -623,7 +623,7 @@ void ble_send_lock_command(uint8_t state)
 {
    esp_err_t ret        = ESP_OK;
    uint8_t   payload[3] = {0};   /**< [state][tx_id_lo][tx_id_hi] */
-   uint64_t  eid        = 0;     /**< vroom event_id after bus commit */
+   uint64_t  eid        = 0;     /**< wroom event_id after bus commit */
 
    s_tx_id++;
    payload[LOCK_WRITE_STATE_IDX]    = state;

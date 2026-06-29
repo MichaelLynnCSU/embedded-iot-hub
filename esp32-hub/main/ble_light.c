@@ -33,7 +33,7 @@
 #include "trinity_log.h"
 #include <string.h>
 #include <stdlib.h>
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 
 #define LIGHT_CONN_ID_INVALID  0xFFFF /**< sentinel for no active connection */
 #define LIGHT_HB_CHAR_UUID     0xAB02 /**< heartbeat characteristic UUID */
@@ -571,7 +571,7 @@ void ble_send_light_command(uint8_t state)
 {
    esp_err_t ret     = ESP_OK;    /**< esp return value  */
    uint8_t   payload[3] = {0};   /**< [state][tx_id_lo][tx_id_hi] */
-   uint64_t  eid     = 0;        /**< vroom event_id after bus commit */
+   uint64_t  eid     = 0;        /**< wroom event_id after bus commit */
 
    s_tx_id++;
    payload[0] = state;

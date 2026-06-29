@@ -17,7 +17,7 @@
 #define INCLUDE_AWS_MANAGER_H_
 
 #include "freertos/event_groups.h"
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 /*************************** FUNCTION PROTOTYPES *****************************/
 
 /** \brief Initialize the AWS manager.

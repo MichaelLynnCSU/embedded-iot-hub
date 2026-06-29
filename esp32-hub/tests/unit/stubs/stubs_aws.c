@@ -9,7 +9,7 @@ void trinity_log_event(const char *p) { (void)p; }
 void trinity_wdt_kick(void) {}
 void trinity_wdt_add(void)  {}
 
-/* vroom bus stubs */
+/* wroom bus stubs */
 void bus_publish_temp(int t)  { (void)t; }
 void bus_publish_pir(uint8_t s, uint32_t c, int b) { (void)s;(void)c;(void)b; }
 void bus_publish_reed(uint8_t id, uint8_t st, int b, const uint8_t *m) { (void)id;(void)st;(void)b;(void)m; }

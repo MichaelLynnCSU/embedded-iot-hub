@@ -33,7 +33,7 @@
  * \note    Structured event tracing — Phase 3 (2026-06-15):
  *          bus_publish_reed() now returns uint64_t event_id.
  *          Caller captures and logs event_id at BLE ingress for
- *          end-to-end correlation with [VROOM] ingest log.
+ *          end-to-end correlation with [WROOM] ingest log.
  *
  * \note    Structured event tracing — Phase 3.5 (2026-06-16):
  *          s_rx_seq added. BLE adv ingress sequence counter logged as
@@ -66,7 +66,7 @@
 #include "ble_internal.h"
 #include "ble_proto.h"
 #include "config.h"
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -308,7 +308,7 @@ void ble_reed_preinit(void)
  *          slot. New MACs are allocated a slot if not in cooldown and
  *          table is not full. Captures returned event_id from
  *          bus_publish_reed() and logs it at BLE ingress for
- *          end-to-end correlation with [VROOM] ingest log.
+ *          end-to-end correlation with [WROOM] ingest log.
  *
  *          tx_id is extracted from mfg_data[3..4] (little-endian) if
  *          present (mfg_len >= 5). Old devices sending 3-byte payloads

@@ -9,7 +9,7 @@
  *
  * \note  Identity model (2026-06-18):
  *        The camera trigger is a side effect of a PIR event, not a new
- *        event. send_cam_trigger() takes event_id (PIR VROOM event_id)
+ *        event. send_cam_trigger() takes event_id (PIR WROOM event_id)
  *        and zone (PIR slot index) and stamps both into the UDP payload
  *        alongside cam_tx_id so the full camera lifecycle is traceable
  *        back to the originating PIR event with a single grep on event_id.
@@ -29,7 +29,7 @@
  *        Full trace chain:
  *
  *          [BLE_PIR]    tx_id=144 event_id=101 slot=0
- *          [VROOM]      event_id=101 ingest type=BLE_PIR
+ *          [WROOM]      event_id=101 ingest type=BLE_PIR
  *          [UDP_CAM_TX] cam_tx_id=42 event_id=101 zone=0
  *          [UDP_CAM_RX] cam_tx_id=42 event_id=101 zone=0
  *          [CAM]        event_id=101 capture_start
@@ -61,7 +61,7 @@ static uint32_t    g_cam_tx_id = 0; /**< UDP transport counter — increments on
 /******************************************************************************
  * \brief Fire a UDP CAPTURE packet to the ESP32-CAM.
  *
- * \param event_id  PIR VROOM event_id that caused this trigger. Stamped into
+ * \param event_id  PIR WROOM event_id that caused this trigger. Stamped into
  *                  the UDP payload and logged at [UDP_CAM_TX] so the camera
  *                  lifecycle is traceable back to the originating PIR event
  *                  with a single grep on event_id.

@@ -30,7 +30,7 @@
  * \note    Structured event tracing — Phase 3 (2026-06-15):
  *          bus_publish_ble_temp() now returns uint64_t event_id.
  *          Caller captures and logs event_id at BLE ingress for
- *          end-to-end correlation with [VROOM] ingest log.
+ *          end-to-end correlation with [WROOM] ingest log.
  *
  * \note    Structured event tracing -- tx_id (2026-06-16):
  *          s_rx_seq removed. tx_id extracted from mfg_data[4..5]
@@ -53,7 +53,7 @@
 #include "ble_temp.h"
 #include "ble_internal.h"
 #include "config.h"
-#include "vroom_bus.h"
+#include "wroom_bus.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -132,7 +132,7 @@ void ble_temp_preinit(void)
  *
  * \details Implements temp slot state machine. Known MACs update their
  *          slot. New MACs are allocated a slot if the table is not full.
- *          Publishes to vroom bus on first seen or data change.
+ *          Publishes to wroom bus on first seen or data change.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -150,7 +150,7 @@ void ble_temp_handle(const uint8_t *p_mfg,
    bool     was_offline   = false; /**< slot was offline flag        */
    bool     changed       = false; /**< data changed flag            */
    uint16_t gen           = 0;    /**< slot generation counter       */
-   uint64_t eid           = 0;    /**< vroom bus event id            */
+   uint64_t eid           = 0;    /**< wroom bus event id            */
    int      i             = 0;    /**< loop index                    */
 
    if ((NULL == p_mfg) || (mfg_len < MFG_TEMP_MIN_LEN))

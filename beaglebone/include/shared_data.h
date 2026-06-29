@@ -26,7 +26,7 @@
  *
  * \note    Structured event tracing — finish line (2026-06-16):
  *          event_id added to tail of SharedSensorData. Originally carried
- *          the VROOM-assigned correlation key from the last sensor frame,
+ *          the WROOM-assigned correlation key from the last sensor frame,
  *          set by shm_updater.c:handle_get_latest() for LCD correlation
  *          logging only.
  *
@@ -167,7 +167,7 @@ struct SharedSensorData
    uint8_t  pir_online[MAX_PIRS];
 
    /* Structured event tracing finish line (2026-06-16):
-    * Originally: VROOM-assigned event_id from the last sensor frame,
+    * Originally: WROOM-assigned event_id from the last sensor frame,
     * set by shm_updater.c:handle_get_latest() for LCD correlation logging.
     *
     * Per-device event_id logging (2026-06-19):
