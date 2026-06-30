@@ -5,7 +5,7 @@ persistence, networking, inference, and display each run as isolated processes
 or dedicated hardware nodes for independent failure recovery.
 
 ## Architecture
-![System Architecture](docs/Arch%20diagram2.png)
+![System Architecture](docs/Arch%20diagram3.png)
 
 ## Hardware
 
@@ -159,7 +159,7 @@ doorbell                — TCP server for doorbell JPEG, TFLite detection, SHM 
 doorbell_stream         — TCP server for doorbell MJPEG → ffmpeg → mediamtx
 mediamtx                — RTSP server for doorbell live stream
 api-server              — REST API (Python) over POSIX SHM
-lcd-display             — thermostat + sensor readout on I2C LCD
+thermostat-lcd          — thermostat + sensor readout on I2C LCD
 ```
 
 **Service boot order:**
@@ -185,7 +185,7 @@ network-online.target
     → doorbell_stream
     → mediamtx
     → api-server
-    → lcd-display
+    → thermostat-lcd
 ```
 
 **Named pipe (FIFO) startup ordering — chicken-and-egg note:**
