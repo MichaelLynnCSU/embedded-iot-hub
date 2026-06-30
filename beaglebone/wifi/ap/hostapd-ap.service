@@ -1,4 +1,13 @@
 [Unit]
+# NOTE: This is a custom unit, distinct from the stock hostapd.service
+# shipped by the hostapd Debian/Yocto package (which stays disabled and
+# unused on this image). The stock unit has no ExecStartPre wait
+# condition and assumes the network interface already exists at boot.
+# wlu1 is a USB WiFi adapter that takes a variable amount of time to
+# enumerate after power-on, so the stock unit can race and fail to
+# start. This unit adds the wait condition below instead of patching
+# the package-managed hostapd.service, which would be silently
+# overwritten on the next hostapd package update / image rebuild.
 Description=hostapd camera AP
 After=network.target
 
