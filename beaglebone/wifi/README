@@ -1,0 +1,43 @@
+# BeagleBone — WiFi
+
+Network setup for the camera AP and the ESP-01 sensor bridge.
+
+## Layout
+
+| Path | Purpose |
+|------|---------|
+| `ap/` | systemd units for the camera AP (`hostapd-ap.service`, `dnsmasq-ap.service`) |
+| `debug_tools/` | ESP-01 connection diagnostics — see `debug_tools/README` |
+| `esp01_tcp_server_setup.py` | AT command setup script for the ESP-01 WiFi module |
+| `secrets/` | gitignored — WPA PSK and other credentials, never committed |
+
+## Camera AP
+
+`ap/hostapd-ap.service` and `ap/dnsmasq-ap.service` are the source-of-truth
+copies for the camera subnet (`10.0.1.0/24`, SSID `cams_2.4`) and are synced
+into the Yocto layer at `~/meta-bbb/recipes-core/hostapd/files/` during
+image builds (see the Yocto Auto section of the build reference).
+
+`hostapd-ap.service` is a custom unit, distinct from the stock
+`hostapd.service` shipped by the hostapd package (which stays disabled).
+The stock unit has no wait condition for the network interface and can
+race against `wlu1` enumerating after boot, since it's a USB WiFi
+adapter. `hostapd-ap.service` adds an `ExecStartPre` wait for `wlu1`
+instead of patching the package-managed unit, which would be
+overwritten on the next package update or image rebuild.
+
+`dnsmasq-ap.service` is present but currently **disabled and unused** —
+the live DHCP config for the camera subnet (`/etc/dnsmasq.d/cams.conf`)
+is loaded by the generic, base-image `dnsmasq.service` instead. See the
+main README's BeagleBone Pipeline boot order for the full explanation.
+
+## ESP-01 Bridge
+
+`esp01_tcp_server_setup.py` configures the ESP-01 module's AT command
+server on boot via `esp01-tcp-server.service` (oneshot).
+
+## Secrets
+
+`secrets/` and `wifi_secrets.py` are gitignored. Do not commit WPA
+passphrases or credentials — see the repo's `.gitignore` for the full
+list of excluded paths under this directory.
