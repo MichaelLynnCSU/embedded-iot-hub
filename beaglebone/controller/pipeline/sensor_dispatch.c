@@ -36,12 +36,48 @@
 #include "db_persist.h"
 #include "uart_controller.h"
 #include "sensor_dispatch.h"
+#include "../../include/cam_trigger_ipc.h"
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <string.h>
+#include <unistd.h>
 
 /******************************************************************************
  * \brief Receive and process one complete sensor data frame.
  *
  * \param p_data - Pointer to validated SensorData frame from pipe_reader.c.
  ******************************************************************************/
+static int8_t  g_pir_prev_occupied[MAX_PIRS] = {0}; /**< per-slot previous occupancy */
+
+/*---------------------------------------------------------------------------*/
+/* Cam trigger sender                                                          */
+/*---------------------------------------------------------------------------*/
+
+static void dispatch_cam_trigger(uint8_t zone, uint64_t event_id)
+{
+   struct sockaddr_un  addr = {0};
+   struct CamTriggerRequest req = {0};
+   int sock = -1;
+
+   req.event_id = event_id;
+   req.zone     = zone;
+
+   sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+   if (sock < 0) { return; }
+
+   addr.sun_family = AF_UNIX;
+   strncpy(addr.sun_path, CAM_TRIGGER_SOCK, sizeof(addr.sun_path) - 1);
+
+   sendto(sock, &req, sizeof(req), 0,
+          (struct sockaddr *)&addr, sizeof(addr));
+   close(sock);
+
+   LOG("[DISPATCH] cam_trigger zone=%u event_id=%llu",
+       (unsigned)zone, (unsigned long long)event_id);
+}
+
+/*---------------------------------------------------------------------------*/
+
 void sensor_frame_dispatch(const struct SensorData *p_data)
 {
    struct LatestData snapshot;
@@ -125,4 +161,15 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
    shm_update_frame(&snapshot, p_data);
    db_persist_frame(p_data);
    uart_update_frame(&snapshot, p_data);
+
+   /* PIR 0->1 occupancy transition — send capture trigger to camera_manager */
+   for (i = 0; i < MAX_PIRS; i++)
+   {
+      int8_t occ = p_data->pir_slots[i].occupied;
+      if ((0 == g_pir_prev_occupied[i]) && (1 == occ))
+      {
+         dispatch_cam_trigger((uint8_t)i, p_data->pir_slots[i].event_id);
+      }
+      g_pir_prev_occupied[i] = occ;
+   }
 }

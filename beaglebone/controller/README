@@ -1,20 +1,30 @@
 # BeagleBone — Data Controller
 
-Processes sensor data from the sensor server, manages the SQLite database, handles UART communication, and drives heartbeat logic.
+Receives sensor frames from the sensor server and camera manager via named
+pipes, fans out to all downstream subsystems: state registry, shared memory,
+SQLite database, UART, and PIR-triggered camera capture.
 
 ## Source Files
 
 | File | Description |
 |:-----|:------------|
 | `data_controller.c` | Main controller loop |
-| `commands.c` / `commands.h` | Command dispatch |
-| `cmd_handler.c` | Command handler implementations |
+| `pipeline/pipe_reader.c` | Sensor server pipe reader |
+| `pipeline/cam_pipe_reader.c` | Camera manager pipe reader |
+| `pipeline/sensor_dispatch.c` | Sensor frame fanout — state, SHM, DB, UART, cam trigger |
+| `pipeline/cam_dispatch.c` | Camera frame fanout |
+| `state/state_registry.c` | Canonical state registry |
+| `state/shm_updater.c` | Shared memory projection |
+| `state/db_persist.c` | SQLite persistence |
+| `uart/uart_staging.c` | UART frame staging |
+| `uart/uart_transport.c` | UART transport layer |
+| `uart/uart_controller.c` | UART communication to STM32 targets |
+| `uart/uart_lock.c` | UART mutex |
+| `doorbell/doorbell_pending.c` | Doorbell event pending state |
+| `doorbell/doorbell_result_reader.c` | Doorbell SHM result consumer |
 | `db_manager.c` | SQLite database interface |
 | `heartbeat.c` | Device heartbeat tracking |
-| `uart_controller.c` | UART communication to STM32 targets |
-| `shared_data.h` | Shared state structures |
-| `controller_internal.h` | Internal types |
-| `data-controller-wrapper.sh` | systemd wrapper script |
+| `build_info.c` | Build timestamp |
 
 ## Dependencies
 
@@ -25,12 +35,30 @@ sudo apt install libsqlite3-dev:armhf
 ## Build
 
 ```bash
-cd beaglebone/controller
 export ARCH=arm
 export CROSS_COMPILE=arm-linux-gnueabihf-
-${CROSS_COMPILE}gcc data_controller.c commands.c db_manager.c heartbeat.c \
-  uart_controller.c cmd_handler.c -o data_controller \
-  -lpthread -lrt -lsqlite3
+cd ~/embedded-iot-hub/beaglebone/controller
+
+${CROSS_COMPILE}gcc -g -O0 \
+  data_controller.c \
+  pipeline/pipe_reader.c \
+  pipeline/cam_pipe_reader.c \
+  pipeline/sensor_dispatch.c \
+  pipeline/cam_dispatch.c \
+  state/state_registry.c \
+  state/shm_updater.c \
+  state/db_persist.c \
+  uart/uart_staging.c \
+  uart/uart_transport.c \
+  uart/uart_controller.c \
+  uart/uart_lock.c \
+  doorbell/doorbell_pending.c \
+  doorbell/doorbell_result_reader.c \
+  build_info.c \
+  db_manager.c \
+  heartbeat.c \
+  -I./include -I. -I../inference/app -I../include \
+  -o data_controller -lpthread -lrt -lm -lsqlite3
 
 # Verify architecture
 file data_controller
@@ -40,7 +68,26 @@ file data_controller
 ## Deploy
 
 ```bash
-scp data_controller debian@beaglebone.local:/home/debian/controller/
-ssh debian@beaglebone.local "sudo systemctl restart sensor-server data-controller && sudo systemctl status sensor-server"
+sudo systemctl stop data-controller sensor-server
+scp data_controller debian@beaglebone.local:~/controller/data_controller
+sudo systemctl start sensor-server data-controller
+tail -f /var/log/data_controller.log
 ```
 
+## PIR Camera Trigger
+
+On a PIR 0→1 occupancy transition, `sensor_dispatch.c` sends a
+`CamTriggerRequest` over a UNIX domain datagram socket to
+`camera_manager` (`/tmp/cam_trigger.sock`). `camera_manager` looks up
+the camera IP from its heartbeat registry and sends a UDP `CAPTURE`
+packet directly to the camera on port 9091.
+
+See `../include/cam_trigger_ipc.h` for the IPC contract.
+
+## Unit Tests
+
+```bash
+cd ~/embedded-iot-hub/beaglebone/controller/tests/unit
+rm -rf build && mkdir build && cd build
+cmake .. && make && ./test_controller && ./test_db_tx
+```

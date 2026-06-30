@@ -45,6 +45,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "../include/ipc_proto.h"
+#include "../include/cam_trigger_ipc.h"
+#include <sys/un.h>
 
 /*---------------------------------------------------------------------------*/
 /* Config                                                                      */
@@ -66,7 +68,9 @@
 
 static time_t          g_cam_last_seen[MAX_CAMS]          = {0};
 static time_t          g_doorbell_last_seen[MAX_DOORBELL_CAMS] = {0};
+static struct in_addr  g_cam_ip[MAX_CAMS]                      = {{0}};
 static pthread_mutex_t g_liveness_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t        g_cam_tx_id      = 0; /**< UDP trigger transport counter */
 
 /* Forward declarations */
 static uint16_t cam_get_age_s(uint8_t slot);
@@ -223,12 +227,27 @@ static int parse_str_field(const char *p_json, const char *p_key,
 /* Liveness accessors                                                          */
 /*---------------------------------------------------------------------------*/
 
-static void cam_stamp(uint8_t slot)
+static void cam_stamp(uint8_t slot, struct in_addr src_ip)
 {
    if (slot >= MAX_CAMS) { return; }
    pthread_mutex_lock(&g_liveness_mutex);
    g_cam_last_seen[slot] = time(NULL);
+   g_cam_ip[slot]        = src_ip;
    pthread_mutex_unlock(&g_liveness_mutex);
+}
+
+static int cam_get_ip(uint8_t slot, struct in_addr *out)
+{
+   if (slot >= MAX_CAMS || NULL == out) { return -1; }
+   pthread_mutex_lock(&g_liveness_mutex);
+   if (g_cam_last_seen[slot] == 0)
+   {
+      pthread_mutex_unlock(&g_liveness_mutex);
+      return -1;
+   }
+   *out = g_cam_ip[slot];
+   pthread_mutex_unlock(&g_liveness_mutex);
+   return 0;
 }
 
 static void doorbell_stamp(uint8_t device_id)
@@ -359,9 +378,10 @@ static void ingress_loop(int sock)
             log_msg("[CAM] device_id=%u out of range", device_id);
             continue;
          }
-         cam_stamp((uint8_t)device_id);
-         log_msg("[CAM] heartbeat slot=%u age_s=%u",
+         cam_stamp((uint8_t)device_id, src.sin_addr);
+         log_msg("[CAM] heartbeat slot=%u ip=%s age_s=%u",
                  device_id,
+                 inet_ntoa(src.sin_addr),
                  (unsigned)cam_get_age_s((uint8_t)device_id));
          pipe_write_cam_frame();
       }
@@ -419,6 +439,128 @@ static void *ticker_thread(void *p_arg)
    return NULL;
 }
 
+/*---------------------------------------------------------------------------*/
+/* UDP CAPTURE sender                                                          */
+/*---------------------------------------------------------------------------*/
+
+static void send_capture_trigger(uint8_t zone, uint64_t event_id,
+                                  struct in_addr cam_ip)
+{
+   struct sockaddr_in addr = {0};
+   char               buf[64];
+   int                sock   = -1;
+   int                buf_len = 0;
+
+   g_cam_tx_id++;
+
+   buf_len = snprintf(buf, sizeof(buf),
+                      "CAPTURE:event_id=%llu,cam_tx_id=%u,zone=%d",
+                      (unsigned long long)event_id,
+                      (unsigned)g_cam_tx_id,
+                      (int)zone);
+
+   addr.sin_family      = AF_INET;
+   addr.sin_port        = htons(CAM_UDP_PORT);
+   addr.sin_addr        = cam_ip;
+
+   sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+   if (sock < 0)
+   {
+      log_msg("[TRIGGER] socket() failed errno=%d", errno);
+      return;
+   }
+
+   if (sendto(sock, buf, (size_t)buf_len, 0,
+              (struct sockaddr *)&addr, sizeof(addr)) < 0)
+   {
+      log_msg("[TRIGGER] sendto() failed errno=%d", errno);
+   }
+   else
+   {
+      log_msg("[TRIGGER] sent zone=%u event_id=%llu cam_tx_id=%u ip=%s",
+              (unsigned)zone,
+              (unsigned long long)event_id,
+              (unsigned)g_cam_tx_id,
+              inet_ntoa(cam_ip));
+   }
+
+   close(sock);
+}
+
+/*---------------------------------------------------------------------------*/
+/* UNIX domain trigger listener                                                */
+/*---------------------------------------------------------------------------*/
+
+static void *trigger_listener_thread(void *arg)
+{
+   struct sockaddr_un  bind_addr = {0};
+   struct CamTriggerRequest req  = {0};
+   struct in_addr      cam_ip    = {0};
+   int                 sock      = -1;
+   ssize_t             n         = 0;
+
+   (void)arg;
+
+   unlink(CAM_TRIGGER_SOCK);
+
+   sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+   if (sock < 0)
+   {
+      log_msg("[TRIGGER] UNIX socket() failed errno=%d", errno);
+      return NULL;
+   }
+
+   bind_addr.sun_family = AF_UNIX;
+   strncpy(bind_addr.sun_path, CAM_TRIGGER_SOCK,
+           sizeof(bind_addr.sun_path) - 1);
+
+   if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0)
+   {
+      log_msg("[TRIGGER] bind() failed on %s errno=%d",
+              CAM_TRIGGER_SOCK, errno);
+      close(sock);
+      return NULL;
+   }
+
+   log_msg("[TRIGGER] listening on %s", CAM_TRIGGER_SOCK);
+
+   while (g_running)
+   {
+      n = recv(sock, &req, sizeof(req), 0);
+      if (n != (ssize_t)sizeof(req))
+      {
+         if (g_running) { log_msg("[TRIGGER] bad recv n=%zd", n); }
+         continue;
+      }
+
+      if (req.zone >= MAX_CAMS)
+      {
+         log_msg("[TRIGGER] zone=%u out of range", (unsigned)req.zone);
+         continue;
+      }
+
+      if (!cam_is_online(req.zone))
+      {
+         log_msg("[TRIGGER] zone=%u offline — trigger dropped", (unsigned)req.zone);
+         continue;
+      }
+
+      if (cam_get_ip(req.zone, &cam_ip) < 0)
+      {
+         log_msg("[TRIGGER] zone=%u no IP known — trigger dropped", (unsigned)req.zone);
+         continue;
+      }
+
+      send_capture_trigger(req.zone, req.event_id, cam_ip);
+   }
+
+   close(sock);
+   unlink(CAM_TRIGGER_SOCK);
+   return NULL;
+}
+
+/*---------------------------------------------------------------------------*/
+
 int main(void)
 {
    int                sock     = -1;
@@ -461,9 +603,12 @@ int main(void)
    log_msg("[CAMERA_MGR] listening on 0.0.0.0:%d", CAMERA_MANAGER_PORT);
 
    pthread_t tick_thread;
-   pthread_create(&tick_thread, NULL, ticker_thread, NULL);
+   pthread_t trig_thread;
+   pthread_create(&tick_thread, NULL, ticker_thread,          NULL);
+   pthread_create(&trig_thread, NULL, trigger_listener_thread, NULL);
    ingress_loop(sock);
    pthread_join(tick_thread, NULL);
+   pthread_join(trig_thread, NULL);
 
    close(sock);
    log_msg("[CAMERA_MGR] shutdown");

@@ -1,0 +1,102 @@
+# BeagleBone — Camera Manager
+
+Manages all camera devices on the network. Receives UDP heartbeats from
+ESP32-CAM and ESP32 doorbell devices, maintains a liveness registry, learns
+camera IPs from incoming packets, and dispatches UDP CAPTURE triggers to
+cameras on PIR occupancy events.
+
+## Source Files
+
+| File | Description |
+|:-----|:------------|
+| `camera_manager.c` | Main process — UDP ingress, IP registry, trigger dispatcher |
+| `build_info.c` | Build timestamp |
+
+## Architecture
+ESP32-CAM (heartbeat UDP 9094)
+
+│
+
+▼
+
+camera_manager
+
+├── learns source IP from recvfrom()
+
+├── stamps liveness per slot
+
+├── writes CamData frame to /tmp/cam_pipe → controller
+
+│
+
+└── UNIX socket /tmp/cam_trigger.sock
+
+│
+
+▼ (CamTriggerRequest from controller)
+
+lookup cam IP + verify online
+
+│
+
+▼
+
+UDP CAPTURE:event_id=...,zone=... → cam:9091
+
+## Ports
+
+| Port | Protocol | Direction | Purpose |
+|------|----------|-----------|---------|
+| 9094 | UDP | inbound | Heartbeats from all camera devices |
+| 9091 | UDP | outbound | CAPTURE triggers to ESP32-CAM |
+| 9092 | UDP | outbound | Doorbell press forwarding to hub |
+
+## IPC
+
+| Path | Type | Direction | Purpose |
+|------|------|-----------|---------|
+| `/tmp/cam_pipe` | Named FIFO | outbound | Camera liveness frames to controller |
+| `/tmp/cam_trigger.sock` | UNIX datagram | inbound | PIR trigger requests from controller |
+
+See `../include/cam_trigger_ipc.h` for the trigger IPC contract.
+See `../include/ipc_proto.h` for the `CamData` pipe frame layout.
+
+## Dependencies
+
+```bash
+sudo apt install gcc-arm-linux-gnueabihf
+```
+
+## Build
+
+```bash
+export ARCH=arm
+export CROSS_COMPILE=arm-linux-gnueabihf-
+cd ~/embedded-iot-hub/beaglebone/camera_manager
+
+arm-linux-gnueabihf-gcc -g -O0 \
+  camera_manager.c build_info.c \
+  -o camera_manager \
+  -I../include \
+  -lpthread
+
+# Verify architecture
+file camera_manager
+# Expected: ELF 32-bit LSB pie executable, ARM...
+```
+
+## Deploy
+
+```bash
+sudo systemctl stop camera-manager
+scp camera_manager debian@beaglebone.local:~/camera_manager/camera_manager
+sudo systemctl start camera-manager
+tail -f /var/log/camera_manager.log
+```
+
+## Service Notes
+
+`camera-manager.service` depends on `data-controller.service` and uses
+`ExecStartPre` to wait until `/tmp/cam_pipe` exists before starting.
+This prevents a deadlock where `camera_manager` attempts to open the
+write end of the pipe before the controller has opened the read end.

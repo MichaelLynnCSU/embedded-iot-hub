@@ -55,29 +55,14 @@
  *          when bus_publish_pir() fires — no point logging a tx_id for
  *          an advertisement that did not trigger a publish.
  *
- * \note    Cam trigger moved here from event_aggregator.c (2026-06-16):
- *          event_aggregator.c deleted. Cam trigger fires at BLE ingress
- *          immediately after pir_window_update() so the correct
- *          authoritative occupancy source (pir_window_get_occupied) is
- *          used. g_pir_prev_occupied[] tracks per-slot previous state
- *          for 0->1 edge detection. Trigger fires only when the hub
- *          sliding window (60s / 2-event threshold / 600s hold) confirms
- *          occupancy — not on raw device occupied flag.
- *
- * \note    Cam trigger identity model (2026-06-18):
- *          The camera trigger is a side effect of the PIR event, not a
- *          new event. bus_publish_pir() is now called before the cam
- *          trigger so the returned event_id is available to pass into
- *          send_cam_trigger(). The same event_id then appears at every
- *          hop from PIR detection to inference result:
- *
- *            [BLE_PIR]    tx_id=144 event_id=101 slot=0
- *            [WROOM]      event_id=101 ingest type=BLE_PIR
- *            [UDP_CAM_TX] cam_tx_id=42 event_id=101 zone=0
- *            [UDP_CAM_RX] cam_tx_id=42 event_id=101
- *            [INFER]      event_id=101 person=1 conf=92
- *
- *          grep "event_id=101" shows every hop in one command.
+ * 
+ote    Cam trigger moved to BeagleBone inference pipeline (2026-06-29):
+ *          Hub no longer sends UDP triggers to the camera. On PIR 0->1
+ *          occupancy transition the BeagleBone looks up the camera IP
+ *          from the camera_manager heartbeat registry and sends the
+ *          CAPTURE trigger directly. event_id correlation is preserved
+ *          via bus_publish_pir() — the same event_id appears at every
+ *          hop from PIR detection to inference result.
  ******************************************************************************/
 
 #include "ble_pir.h"
@@ -86,7 +71,6 @@
 #include "config.h"
 #include "wroom_bus.h"
 #include "pir_window.h"
-#include "cam_trigger.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -134,7 +118,6 @@ typedef struct
 static PIR_SLOT_T        g_pir_table[MAX_PIRS];          /**< PIR slot table          */
 static StaticSemaphore_t g_pir_mutex_buf;                 /**< static mutex buf        */
 static SemaphoreHandle_t g_pir_mutex = NULL;              /**< PIR table mutex         */
-static uint8_t           g_pir_prev_occupied[MAX_PIRS];  /**< per-slot previous occ   */
 
 /*----------------------------------------------------------------------------*/
 
@@ -153,9 +136,7 @@ void ble_pir_preinit(void)
    g_pir_mutex = xSemaphoreCreateMutexStatic(&g_pir_mutex_buf);
    configASSERT(g_pir_mutex);
 
-   (void)memset(g_pir_table,         0, sizeof(g_pir_table));
-   (void)memset(g_pir_prev_occupied, 0, sizeof(g_pir_prev_occupied));
-}
+   (void)memset(g_pir_table,         0, sizeof(g_pir_table));}
 
 /*----------------------------------------------------------------------------*/
 
@@ -179,14 +160,9 @@ void ble_pir_preinit(void)
  *          tx_id is extracted from mfg_data[8..9] before the changed
  *          check so it is always available when publish fires.
  *
- *          Cam trigger fires here on confirmed 0->1 occupancy transition
- *          per hub sliding window. bus_publish_pir() is called before the
- *          trigger so the returned event_id can be passed into
- *          send_cam_trigger() — the camera lifecycle carries the same
- *          event_id as the originating PIR event. A zero eid is passed
- *          if the slot data was unchanged and no publish fired; this
- *          should not occur in practice since occupancy change implies
- *          a data change, but is handled safely.
+ *          Occupancy is computed here via pir_window_get_occupied().
+ *          Transition detection and cam trigger are handled by the
+ *          BeagleBone inference pipeline. See beaglebone/inference/.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -207,7 +183,6 @@ void ble_pir_handle(const uint8_t *p_mfg,
    uint64_t eid      = 0;     /**< WROOM event_id — carried into cam
                                *   trigger so the full camera lifecycle
                                *   shares the originating PIR identity    */
-   int      occ      = 0;     /**< hub-computed occupancy after window    */
    int      i        = 0;     /**< loop index                             */
 
    if ((NULL == p_mfg) || (mfg_len < MFG_PIR_MIN_LEN))
@@ -272,10 +247,6 @@ void ble_pir_handle(const uint8_t *p_mfg,
 
       stamp_device((BLE_DEV_IDX_E)(DEV_IDX_PIR + slot));
       pir_window_update(slot, now, (int)occupied);
-
-      /* Publish before cam trigger so event_id is available to carry
-       * into send_cam_trigger(). Camera lifecycle is a side effect of
-       * this PIR event — not a new event — so it shares event_id. */
       if (changed)
       {
          eid = bus_publish_pir((uint8_t)(slot + 1), count, batt);
@@ -283,18 +254,6 @@ void ble_pir_handle(const uint8_t *p_mfg,
                   tx_id, (unsigned long long)eid, slot, count, batt);
       }
 
-      /* Cam trigger on hub-confirmed 0->1 occupancy transition.
-       * Uses pir_window_get_occupied() — authoritative sliding window
-       * result — not the raw device occupied flag.
-       * event_id passed through so [UDP_CAM_TX] shares PIR identity. */
-      occ = pir_window_get_occupied(slot);
-      if ((0 == g_pir_prev_occupied[slot]) && (1 == occ))
-      {
-         ESP_LOGI(TAG, "[BLE_PIR] slot=%d occ 0->1 -> cam trigger event_id=%llu",
-                  slot, (unsigned long long)eid);
-         send_cam_trigger(eid, (uint8_t)slot);
-      }
-      g_pir_prev_occupied[slot] = (uint8_t)occ;
 
       return;
    }
@@ -333,23 +292,11 @@ void ble_pir_handle(const uint8_t *p_mfg,
    stamp_device((BLE_DEV_IDX_E)(DEV_IDX_PIR + slot));
    pir_window_update(slot, now, (int)occupied);
 
-   /* Publish before cam trigger so event_id is available to carry
-    * into send_cam_trigger(). First-seen slot always publishes. */
    eid = bus_publish_pir((uint8_t)(slot + 1), count, batt);
    ESP_LOGI(TAG, "[BLE_PIR] tx_id=%u event_id=%llu slot=%d count=%u batt=%d%%",
             tx_id, (unsigned long long)eid, slot, count, batt);
-
-   /* First-seen slot: check occupancy and arm prev state.
-    * event_id passed through so [UDP_CAM_TX] shares PIR identity. */
-   occ = pir_window_get_occupied(slot);
-   if ((0 == g_pir_prev_occupied[slot]) && (1 == occ))
-   {
-      ESP_LOGI(TAG, "[BLE_PIR] slot=%d occ 0->1 (new slot) -> cam trigger event_id=%llu",
-               slot, (unsigned long long)eid);
-      send_cam_trigger(eid, (uint8_t)slot);
-   }
-   g_pir_prev_occupied[slot] = (uint8_t)occ;
 }
+
 
 /*----------------------------------------------------------------------------*/
 
@@ -391,9 +338,7 @@ void ble_expire_pir_slots(void)
       {
          ESP_LOGW(TAG, "[BLE_PIR] slot=%d name=%s gen=%u expired — clearing",
                   i, g_pir_table[i].name, g_pir_table[i].generation);
-         (void)memset(&g_pir_table[i], 0, sizeof(PIR_SLOT_T));
-         g_pir_prev_occupied[i] = 0;
-      }
+         (void)memset(&g_pir_table[i], 0, sizeof(PIR_SLOT_T));      }
       else if ((age > PIR_OFFLINE_MS) &&
                (SLOT_ACTIVE == g_pir_table[i].state))
       {

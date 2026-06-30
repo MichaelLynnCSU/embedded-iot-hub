@@ -11,15 +11,17 @@ or dedicated hardware nodes for independent failure recovery.
 
 | Node | MCU | Role |
 |------|-----|------|
-| BLE Hub | ESP32 | BLE scan, TCP forwarding, UART bridge, PIR→CAM trigger |
+| BLE Hub | ESP32 (WROOM) | BLE scan, TCP forwarding, UART bridge, PIR occupancy window |
 | Dashboard | STM32F411 BlackPill | LVGL display, ILI9341 240x320 |
 | Temp/UART | STM32F103 BluePill | DHT11 avg_temp → UART to ESP32 |
 | Motor | ESP32-C3 | PWM motor control, TCP server |
-| Reed x2 | nRF52840 | Door state + battery SOC via BLE adv |
+| Reed x2 | nRF52840 | Door/window state + battery SOC via BLE adv (up to 6) |
 | PIR x5 | ESP32-C3 (Zephyr) | Motion count + battery SOC via BLE adv |
 | Smart Lock | nRF52840 | Lock state + battery SOC via BLE adv |
 | Smart Light | nRF52840 | Light state via BLE adv + GATT write |
-| ESP32-CAM | ESP32-S3 | PIR-triggered JPEG capture → BeagleBone |
+| Temp Sensor | nRF52840 | Temperature + battery SOC via BLE adv (TempSensor1/2) |
+| Security CAM x3 | ESP32-S3 | PIR-triggered JPEG clip → BeagleBone TCP 9090 |
+| Doorbell CAM x4 | ESP32 (AI-Thinker, classic D0WD) | Button-triggered JPEG/MJPEG → BeagleBone TCP 9091/9093 |
 | BeagleBone | AM335x | Linux pipeline: parse, persist, infer, display |
 
 ## BLE Protocol
@@ -41,26 +43,69 @@ Device disconnects immediately after write confirmation.
 ## PIR Occupancy and Camera Trigger Pipeline
 
 The hub maintains a per-slot sliding window occupancy state for each of the
-5 PIR sensors. On a 0→1 occupied transition the hub fires a UDP `CAPTURE`
-packet to the ESP32-CAM. The CAM connects to the BeagleBone inference daemon,
-sends a JPEG, and closes the connection.
+5 PIR sensors and publishes occupancy to the BeagleBone. The BeagleBone
+detects 0→1 transitions and dispatches CAPTURE triggers directly to the
+security camera over UDP. The hub is transport only — it does not decide
+when to capture.
 
 ```
-PIR motion event
-    → hub BLE scan
+PIR BLE advertisement
+    → ESP32 Hub BLE scan
     → pir_window_update(slot)
-    → drain_queues() detects 0->1 transition
-    → send_cam_trigger() UDP CAPTURE → 10.0.0.222:9091
-    → ESP32-CAM wakes, captures 320x240 JPEG
-    → TCP connect → BeagleBone 10.0.0.206:9090
-    → inference_daemon receives JPEG
-    → TFLite person detection
-    → result saved to /data/pending/
+    → bus_publish_pir() → BeagleBone controller (TCP)
+
+BeagleBone controller
+    → sensor_dispatch detects PIR 0→1 occupancy transition
+    → CamTriggerRequest → UNIX socket → camera_manager
+
+camera_manager
+    → lookup camera IP from heartbeat registry
+    → verify camera online
+    → UDP CAPTURE:event_id=...,zone=... → ESP32-CAM:9091
+
+ESP32-CAM
+    → captures JPEG clip (10s, ~20 frames at 500ms intervals)
+    → TCP connect → BeagleBone:9090
+    → inference_daemon receives clip
+    → TFLite person detection per frame
+    → best result saved to /data/clips/ as .avi
 ```
 
-The ESP32-CAM connects per-trigger — no persistent TCP connection. A counting
-semaphore (max=5) prevents burst capture loss when multiple PIR zones fire
-simultaneously.
+Camera IPs are learned dynamically from UDP heartbeat source addresses
+(recvfrom) — no static IP configuration required.
+
+## Doorbell Pipeline
+
+The doorbell camera is an independent subsystem with its own Wi-Fi
+connection to the BeagleBone. It does not depend on the hub.
+
+The doorbell firmware is compiled in one of two modes set at build time:
+
+- **SNAPSHOT mode** (default): button press → single JPEG → BeagleBone TCP 9091
+  → `doorbell_daemon` → TFLite inference → POSIX SHM → STM32 display
+- **STREAM mode**: button press toggles MJPEG stream → BeagleBone TCP 9093
+  → `doorbell_stream_daemon` → ffmpeg → mediamtx → RTSP
+
+Up to 4 doorbell cameras share each port, identified by `device_id` (0–3)
+in the TCP packet header.
+
+```
+Doorbell button press
+    → TCP connect → BeagleBone:9091 (SNAPSHOT) or :9093 (STREAM)
+    → doorbell_daemon / doorbell_stream_daemon
+    → inference + SHM publish (SNAPSHOT)
+    → RTSP stream via mediamtx (STREAM)
+```
+
+## Camera Port Reference
+
+| Port | Protocol | Direction | Service | Purpose |
+|------|----------|-----------|---------|---------|
+| 9090 | TCP | inbound | inference_daemon | Security CAM JPEG clip receive |
+| 9091 | TCP | inbound | doorbell_daemon | Doorbell SNAPSHOT JPEG receive |
+| 9091 | UDP | outbound | camera_manager | CAPTURE trigger → ESP32-CAM |
+| 9093 | TCP | inbound | doorbell_stream_daemon | Doorbell MJPEG stream receive |
+| 9094 | UDP | inbound | camera_manager | Heartbeats from all camera devices |
 
 ## Dynamic Reed Discovery
 
@@ -71,6 +116,9 @@ new sensor requires no code changes anywhere in the stack:
 2. Power on — ESP32 assigns a slot by MAC address
 3. BeagleBone receives new slot in JSON, forwards via UART
 4. STM32 receives `REED_COUNT:3`, calls `UI_Reflow(3)` — new tile appears
+
+Up to 6 reed sensors supported (`ReedSensor1`–`ReedSensor6`). Currently 2
+are deployed.
 
 **Slot state machine:**
 ```
@@ -84,17 +132,20 @@ counter increments on device swap — detectable across the full stack.
 
 ## BeagleBone Pipeline
 
-Seven-process architecture, each an independent systemd service:
+Ten-process architecture, each an independent systemd service:
 
 ```
-esp01-tcp-server  — AT command setup for ESP-01 WiFi module (oneshot)
-sensor_server     — UART rx from ESP32, JSON parse, named pipe write
-camera_manager    — UDP ingress for camera + doorbell devices, pipe write
-data_controller   — pipe read, SQLite write, shared memory update
-uart_controller   — UART tx to STM32F411 every 5s
-heartbeat         — device online/offline tracking
-db_manager        — SQLite persistence
-inference_daemon  — TCP server for ESP32-CAM JPEG, TFLite person detection
+esp01-tcp-server        — AT command setup for ESP-01 WiFi module (oneshot)
+sensor-server           — UART rx from ESP32, JSON parse, named pipe write
+camera-manager          — UDP ingress for camera + doorbell devices, IP registry,
+                          CAPTURE trigger dispatch, liveness pipe write
+data-controller         — pipe read, SQLite write, SHM update, PIR cam trigger
+inference               — TCP server for ESP32-CAM JPEG clips, TFLite detection
+doorbell                — TCP server for doorbell JPEG, TFLite detection, SHM publish
+doorbell_stream         — TCP server for doorbell MJPEG → ffmpeg → mediamtx
+mediamtx                — RTSP server for doorbell live stream
+api-server              — REST API (Python) over POSIX SHM
+lcd-display             — thermostat + sensor readout on I2C LCD
 ```
 
 **Service boot order:**
@@ -102,8 +153,14 @@ inference_daemon  — TCP server for ESP32-CAM JPEG, TFLite person detection
 network-online.target
     → esp01-tcp-server  (oneshot, configures ESP-01 AT server)
     → data-controller
-    → sensor-server     (wrapper polls for named pipe before exec)
-    → inference_daemon
+    → camera-manager    (waits for /tmp/cam_pipe before start)
+    → sensor-server
+    → inference
+    → doorbell
+    → doorbell_stream
+    → mediamtx
+    → api-server
+    → lcd-display
 ```
 
 UART push format to STM32:
@@ -144,10 +201,23 @@ cd esp32-hub
 idf.py build flash monitor
 ```
 
-### ESP32-CAM
+### ESP32-S3 Security CAM
 ```bash
 cd esp32-cam
-idf.py build flash monitor
+idf.py set-target esp32s3
+idf.py -DCAM_SLOT=0 build flash   # cam 0
+idf.py -DCAM_SLOT=1 build flash   # cam 1
+idf.py -DCAM_SLOT=2 build flash   # cam 2
+```
+
+### ESP32 Doorbell CAM
+```bash
+cd esp32-doorbell
+# SNAPSHOT mode (default)
+idf.py -DDOORBELL_ID=0 -DDOORBELL_MODE=SNAPSHOT build
+# STREAM mode
+idf.py -DDOORBELL_ID=1 -DDOORBELL_MODE=STREAM build
+idf.py -p /dev/ttyUSB0 flash
 ```
 
 ### BeagleBone
@@ -189,7 +259,7 @@ Open CubeIDE project, build and flash via ST-Link.
 ### nRF52840 (Zephyr)
 ```bash
 cd nrf52840/reed-sensor
-west build && west flash
+west build -- -DCONFIG_BT_DEVICE_NAME=\"ReedSensor1\" && west flash
 ```
 
 ### ESP32-C3 Motor
@@ -209,31 +279,38 @@ west build && west flash
 ```
 embedded-iot-hub/
 ├── esp32-hub/                  # ESP-IDF BLE central + TCP forwarder
-│   ├── main/                   # aws, ble, tcp, uart, wifi managers
-│   │   ├── tcp_manager.c       # BB state machine, drain_queues, g_state
-│   │   ├── motor_server.c/h    # TCP server for ESP32-C3 motor
-│   │   ├── cam_trigger.c/h     # UDP CAPTURE trigger for ESP32-CAM
-│   │   └── pir_window.c/h      # per-slot occupancy sliding window
-│   ├── managed_components/
-│   ├── tests/
-│   ├── CMakeLists.txt
-│   ├── partitions.csv
-│   └── sdkconfig
-│
-├── esp32-cam/                  # ESP32-S3-CAM PIR-triggered capture
 │   └── main/
-│       └── main.c              # UDP trigger rx, JPEG capture, TCP push
+│       ├── ble_pir.c           # BLE PIR handler, occupancy window, publish
+│       ├── pir_window.c/h      # per-slot occupancy sliding window
+│       ├── tcp_manager.c       # BeagleBone state machine
+│       └── motor_server.c/h    # TCP server for ESP32-C3 motor
+│
+├── esp32-cam/                  # ESP32-S3 security camera (PIR-triggered clip)
+│   └── main/
+│       ├── main.c              # UDP trigger rx, JPEG clip capture, TCP push
+│       └── cam_logic.h         # port config, trigger parse, clip constants
+│
+├── esp32-doorbell/             # ESP32 doorbell camera (AI-Thinker, OV2640)
+│   └── main/
+│       ├── main.c              # button ISR, SNAPSHOT/STREAM modes
+│       └── cam_logic.h         # port config, header pack/unpack, mode flags
 │
 ├── beaglebone/                 # Embedded Linux pipeline
-│   ├── include/                # Shared ABI headers (ipc_proto.h, shared_data.h)
+│   ├── include/                # Shared ABI headers
+│   │   ├── ipc_proto.h         # Wire-format structs (pipe/SHM ABI)
+│   │   ├── shared_data.h       # Shared state structures
+│   │   └── cam_trigger_ipc.h   # CamTriggerRequest IPC contract
 │   ├── controller/             # Data controller — event processing pipeline
 │   │   ├── pipeline/           # Pipe readers + event dispatchers
 │   │   ├── state/              # State registry, SHM updater, DB persistence
 │   │   ├── uart/               # UART transport, controller, lock, staging
 │   │   └── doorbell/           # Doorbell pending + result reader
 │   ├── server/                 # sensor_server, json_parser
-│   ├── camera_manager/         # UDP ingress for camera + doorbell devices
-│   ├── inference/              # TFLite inference_daemon, detect.tflite
+│   ├── camera_manager/         # UDP ingress, IP registry, CAPTURE dispatch
+│   ├── inference/              # TFLite inference_daemon, doorbell_daemon,
+│   │   └── app/                # doorbell_stream_daemon, detect.tflite
+│   ├── api/                    # REST API — api_server.py, shm_reader.py
+│   ├── motor-thermostat-lcd/   # I2C LCD thermostat display
 │   └── wifi/                   # ESP-01 AT setup script
 │
 ├── esp32c3/                    # ESP32-C3 targets
@@ -241,21 +318,13 @@ embedded-iot-hub/
 │   └── zephyr/pir/             # PIR sensor x5 (Zephyr)
 │
 ├── nrf52840/                   # Zephyr BLE peripheral nodes
-│   ├── reed-sensor/
+│   ├── reed-sensor/            # Door/window reed sensor (up to 6)
+│   ├── temp-sensor/            # BLE temperature sensor (TempSensor1/2)
 │   ├── smart-light/
 │   └── smart-lock/
 │
 ├── stm32-blackpill/            # STM32F411 LVGL dashboard
-│   ├── Core/
-│   ├── Drivers/
-│   ├── Middlewares/lvgl/
-│   └── User/
-│
 ├── stm32-bluepill/             # STM32F103 DHT11 + UART bridge
-│   ├── Core/
-│   ├── Drivers/
-│   └── UserCore/
-│
 ├── docs/
 ├── README.md
 └── ENVIRONMENT.md
@@ -276,7 +345,9 @@ publishes per-module coverage reports via the Coverage plugin:
 |-------|-----------|----------|
 | BeagleBone Controller | CUnit | gcovr → Cobertura XML |
 | BeagleBone Server | CUnit | gcovr → Cobertura XML |
+| BeagleBone Inference | CUnit | gcovr → Cobertura XML |
 | ESP32 Hub | Unity (FetchContent) | gcovr → Cobertura XML |
+| ESP32-CAM | Unity (FetchContent) | gcovr → Cobertura XML |
 | ESP32-C3 Motor | Unity (FetchContent) | gcovr → Cobertura XML |
 | STM32 BlackPill | Unity (FetchContent) | gcovr → Cobertura XML |
 | STM32 BluePill | Unity (FetchContent) | gcovr → Cobertura XML |
@@ -296,6 +367,13 @@ mkdir -p build && cd build
 cmake .. && make && ./test_hub
 ```
 
+### ESP32-CAM
+```bash
+cd esp32-cam/tests/unit
+mkdir -p build && cd build
+cmake .. && make && ./test_cam
+```
+
 ### ESP32-C3 Motor
 ```bash
 cd esp32c3/idf/motor/tests/unit
@@ -305,7 +383,7 @@ cmake .. && make && ./test_motor
 
 ### nRF52840 (native_sim — all nodes)
 ```bash
-# Run from any node directory: reed-sensor, smart-lock, smart-light, pir
+# Run from any node directory: reed-sensor, temp-sensor, smart-lock, smart-light
 rm -rf build_test
 west build -b native_sim tests/unit --build-dir build_test
 west build -t run --build-dir build_test
@@ -328,8 +406,8 @@ cmake .. && make && ./test_bluepill
 ### BeagleBone — Controller
 ```bash
 cd beaglebone/controller/tests/unit
-mkdir -p build && cd build
-cmake .. && make && ./test_controller
+rm -rf build && mkdir build && cd build
+cmake .. && make && ./test_controller && ./test_db_tx
 ```
 
 ### BeagleBone — Server
@@ -337,6 +415,13 @@ cmake .. && make && ./test_controller
 cd beaglebone/server/tests/unit
 mkdir -p build && cd build
 cmake .. && make && ./test_server
+```
+
+### BeagleBone — Inference
+```bash
+cd beaglebone/inference/tests/unit
+mkdir -p build && cd build
+cmake .. && make && ./test_inference
 ```
 
 ## Key Design Decisions
@@ -362,7 +447,26 @@ to the BeagleBone timed out during long idle intervals between PIR triggers.
 Connecting per-trigger eliminates the timeout entirely with negligible latency
 overhead given the infrequent capture rate.
 
+**Why does the BeagleBone send the camera trigger rather than the hub?**
+The hub is a BLE transport node — it scans, computes occupancy, and forwards
+events. Trigger authority belongs to the BeagleBone, which owns the inference
+pipeline, the camera registry, and occupancy policy. This keeps all camera
+networking in `camera_manager`: IP learning, liveness, rate limiting, and
+dispatch are all in one place. The hub needs no knowledge of camera addresses.
+
+**Why dynamic IP learning for cameras?** The `camera_manager` learns each
+camera's IP from the UDP heartbeat source address (`recvfrom`). No static IP
+configuration is required, and the registry updates automatically if DHCP
+reassigns an address.
+
 **Why static PIR slots?** The static slot system gives predictable memory
 layout, zero heap fragmentation, and FreeRTOS-friendly fixed allocation.
 Adding sensors beyond MAX_PIRS requires a recompile and reflash. See issue
 #38 for the dynamic discovery roadmap if sensor count grows.
+
+**Why separate SNAPSHOT and STREAM modes for the doorbell?** The two use
+cases have different requirements. SNAPSHOT delivers a single high-quality
+JPEG per button press with full inference and event correlation. STREAM
+delivers continuous low-latency MJPEG for live viewing via RTSP. Combining
+them in one firmware path would require runtime mode switching and complicate
+the TCP framing. Compile-time selection keeps each path simple and testable.

@@ -1,0 +1,113 @@
+# BeagleBone — Inference
+
+Three daemons handling camera image ingestion and AI person detection.
+
+## Daemons
+
+| Daemon | Port | Source | Purpose |
+|--------|------|--------|---------|
+| `inference_daemon` | TCP 9090 | ESP32-CAM (S3) | PIR-triggered JPEG clip receive + TFLite inference + AVI encode |
+| `doorbell_daemon` | TCP 9091 | ESP32 Doorbell | Doorbell JPEG receive + TFLite inference + SHM publish |
+| `doorbell_stream_daemon` | TCP 9093 | ESP32 Doorbell | Doorbell MJPEG stream receive → ffmpeg → mediamtx RTSP |
+
+## Source Files
+
+| File | Description |
+|:-----|:------------|
+| `inference_daemon.c` | PIR cam TCP server — clip receive, inference, AVI encode, DB insert |
+| `doorbell_daemon.c` | Doorbell TCP server — JPEG receive, inference, SHM publish |
+| `doorbell_stream_daemon.c` | Doorbell stream TCP server — MJPEG → ffmpeg → mediamtx |
+| `inference_worker.c` | Shared TFLite person detection pipeline |
+| `inference_worker.h` | inference_worker API |
+| `inference_core.h` | Shared wire protocol constants (JPEG header, length validation) |
+| `doorbell_result_shm.h` | POSIX SHM layout — doorbell_daemon → uart_controller handoff |
+| `inference.py` | Python inference utility (standalone) |
+| `build_info.c` | inference_daemon build timestamp |
+| `build_info_doorbell.c` | doorbell_daemon build timestamp |
+| `build_info_doorbell_stream.c` | doorbell_stream_daemon build timestamp |
+
+## Wire Protocols
+
+### inference_daemon (port 9090) — PIR security camera
+[jpeg_size:4 big-endian][jpeg bytes]  — repeated per frame
+
+connection close = end of clip
+Clip duration and frame interval driven by `CAM_CLIP_DURATION_MS` /
+`CAM_CLIP_FRAME_MS` on the ESP32-CAM side (default: 10s / 500ms = ~20 frames).
+
+### doorbell_daemon (port 9091) — Doorbell SNAPSHOT mode
+[magic:4][version:1][device_id:1][reserved:2][event_id:8][jpeg_size:4][jpeg bytes]
+20-byte packed header defined in `esp32-doorbell/main/cam_logic.h`.
+
+### doorbell_stream_daemon (port 9093) — Doorbell STREAM mode
+[device_id:1] once on connect, then per frame:
+
+[jpeg_len:4 big-endian][jpeg bytes]
+
+## Dependencies
+
+```bash
+# TFLite cross-compiled library required at:
+# ~/tflite-build/tensorflow  (headers)
+# beaglebone/inference/lib/libtensorflowlite_c.so  (ARM binary)
+```
+
+## Build
+
+```bash
+export ARCH=arm
+export CROSS_COMPILE=arm-linux-gnueabihf-
+cd ~/embedded-iot-hub/beaglebone/inference
+
+# Shared inference worker (compile once)
+${CROSS_COMPILE}gcc -D_GNU_SOURCE -c app/inference_worker.c -o app/inference_worker.o \
+  -I/home/hailviral-server/tflite-build/tensorflow
+
+# PIR inference daemon
+${CROSS_COMPILE}gcc -D_GNU_SOURCE \
+  app/inference_daemon.c \
+  app/inference_worker.o \
+  app/build_info.c \
+  -o app/inference_daemon \
+  -I/home/hailviral-server/tflite-build/tensorflow \
+  -L./lib -ltensorflowlite_c -lpthread -lrt -lm -lsqlite3
+
+# Doorbell inference daemon
+${CROSS_COMPILE}gcc -D_GNU_SOURCE \
+  app/doorbell_daemon.c \
+  app/inference_worker.o \
+  app/build_info_doorbell.c \
+  -o app/doorbell_daemon \
+  -I/home/hailviral-server/tflite-build/tensorflow \
+  -L./lib -ltensorflowlite_c -lpthread -lrt -lm -lsqlite3
+
+# Doorbell stream daemon
+${CROSS_COMPILE}gcc -D_GNU_SOURCE \
+  app/doorbell_stream_daemon.c \
+  app/build_info_doorbell_stream.c \
+  -o app/doorbell_stream_daemon \
+  -lpthread
+```
+
+## Deploy
+
+```bash
+sudo systemctl stop inference doorbell doorbell_stream
+
+scp app/inference_daemon        debian@beaglebone.local:~/inference/inference_daemon
+scp app/doorbell_daemon         debian@beaglebone.local:~/inference/doorbell_daemon
+scp app/doorbell_stream_daemon  debian@beaglebone.local:~/inference/doorbell_stream_daemon
+scp lib/libtensorflowlite_c.so  debian@beaglebone.local:~/inference/lib/
+
+sudo systemctl start inference doorbell doorbell_stream
+tail -f /var/log/inference.log
+tail -f /var/log/doorbell_daemon.log
+```
+
+## Unit Tests
+
+```bash
+cd ~/embedded-iot-hub/beaglebone/inference/tests/unit
+rm -rf build && mkdir build && cd build
+cmake .. && make && ./test_inference
+```

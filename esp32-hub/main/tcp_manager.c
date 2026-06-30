@@ -15,7 +15,6 @@
  *          State 2 — connected, ready to send
  *
  *          Motor server: delegated to motor_server.c / motor_server.h.
- *          CAM trigger:  delegated to cam_trigger.c  / cam_trigger.h.
  *
  *          Backpressure handling (BeagleBone only):
  *          - EAGAIN/EWOULDBLOCK increments block counter
@@ -29,7 +28,6 @@
  * \note    Per-slot PIR occupancy (2026-05-20): per-slot occupied/offline in
  *          PIR_SLOT_STATE_T; flat g_state.pir_occupied retained for JSON
  *          backward compat (slot 0).
- * \note    ESP32-CAM UDP trigger (2026-05-31): moved to cam_trigger.c;
  *          0->1 transition detection remains here in drain_queues().
  * \note    TempSensor BLE (2026-06-02): BLE temp sensor slot table wired in.
  *          Mirrors reed/PIR pattern. JSON "temp" field is whole degrees C
@@ -70,7 +68,6 @@
 #include "motor_sm.h"
 #include "pir_window.h"
 #include "motor_server.h"
-#include "cam_trigger.h"
 
 #define BB_CONNECT_TIMEOUT_MS   2000
 #define BLOCK_COUNT_MAX         5

@@ -24,7 +24,6 @@ idf_component_register(
         "trinity_stats_idf.c"
         "trinity_panic_idf.c"
         "motor_server.c"
-        "cam_trigger.c"
         "trinity_log_stack.c"
     INCLUDE_DIRS "." "include"
     REQUIRES
