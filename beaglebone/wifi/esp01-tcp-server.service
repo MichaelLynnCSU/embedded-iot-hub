@@ -1,0 +1,18 @@
+[Unit]
+Description=ESP-01 TCP Server Setup
+After=network-online.target
+Wants=network-online.target
+Before=sensor-server.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 -u /home/debian/wifi/esp01_tcp_server_setup.py
+WorkingDirectory=/home/debian/wifi
+KillSignal=SIGINT
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
