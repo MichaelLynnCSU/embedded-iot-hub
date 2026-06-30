@@ -83,7 +83,6 @@ build_esp/
 sdkconfig
 
 # === BeagleBone WiFi Tools ===
-beaglebone/wifi/
 
 # === Dependency Lock Files ===
 dependencies.lock

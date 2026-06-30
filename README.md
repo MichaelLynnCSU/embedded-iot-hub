@@ -107,6 +107,19 @@ Doorbell button press
 | 9093 | TCP | inbound | doorbell_stream_daemon | Doorbell MJPEG stream receive |
 | 9094 | UDP | inbound | camera_manager | Heartbeats from all camera devices |
 
+## IPC Reference (local sockets / pipes)
+
+| Path | Type | Direction | Purpose |
+|------|------|-----------|---------|
+| `/tmp/sensor_pipe` | Named FIFO | sensor-server → data-controller | Sensor frame data |
+| `/tmp/cam_pipe` | Named FIFO | camera-manager → data-controller | Camera/doorbell liveness frames |
+| `/tmp/cam_trigger.sock` | UNIX datagram | data-controller → camera-manager | PIR-triggered capture requests |
+
+See the chicken-and-egg startup note above — `/tmp/sensor_pipe` and
+`/tmp/cam_pipe` are FIFOs requiring `ExecStartPre` ordering on the
+writer side; `/tmp/cam_trigger.sock` is a datagram socket with no such
+requirement since failed sends do not block.
+
 ## Dynamic Reed Discovery
 
 Reed sensors are auto-discovered by BLE name prefix `ReedSensor*`. Adding a
@@ -135,6 +148,7 @@ counter increments on device swap — detectable across the full stack.
 Ten-process architecture, each an independent systemd service:
 
 ```
+hostapd-ap              — cams_2.4 WiFi AP for camera/doorbell devices
 esp01-tcp-server        — AT command setup for ESP-01 WiFi module (oneshot)
 sensor-server           — UART rx from ESP32, JSON parse, named pipe write
 camera-manager          — UDP ingress for camera + doorbell devices, IP registry,
@@ -151,10 +165,21 @@ lcd-display             — thermostat + sensor readout on I2C LCD
 **Service boot order:**
 ```
 network-online.target
+    → hostapd-ap        (cams_2.4 WiFi AP for camera/doorbell devices;
+                         ExecStartPre waits for the wlu1 USB WiFi adapter
+                         to enumerate before starting hostapd — same
+                         wait-for-resource pattern used for /tmp/cam_pipe
+                         and /tmp/sensor_pipe below, applied to a network
+                         interface instead of a named pipe)
+    → dnsmasq           (generic DNS/DHCP forwarder, base image service —
+                         loads /etc/dnsmasq.d/cams.conf, serves DHCP on
+                         the camera AP subnet; not the dedicated
+                         dnsmasq-ap.service, which exists but is disabled
+                         and currently unused)
     → esp01-tcp-server  (oneshot, configures ESP-01 AT server)
     → data-controller
     → camera-manager    (waits for /tmp/cam_pipe before start)
-    → sensor-server
+    → sensor-server     (waits for /tmp/sensor_pipe before start)
     → inference
     → doorbell
     → doorbell_stream
@@ -162,6 +187,35 @@ network-online.target
     → api-server
     → lcd-display
 ```
+
+**Named pipe (FIFO) startup ordering — chicken-and-egg note:**
+
+Two pipes exist between camera-manager and data-controller, in opposite
+directions, with different IPC mechanisms:
+
+- `/tmp/cam_pipe` (camera-manager writes → data-controller reads):
+  a named FIFO `open(O_RDONLY)` blocks until a writer opens the other
+  end; `open(O_WRONLY|O_NONBLOCK)` returns `ENXIO` if no reader is
+  present yet. To avoid deadlock, the reader
+  (`cam_pipe_reader_thread` in data-controller) opens with
+  `O_RDONLY|O_NONBLOCK` and polls with `poll()`, while
+  `camera-manager.service` uses `ExecStartPre` to wait until
+  `/tmp/cam_pipe` exists before starting — guaranteeing the reader is
+  already past its non-blocking open before the writer's first
+  heartbeat. The writer keeps a persistent fd open for the process
+  lifetime, reopening only on `EPIPE`/`ENXIO`; `EAGAIN`/`EINTR` drop the
+  frame but keep the fd open. The same pattern is used by
+  `sensor-server` → `/tmp/sensor_pipe` → `data-controller`.
+
+- `/tmp/cam_trigger.sock` (data-controller writes → camera-manager
+  reads): a UNIX datagram socket, not a FIFO. `sendto()` to a socket
+  path that does not exist yet fails immediately with `ENOENT` — it
+  does not block and does not deadlock. `data-controller.service` has
+  no startup dependency on `camera-manager.service` for this reason;
+  any PIR-triggered capture events that fire before camera-manager
+  has bound the socket are dropped and logged
+  (`[DISPATCH] cam_trigger_failed`), not retried.
+
 
 UART push format to STM32:
 ```
@@ -463,6 +517,29 @@ reassigns an address.
 layout, zero heap fragmentation, and FreeRTOS-friendly fixed allocation.
 Adding sensors beyond MAX_PIRS requires a recompile and reflash. See issue
 #38 for the dynamic discovery roadmap if sensor count grows.
+
+**Why does PIR-to-camera trigger authority live on the BeagleBone
+instead of the hub?** The camera and doorbell devices live on a
+BeagleBone-hosted WiFi AP (`cams_2.4`) that the hub has no visibility
+into — it cannot resolve camera IPs, liveness, or reachability on that
+subnet. camera_manager already owns the camera heartbeat registry and
+IP learning for that AP, so it is the only process positioned to
+verify a camera is online and dispatch a CAPTURE packet to it. The hub
+remains a pure BLE/PIR transport node: it detects occupancy and
+forwards events to the BeagleBone, which owns trigger policy and
+camera networking end to end.
+
+**Why two different IPC mechanisms between camera-manager and
+data-controller?** The two directions have different timing and
+reliability requirements. Liveness data (`/tmp/cam_pipe`,
+camera-manager → data-controller) is continuous and order-sensitive —
+a named FIFO with a persistent writer fd gives ordered delivery and
+natural backpressure. PIR-triggered capture requests
+(`/tmp/cam_trigger.sock`, data-controller → camera-manager) are rare,
+latency-sensitive, fire-and-forget events where blocking on a missing
+reader would stall the entire sensor dispatch pipeline — a UNIX
+datagram socket fails fast with `ENOENT` instead of blocking, so a
+camera-manager restart never stalls sensor processing.
 
 **Why separate SNAPSHOT and STREAM modes for the doorbell?** The two use
 cases have different requirements. SNAPSHOT delivers a single high-quality

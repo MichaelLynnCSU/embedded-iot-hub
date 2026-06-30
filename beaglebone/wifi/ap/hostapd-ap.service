@@ -1,0 +1,13 @@
+[Unit]
+Description=hostapd camera AP
+After=network.target
+
+[Service]
+Type=forking
+ExecStartPre=/bin/bash -c 'until ip link show wlu1 > /dev/null 2>&1; do sleep 1; done'
+ExecStart=/usr/sbin/hostapd -B /etc/hostapd/hostapd.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -39,6 +39,7 @@
 #include "../../include/cam_trigger_ipc.h"
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <errno.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -68,12 +69,18 @@ static void dispatch_cam_trigger(uint8_t zone, uint64_t event_id)
    addr.sun_family = AF_UNIX;
    strncpy(addr.sun_path, CAM_TRIGGER_SOCK, sizeof(addr.sun_path) - 1);
 
-   sendto(sock, &req, sizeof(req), 0,
-          (struct sockaddr *)&addr, sizeof(addr));
+   if (sendto(sock, &req, sizeof(req), 0,
+              (struct sockaddr *)&addr, sizeof(addr)) < 0)
+   {
+      LOG("[DISPATCH] cam_trigger_failed zone=%u event_id=%llu errno=%d",
+          (unsigned)zone, (unsigned long long)event_id, errno);
+   }
+   else
+   {
+      LOG("[DISPATCH] cam_trigger zone=%u event_id=%llu",
+          (unsigned)zone, (unsigned long long)event_id);
+   }
    close(sock);
-
-   LOG("[DISPATCH] cam_trigger zone=%u event_id=%llu",
-       (unsigned)zone, (unsigned long long)event_id);
 }
 
 /*---------------------------------------------------------------------------*/

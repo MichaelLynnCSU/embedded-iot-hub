@@ -1,0 +1,12 @@
+[Unit]
+Description=BBB First Boot Setup
+After=local-fs.target
+ConditionPathExists=!/var/log/data_controller.log
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bbb-first-boot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

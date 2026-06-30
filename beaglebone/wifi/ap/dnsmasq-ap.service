@@ -1,0 +1,12 @@
+[Unit]
+Description=dnsmasq DHCP server for camera AP
+After=hostapd-ap.service
+Requires=hostapd-ap.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dnsmasq -k --conf-file=/etc/dnsmasq.d/cams.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,14 @@
 [Unit]
 Description=Data Controller Service
+# NOTE: data-controller sends CamTriggerRequest datagrams to
+# /tmp/cam_trigger.sock (bound by camera-manager) on PIR 0->1
+# occupancy transitions. This is the opposite direction from
+# cam_pipe (camera-manager writes, data-controller reads).
+# Unlike cam_pipe, this is a UNIX datagram socket: sendto() to a
+# socket path that does not exist yet fails with ENOENT and is
+# dropped (logged), not blocked. No deadlock risk if camera-manager
+# starts after data-controller, but early triggers before
+# camera-manager binds the socket will be lost.
 After=network.target
 
 [Service]
