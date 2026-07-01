@@ -20,7 +20,7 @@ or dedicated hardware nodes for independent failure recovery.
 | Smart Lock | nRF52840 | Lock state + battery SOC via BLE adv |
 | Smart Light | nRF52840 | Light state via BLE adv + GATT write |
 | Temp Sensor | nRF52840 | Temperature + battery SOC via BLE adv (TempSensor1/2) |
-| Security CAM x3 | ESP32-S3 | PIR-triggered JPEG clip → BeagleBone TCP 9090 |
+| Security CAM x3 | ESP32-S3 | PIR-triggered JPEG clip → BeagleBone TCP 9090 (zones 0–2: indoor/front/back) |
 | Doorbell CAM x4 | ESP32 (AI-Thinker, classic D0WD) | Button-triggered JPEG/MJPEG → BeagleBone TCP 9091/9093 |
 | BeagleBone | AM335x | Linux pipeline: parse, persist, infer, display |
 
@@ -48,7 +48,7 @@ detects 0→1 transitions and dispatches CAPTURE triggers directly to the
 security camera over UDP. The hub is transport only — it does not decide
 when to capture.
 
-```
+ ```
 PIR BLE advertisement
     → ESP32 Hub BLE scan
     → pir_window_update(slot)
@@ -69,7 +69,18 @@ ESP32-CAM
     → inference_daemon receives clip
     → TFLite person detection per frame
     → best result saved to /data/clips/ as .avi
-```
+ ```
+
+Only PIR zones 0–2 have a camera behind them. `zone` in
+`CamTriggerRequest` maps directly to `CAM_SLOT` on the ESP32-CAM side
+(zone 0 → CAM_SLOT=0, and so on up to `MAX_CAMS-1`). `sensor_dispatch.c`
+fires a trigger for every PIR 0→1 transition across all 5 configured
+PIR slots unconditionally — it has no knowledge of camera topology.
+`camera_manager` is the single enforcement point: triggers for
+`zone >= MAX_CAMS` are dropped and logged
+(`[TRIGGER] zone=%u out of range`). PIR slots 3–4 still feed occupancy
+data to `SensorData.pir_slots[]` for other consumers (state registry,
+UART push to STM32, etc.) — they just don't drive camera capture.
 
 Camera IPs are learned dynamically from UDP heartbeat source addresses
 (recvfrom) — no static IP configuration required.
