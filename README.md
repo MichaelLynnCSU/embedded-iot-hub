@@ -48,7 +48,7 @@ detects 0→1 transitions and dispatches CAPTURE triggers directly to the
 security camera over UDP. The hub is transport only — it does not decide
 when to capture.
 
- ```
+```
 PIR BLE advertisement
     → ESP32 Hub BLE scan
     → pir_window_update(slot)
@@ -69,7 +69,7 @@ ESP32-CAM
     → inference_daemon receives clip
     → TFLite person detection per frame
     → best result saved to /data/clips/ as .avi
- ```
+```
 
 Only PIR zones 0–2 have a camera behind them. `zone` in
 `CamTriggerRequest` maps directly to `CAM_SLOT` on the ESP32-CAM side
@@ -113,8 +113,8 @@ Doorbell button press
 | Port | Protocol | Direction | Service | Purpose |
 |------|----------|-----------|---------|---------|
 | 9090 | TCP | inbound | inference_daemon | Security CAM JPEG clip receive |
-| 9091 | TCP | inbound | doorbell_daemon | Doorbell SNAPSHOT JPEG receive |
-| 9091 | UDP | outbound | camera_manager | CAPTURE trigger → ESP32-CAM |
+| 9091 | TCP (doorbell) | inbound | doorbell_daemon | Doorbell SNAPSHOT JPEG receive |
+| 9091 | UDP (security cameras) | outbound | camera_manager | CAPTURE trigger → ESP32-CAM |
 | 9093 | TCP | inbound | doorbell_stream_daemon | Doorbell MJPEG stream receive |
 | 9094 | UDP | inbound | camera_manager | Heartbeats from all camera devices |
 
@@ -275,7 +275,7 @@ idf.py -DCAM_SLOT=1 build flash   # cam 1
 idf.py -DCAM_SLOT=2 build flash   # cam 2
 ```
 
-### ESP32 Doorbell CAM
+### ESP32 Doorbell CAM (AI-Thinker ESP32)
 ```bash
 cd esp32-doorbell
 # SNAPSHOT mode (default)
@@ -512,12 +512,20 @@ to the BeagleBone timed out during long idle intervals between PIR triggers.
 Connecting per-trigger eliminates the timeout entirely with negligible latency
 overhead given the infrequent capture rate.
 
-**Why does the BeagleBone send the camera trigger rather than the hub?**
-The hub is a BLE transport node — it scans, computes occupancy, and forwards
-events. Trigger authority belongs to the BeagleBone, which owns the inference
-pipeline, the camera registry, and occupancy policy. This keeps all camera
-networking in `camera_manager`: IP learning, liveness, rate limiting, and
-dispatch are all in one place. The hub needs no knowledge of camera addresses.
+**Why does trigger authority for camera capture live on the BeagleBone
+instead of the hub?** The hub is a pure BLE/PIR transport node — it
+scans, computes occupancy, and forwards events; it makes no capture
+decisions itself. Trigger authority belongs to the BeagleBone for two
+compounding reasons. First, ownership: the BeagleBone owns the
+inference pipeline, the camera heartbeat registry, and occupancy
+policy, so keeping dispatch in `camera_manager` puts IP learning,
+liveness, rate limiting, and CAPTURE dispatch in one place, with no
+duplicated state on the hub. Second, visibility: camera and doorbell
+devices live on a BeagleBone-hosted Wi-Fi AP (`cams_2.4`) that the hub
+has no access to at all — it cannot resolve camera IPs, liveness, or
+reachability on that subnet, so it is not even capable of dispatching
+a trigger even if it wanted to. `camera_manager` is the only process
+positioned to verify a camera is online and send it a CAPTURE packet.
 
 **Why dynamic IP learning for cameras?** The `camera_manager` learns each
 camera's IP from the UDP heartbeat source address (`recvfrom`). No static IP
@@ -528,17 +536,6 @@ reassigns an address.
 layout, zero heap fragmentation, and FreeRTOS-friendly fixed allocation.
 Adding sensors beyond MAX_PIRS requires a recompile and reflash. See issue
 #38 for the dynamic discovery roadmap if sensor count grows.
-
-**Why does PIR-to-camera trigger authority live on the BeagleBone
-instead of the hub?** The camera and doorbell devices live on a
-BeagleBone-hosted WiFi AP (`cams_2.4`) that the hub has no visibility
-into — it cannot resolve camera IPs, liveness, or reachability on that
-subnet. camera_manager already owns the camera heartbeat registry and
-IP learning for that AP, so it is the only process positioned to
-verify a camera is online and dispatch a CAPTURE packet to it. The hub
-remains a pure BLE/PIR transport node: it detects occupancy and
-forwards events to the BeagleBone, which owns trigger policy and
-camera networking end to end.
 
 **Why two different IPC mechanisms between camera-manager and
 data-controller?** The two directions have different timing and
