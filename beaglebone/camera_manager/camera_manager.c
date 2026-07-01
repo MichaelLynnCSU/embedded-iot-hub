@@ -19,14 +19,10 @@
  *          age_s derived at read time: (now - last_seen).
  *          online derived at read time: age_s < CAMERA_ONLINE_THRESHOLD_S.
  *
- *          Press events are forwarded to the hub ESP32 via UDP on the
- *          main network (HUB_HOST:HUB_DOORBELL_UDP_PORT) so the hub
- *          can publish the doorbell event to the BeagleBone controller
- *          pipeline as before.
  *
  * \note    Architecture (2026-06-27):
  *          All camera devices report only to the BBB camera manager.
- *          Hub ESP32 no longer receives camera UDP traffic directly.
+ *          The ESP32 hub is not part of the camera or doorbell network path.
  *          See GitHub issue: camera telemetry architecture shift.
  ******************************************************************************/
 
@@ -58,9 +54,6 @@
 #define RX_BUF_SIZE               256
 #define LOG_PATH                  "/var/log/camera_manager.log"
 
-/** Hub ESP32 — press events forwarded here for pipeline injection */
-#define HUB_HOST                  "10.0.0.190"
-#define HUB_DOORBELL_UDP_PORT     9092
 
 /*---------------------------------------------------------------------------*/
 /* Liveness tables                                                             */
@@ -298,36 +291,6 @@ int doorbell_is_online(uint8_t device_id)
 /* Press event forwarding to hub                                               */
 /*---------------------------------------------------------------------------*/
 
-static void forward_press_to_hub(const char *p_json)
-{
-   struct sockaddr_in addr = {0};
-   int                sock = -1;
-   size_t             len  = 0;
-
-   addr.sin_family = AF_INET;
-   addr.sin_port   = htons(HUB_DOORBELL_UDP_PORT);
-   inet_pton(AF_INET, HUB_HOST, &addr.sin_addr);
-
-   sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-   if (sock < 0)
-   {
-      log_msg("[PRESS] forward socket() failed errno=%d", errno);
-      return;
-   }
-
-   len = strlen(p_json);
-   if (sendto(sock, p_json, len, 0,
-              (struct sockaddr *)&addr, sizeof(addr)) < 0)
-   {
-      log_msg("[PRESS] forward sendto() failed errno=%d", errno);
-   }
-   else
-   {
-      log_msg("[PRESS] forwarded to hub %s:%d", HUB_HOST, HUB_DOORBELL_UDP_PORT);
-   }
-
-   close(sock);
-}
 
 /*---------------------------------------------------------------------------*/
 /* Ingress loop                                                                */
@@ -404,10 +367,9 @@ static void ingress_loop(int sock)
          else if (0 == strcmp(event_type, "press"))
          {
             doorbell_stamp((uint8_t)device_id);
-            log_msg("[DOORBELL] press device_id=%u — forwarding to hub",
+            log_msg("[DOORBELL] press device_id=%u",
                     device_id);
             pipe_write_cam_frame();
-            forward_press_to_hub(rx_buf);
          }
          else
          {
