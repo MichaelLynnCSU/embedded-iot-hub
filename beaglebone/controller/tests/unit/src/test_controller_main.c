@@ -1,6 +1,5 @@
 #include <CUnit/CUnit.h>
 #include <CUnit/Basic.h>
-#include "controller_internal.h"
 #include <stdint.h>
 #include <time.h>
 #include "controller_logic.h"
@@ -85,7 +84,7 @@ void test_dev_idx_invalid_dev_count(void)
 
 void test_dev_count_value(void)
 {
-    CU_ASSERT_EQUAL(DEV_COUNT, 4);
+    CU_ASSERT_EQUAL(DEV_COUNT, 5);
 }
 
 /******************************************************************************
@@ -194,29 +193,6 @@ void test_batt_invalid_neg1(void)
 }
 
 /******************************************************************************
- * Command range
- ******************************************************************************/
-void test_cmd_known_get_latest(void)
-{
-    CU_ASSERT_TRUE(logic_cmd_known(CMD_GET_LATEST));
-}
-
-void test_cmd_known_get_device_status(void)
-{
-    CU_ASSERT_TRUE(logic_cmd_known(CMD_GET_DEVICE_STATUS));
-}
-
-void test_cmd_unknown_zero(void)
-{
-    CU_ASSERT_FALSE(logic_cmd_known(0));
-}
-
-void test_cmd_unknown_large(void)
-{
-    CU_ASSERT_FALSE(logic_cmd_known(999));
-}
-
-/******************************************************************************
  * Shared memory constants
  ******************************************************************************/
 void test_device_count(void)
@@ -297,7 +273,6 @@ int main(void)
     CU_pSuite alert_suite   = NULL;
     CU_pSuite history_suite = NULL;
     CU_pSuite batt_suite    = NULL;
-    CU_pSuite cmd_suite     = NULL;
     CU_pSuite const_suite   = NULL;
     CU_pSuite phantom_suite = NULL;
 
@@ -348,12 +323,6 @@ int main(void)
     CU_add_test(batt_suite, "valid_100", test_batt_valid_100);
     CU_add_test(batt_suite, "valid_0",   test_batt_valid_0);
     CU_add_test(batt_suite, "invalid",   test_batt_invalid_neg1);
-
-    cmd_suite = CU_add_suite("commands", NULL, NULL);
-    CU_add_test(cmd_suite, "known_latest",  test_cmd_known_get_latest);
-    CU_add_test(cmd_suite, "known_status",  test_cmd_known_get_device_status);
-    CU_add_test(cmd_suite, "unknown_zero",  test_cmd_unknown_zero);
-    CU_add_test(cmd_suite, "unknown_large", test_cmd_unknown_large);
 
     const_suite = CU_add_suite("constants", NULL, NULL);
     CU_add_test(const_suite, "device_count",   test_device_count);

@@ -25,9 +25,14 @@
 #include <stdbool.h>
 #include <string.h>
 #include <time.h>
+#include "shared_data.h"
+#include "sensor_types.h"
 
-/* controller_logic.h is included after controller_internal.h —
- * all sizing constants, DEV_ID_E, and command values are defined there. */
+/* controller_internal.h was split apart (see commit b4cd4a1); sizing
+ * constants (DEVICE_COUNT, MAX_REEDS, ALERT_SEVERITY_*, HISTORY_BUF_SIZE,
+ * etc.) now live in the shared beaglebone/include/shared_data.h, included
+ * directly above so this header is self-contained regardless of what
+ * includes it or in what order. */
 
 /**
  * \brief Lock state machine states.

@@ -53,7 +53,9 @@
 #include <pthread.h>
 #include <time.h>
 
-#include "controller_internal.h"
+#include "ipc_proto.h"
+#include "sensor_types.h"
+#include "db_manager.h"
 
 /*---------------------------------------------------------------------------*/
 /* JUnit XML emitter                                                          */

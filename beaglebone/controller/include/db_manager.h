@@ -1,8 +1,11 @@
 #ifndef INCLUDE_DB_MANAGER_H_
 #define INCLUDE_DB_MANAGER_H_
 
+#include <sqlite3.h>
 #include "sensor_types.h"
 #include "../include/shared_data.h"
+
+extern sqlite3 *db;
 
 void db_open_and_init(void);
 void db_begin(void);

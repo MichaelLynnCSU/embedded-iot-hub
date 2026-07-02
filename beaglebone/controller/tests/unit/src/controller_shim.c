@@ -2,7 +2,8 @@
 #include <pthread.h>
 #include <sqlite3.h>
 #include <semaphore.h>
-#include "controller_internal.h"
+#include "shared_data.h"
+#include "sensor_types.h"
 
 FILE            *log_fp    = NULL;
 pthread_mutex_t  log_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -14,7 +15,7 @@ pthread_mutex_t          data_mutex  = PTHREAD_MUTEX_INITIALIZER;
 struct SharedSensorData *shm_data    = NULL;
 sem_t                   *shm_sem     = NULL;
 
-const char *dev_names[DEV_COUNT] = { "PIR", "LGT", "LCK", "MOTOR" };
+const char *dev_names[DEV_COUNT] = { "PIR", "LGT", "LCK", "MOTOR", "LCD" };
 
 void heartbeat_stamp(DEV_ID_E idx)                { (void)idx; }
 void heartbeat_snapshot_online(uint8_t *p, int n) { (void)p; (void)n; }

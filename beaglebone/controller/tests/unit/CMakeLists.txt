@@ -10,6 +10,8 @@ add_executable(test_controller
     src/controller_shim.c)
 target_include_directories(test_controller PRIVATE
     ../../
+    ../../include
+    ../../../include
     ${CUNIT_INC})
 target_compile_definitions(test_controller PRIVATE
     "JUNIT_OUTPUT_PATH=\"${CMAKE_CURRENT_BINARY_DIR}/junit_controller.xml\"")
@@ -26,6 +28,8 @@ add_executable(test_db_tx
     ../../db_manager.c)
 target_include_directories(test_db_tx PRIVATE
     ../../
+    ../../include
+    ../../../include
     ${CUNIT_INC})
 target_compile_definitions(test_db_tx PRIVATE
     "DB_PATH=\":memory:\"")
@@ -40,6 +44,8 @@ add_executable(test_db_writes
     ../../db_manager.c)
 target_include_directories(test_db_writes PRIVATE
     ../../
+    ../../include
+    ../../../include
     ${CUNIT_INC})
 target_compile_definitions(test_db_writes PRIVATE
     "DB_PATH=\":memory:\"")
