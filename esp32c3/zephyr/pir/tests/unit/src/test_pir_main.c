@@ -60,8 +60,14 @@ ZTEST_SUITE(pir_mfg, NULL, NULL, reset_all, NULL, NULL);
 
 ZTEST(pir_mfg, test_mfg_data_size)
 {
-    zassert_equal(MFG_DATA_SIZE, 8,
-        "MFG_DATA_SIZE changed -- hub parser expects exactly 8 bytes");
+    zassert_equal(MFG_DATA_SIZE, 10,
+        "MFG_DATA_SIZE must be 10 -- includes tx_id tracing bytes (2026-06-16)");
+}
+
+ZTEST(pir_mfg, test_mfg_tx_id_byte_indices)
+{
+    zassert_equal(MFG_TX_ID_LO_IDX, 8, "tx_id low byte must be at index 8");
+    zassert_equal(MFG_TX_ID_HI_IDX, 9, "tx_id high byte must be at index 9");
 }
 
 ZTEST(pir_mfg, test_mfg_company_id_bytes)
