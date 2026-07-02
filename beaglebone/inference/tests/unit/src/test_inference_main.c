@@ -20,6 +20,13 @@
 #include <stdio.h>
 #include "inference_core.h"
 
+/* LISTEN_PORT is intentionally private to inference_daemon.c (not part of
+ * inference_core.h's pure-logic surface -- see that header's own doc
+ * comment: "no TFLite, stb, or socket deps"). Redefined here to mirror
+ * inference_daemon.c's value so this test can assert the port didn't
+ * silently change; keep in sync with inference_daemon.c's #define. */
+#define LISTEN_PORT 9090
+
 /******************************************************************************
  * JPEG header unpacking
  ******************************************************************************/
