@@ -64,10 +64,10 @@
 static const char *TAG = "DEV_GW"; /**< ESP log tag */
 
 /* PI controller parameters — updated by Lambda response, read by tcp_manager */
-static float g_aws_kp       = DEFAULT_AWS_KP;
-static float g_aws_ki       = DEFAULT_AWS_KI;
-static float g_aws_kd       = DEFAULT_AWS_KD;
-static int   g_aws_setpoint = DEFAULT_AWS_SETPOINT;
+static float g_gateway_kp       = DEFAULT_GATEWAY_KP;
+static float g_gateway_ki       = DEFAULT_GATEWAY_KI;
+static float g_gateway_kd       = DEFAULT_GATEWAY_KD;
+static int   g_gateway_setpoint = DEFAULT_GATEWAY_SETPOINT;
 
 typedef struct
 {
@@ -273,14 +273,14 @@ static void parse_control_response(void)
    p_setpoint = cJSON_GetObjectItem(p_json, "setpoint");
    p_light    = cJSON_GetObjectItem(p_json, "light");
 
-   if (NULL != p_kp)       { g_aws_kp       = (float)p_kp->valuedouble;  }
-   if (NULL != p_ki)       { g_aws_ki       = (float)p_ki->valuedouble;  }
-   if (NULL != p_kd)       { g_aws_kd       = (float)p_kd->valuedouble;  }
-   if (NULL != p_setpoint) { g_aws_setpoint = p_setpoint->valueint;       }
+   if (NULL != p_kp)       { g_gateway_kp       = (float)p_kp->valuedouble;  }
+   if (NULL != p_ki)       { g_gateway_ki       = (float)p_ki->valuedouble;  }
+   if (NULL != p_kd)       { g_gateway_kd       = (float)p_kd->valuedouble;  }
+   if (NULL != p_setpoint) { g_gateway_setpoint = p_setpoint->valueint;       }
    if (NULL != p_light)    { ble_send_light_command(p_light->valueint);   }
 
    ESP_LOGI(TAG, "Control updated: kp=%.3f ki=%.3f kd=%.3f setpoint=%d",
-            g_aws_kp, g_aws_ki, g_aws_kd, g_aws_setpoint);
+            g_gateway_kp, g_gateway_ki, g_gateway_kd, g_gateway_setpoint);
 
    cJSON_Delete(p_json);
 }
@@ -370,10 +370,10 @@ static void send_state_to_aws(void)
  * Public getter functions
  ******************************************************************************/
 
-float gateway_get_kp(void)       { return g_aws_kp;       }
-float gateway_get_ki(void)       { return g_aws_ki;       }
-float gateway_get_kd(void)       { return g_aws_kd;       }
-int   gateway_get_setpoint(void) { return g_aws_setpoint; }
+float gateway_get_kp(void)       { return g_gateway_kp;       }
+float gateway_get_ki(void)       { return g_gateway_ki;       }
+float gateway_get_kd(void)       { return g_gateway_kd;       }
+int   gateway_get_setpoint(void) { return g_gateway_setpoint; }
 
 void device_gateway_init(void)
 {

@@ -44,6 +44,7 @@ int      light_found           = 0;
 int      light_addr_type       = 0;
 void ble_scheduler_notify_done(void) {}
 void bus_publish_lock(uint8_t state, int batt) { (void)state;(void)batt; }
+uint64_t bus_publish_light(uint8_t state) { (void)state; return 0; }
 
 /* ---- cJSON behavioral stub state ---- */
 int   g_cjson_parse_ok       = 1;
@@ -69,10 +70,10 @@ ROOM_SENSOR_T rooms[ROOM_COUNT] = {
 
 void bus_publish_temp(int avg_temp) { (void)avg_temp; }
 
-float aws_get_kp(void)       { return g_stub_kp;       }
-float aws_get_ki(void)       { return g_stub_ki;       }
-float aws_get_kd(void)       { return g_stub_kd;       }
-int   aws_get_setpoint(void) { return g_stub_setpoint; }
+float gateway_get_kp(void)       { return g_stub_kp;       }
+float gateway_get_ki(void)       { return g_stub_ki;       }
+float gateway_get_kd(void)       { return g_stub_kd;       }
+int   gateway_get_setpoint(void) { return g_stub_setpoint; }
 int   uart_get_avg_temp(void){ return g_stub_avg_temp; }
 
 /* Controllable tick source for slot table time-based tests */

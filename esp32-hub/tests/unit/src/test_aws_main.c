@@ -1,5 +1,5 @@
 #include "unity.h"
-#include "aws_manager.h"
+#include "device_gateway.h"
 #include "uart_manager.h"
 #include "cJSON.h"
 #include "config.h"
@@ -20,10 +20,10 @@ void setUp(void)
     extern int   g_cjson_avg_temp_found;
 
     g_cjson_parse_ok          = 1;
-    g_cjson_kp_item.valuedouble      = DEFAULT_AWS_KP;
-    g_cjson_ki_item.valuedouble      = DEFAULT_AWS_KI;
-    g_cjson_kd_item.valuedouble      = DEFAULT_AWS_KD;
-    g_cjson_setpoint_item.valueint   = DEFAULT_AWS_SETPOINT;
+    g_cjson_kp_item.valuedouble      = DEFAULT_GATEWAY_KP;
+    g_cjson_ki_item.valuedouble      = DEFAULT_GATEWAY_KI;
+    g_cjson_kd_item.valuedouble      = DEFAULT_GATEWAY_KD;
+    g_cjson_setpoint_item.valueint   = DEFAULT_GATEWAY_SETPOINT;
     g_cjson_kp_found          = 1;
     g_cjson_ki_found          = 1;
     g_cjson_kd_found          = 1;
@@ -32,7 +32,7 @@ void setUp(void)
     g_cjson_avg_temp_found    = 0;
 
     /* Reset aws_manager to defaults */
-    aws_manager_init();
+    device_gateway_init();
 }
 
 void tearDown(void) {}
@@ -42,22 +42,22 @@ void tearDown(void) {}
  ******************************************************************************/
 void test_aws_kp_default(void)
 {
-    TEST_ASSERT_FLOAT_WITHIN(0.001f, DEFAULT_AWS_KP, aws_get_kp());
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, DEFAULT_GATEWAY_KP, gateway_get_kp());
 }
 
 void test_aws_ki_default(void)
 {
-    TEST_ASSERT_FLOAT_WITHIN(0.001f, DEFAULT_AWS_KI, aws_get_ki());
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, DEFAULT_GATEWAY_KI, gateway_get_ki());
 }
 
 void test_aws_kd_default(void)
 {
-    TEST_ASSERT_FLOAT_WITHIN(0.001f, DEFAULT_AWS_KD, aws_get_kd());
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, DEFAULT_GATEWAY_KD, gateway_get_kd());
 }
 
 void test_aws_setpoint_default(void)
 {
-    TEST_ASSERT_EQUAL_INT(DEFAULT_AWS_SETPOINT, aws_get_setpoint());
+    TEST_ASSERT_EQUAL_INT(DEFAULT_GATEWAY_SETPOINT, gateway_get_setpoint());
 }
 
 /******************************************************************************

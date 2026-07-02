@@ -507,22 +507,22 @@ void test_pwm_duty_max(void)
 
 void test_default_aws_kp(void)
 {
-    TEST_ASSERT_FLOAT_WITHIN(0.001f, 1.0f, DEFAULT_AWS_KP);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 1.0f, DEFAULT_GATEWAY_KP);
 }
 
 void test_default_aws_ki(void)
 {
-    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.05f, DEFAULT_AWS_KI);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.05f, DEFAULT_GATEWAY_KI);
 }
 
 void test_default_aws_kd(void)
 {
-    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, DEFAULT_AWS_KD);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, DEFAULT_GATEWAY_KD);
 }
 
 void test_default_aws_setpoint(void)
 {
-    TEST_ASSERT_EQUAL_INT(25, DEFAULT_AWS_SETPOINT);
+    TEST_ASSERT_EQUAL_INT(25, DEFAULT_GATEWAY_SETPOINT);
 }
 
 /******************************************************************************

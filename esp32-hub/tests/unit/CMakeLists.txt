@@ -33,14 +33,15 @@ target_include_directories(test_hub PRIVATE
     ${STUB_DIR}/esp_ble
     ${STUB_DIR}/driver
     ${CMAKE_CURRENT_SOURCE_DIR}/../../main
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/include
     ${unity_SOURCE_DIR}/src)
 
 # ── test_aws ─────────────────────────────────────────────────────────────────
-# Tests: aws_manager parse behavior, uart_manager parse behavior
-# Compiles real aws_manager.c and uart_manager.c; no pi_controller conflict
+# Tests: device_gateway parse behavior, uart_manager parse behavior
+# Compiles real device_gateway.c and uart_manager.c; no pi_controller conflict
 add_executable(test_aws
     src/test_aws_main.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/aws_manager.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/device_gateway.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../main/uart_manager.c
     stubs/stubs_aws.c
     ${unity_SOURCE_DIR}/src/unity.c)
@@ -52,6 +53,7 @@ target_include_directories(test_aws PRIVATE
     ${STUB_DIR}/esp_ble
     ${STUB_DIR}/driver
     ${CMAKE_CURRENT_SOURCE_DIR}/../../main
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../main/include
     ${unity_SOURCE_DIR}/src)
 
 enable_testing()
