@@ -258,6 +258,46 @@ All nodes persist crash state across hard power loss:
 | STM32F411 | RTC backup registers | PC/LR, fault type |
 | STM32F103 | FRAM (16KB partition) | PC/LR, fault type, magic 0xA5 |
 
+## Hardware-Emulation Validation Node
+
+`tiny85-dht-sensor/` (standalone subproject) is a from-scratch software
+implementation of the DHT11 single-wire protocol on an ATtiny85, used as a
+compatibility test node against the BluePill's DHT11 driver. It occupies
+PA7 alongside three physical DHT11 sensors on PA4–PA6; the STM32 driver
+issues the same trigger/read sequence to all four and does not distinguish
+the emulated node from real hardware at the driver interface level.
+
+**Design constraint.** The engineering problem is bus timing, not sensor
+data. A physical DHT11 begins its response within roughly 20–40µs of the
+host releasing the bus; the BluePill driver's timeout on that window is on
+the order of 1ms. This is a tight timing window imposed by the DHT11
+protocol and the driver's polling behavior, not a formally specified
+hardware guarantee — it had to be met in software.
+
+**Implementation choices.** Landing a bit-banged response inside that
+window required:
+
+- caching sensor data ahead of the trigger, refreshed off the response
+  path rather than read synchronously on demand
+- excluding all non-deterministic or slow operations (ADC, UART, logging)
+  from the response function itself — only pin writes and `_delay_us()`
+  are permitted between trigger and response
+- matching DHT11's specific byte encoding (not DHT22's), since the two
+  protocols are timing-compatible but not encoding-compatible, and the
+  host driver validates against DHT11's checksum format
+
+**Observed failure modes.** Early revisions blew this budget by one to two
+orders of magnitude — ADC conversion (>20ms) and UART logging (~31ms/line)
+both ran ahead of the response and caused the STM32 driver to time out
+before the pin ever moved. See
+`tiny85-dht-sensor/src/tiny85-dht-sensor.c` for the full record of
+timing-violation bugs found and fixed during bring-up.
+
+This validates an implicit assumption in the BluePill driver: that DHT11
+responses behave like a hardware-bound contract rather than a
+timing-sensitive software protocol — true for this driver's ~1ms tolerance
+and this implementation path, not a universal property of the DHT11 protocol.
+
 ## Build & Flash
 
 ### ESP32 Hub
@@ -420,6 +460,52 @@ publishes per-module coverage reports via the Coverage plugin:
 
 The Zephyr stage runs with `catchError(buildResult: 'UNSTABLE')` — a missing
 toolchain marks the build unstable rather than failed so other stages still run.
+
+### Hardware-in-the-Loop Validation
+
+#### ATtiny85 DHT11 Protocol Emulator
+
+The following section documents a hardware-in-the-loop validation case that informed driver-level timing assumptions.
+
+*This component is not part of the runtime system architecture; it exists
+solely for validation of driver timing assumptions.*
+
+`tiny85-dht-sensor/` (standalone repo) is a from-scratch software
+implementation of the DHT11 single-wire protocol on an ATtiny85, used as a
+compatibility test node against the BluePill's DHT11 driver. It occupies
+PA7 alongside three physical DHT11 sensors on PA4–PA6; the STM32 driver
+issues the same trigger/read sequence to all four and does not distinguish
+the emulated node from real hardware at the driver interface level.
+
+**Design constraint.** The engineering problem is bus timing, not sensor
+data. A physical DHT11 begins its response within roughly 20–40µs of the
+host releasing the bus; the BluePill driver's timeout on that window is on
+the order of 1ms. This is a tight timing window imposed by the DHT11
+protocol and the driver's polling behavior, not a formally specified
+hardware guarantee — it had to be met in software.
+
+**Implementation choices.** Landing a bit-banged response inside that
+window required:
+
+- caching sensor data ahead of the trigger, refreshed off the response
+  path rather than read synchronously on demand
+- excluding all non-deterministic or slow operations (ADC, UART, logging)
+  from the response function itself — only pin writes and `_delay_us()`
+  are permitted between trigger and response
+- matching DHT11's specific byte encoding (not DHT22's), since the two
+  protocols are timing-compatible but not encoding-compatible, and the
+  host driver validates against DHT11's checksum format
+
+**Observed failure modes.** Early revisions blew this budget by one to two
+orders of magnitude — ADC conversion (>20ms) and UART logging (~31ms/line)
+both ran ahead of the response and caused the STM32 driver to time out
+before the pin ever moved. See the `tiny85-dht-sensor` repo for the full
+record of timing-violation bugs found and fixed during bring-up.
+
+This validates an implicit assumption in the BluePill driver: that DHT11
+responses behave like a hardware-bound contract rather than a
+timing-sensitive software protocol — true for this driver's ~1ms tolerance
+and this implementation path, not a universal property of the DHT11 protocol.
 
 ### Manual testing
 
