@@ -91,39 +91,69 @@ void test_hdr_size_is_4(void)
  * UDP trigger matching
  ******************************************************************************/
 
-void test_trigger_matches_capture(void)
+void test_trigger_parses_full_payload(void)
 {
-    TEST_ASSERT_EQUAL_INT(1, cam_is_trigger("CAPTURE"));
+    cam_trigger_t trig;
+    TEST_ASSERT_EQUAL_INT(1, cam_parse_trigger("CAPTURE:event_id=101,cam_tx_id=42,zone=0", &trig));
+    TEST_ASSERT_EQUAL_UINT64(101, trig.event_id);
+    TEST_ASSERT_EQUAL_UINT32(42,  trig.cam_tx_id);
+    TEST_ASSERT_EQUAL_UINT8(0,    trig.zone);
 }
 
-void test_trigger_matches_with_trailing_data(void)
+void test_trigger_parses_nonzero_zone(void)
 {
-    TEST_ASSERT_EQUAL_INT(1, cam_is_trigger("CAPTURE\n"));
+    cam_trigger_t trig;
+    TEST_ASSERT_EQUAL_INT(1, cam_parse_trigger("CAPTURE:event_id=5,cam_tx_id=9,zone=2", &trig));
+    TEST_ASSERT_EQUAL_UINT8(2, trig.zone);
+}
+
+void test_trigger_matches_prefix_only_fields_default_zero(void)
+{
+    cam_trigger_t trig;
+    TEST_ASSERT_EQUAL_INT(1, cam_parse_trigger("CAPTURE:", &trig));
+    TEST_ASSERT_EQUAL_UINT64(0, trig.event_id);
+    TEST_ASSERT_EQUAL_UINT32(0, trig.cam_tx_id);
+    TEST_ASSERT_EQUAL_UINT8(0,  trig.zone);
 }
 
 void test_trigger_no_match_empty(void)
 {
-    TEST_ASSERT_EQUAL_INT(0, cam_is_trigger(""));
+    cam_trigger_t trig;
+    TEST_ASSERT_EQUAL_INT(0, cam_parse_trigger("", &trig));
 }
 
-void test_trigger_no_match_wrong_string(void)
+void test_trigger_no_match_wrong_prefix(void)
 {
-    TEST_ASSERT_EQUAL_INT(0, cam_is_trigger("TRIGGER"));
+    cam_trigger_t trig;
+    TEST_ASSERT_EQUAL_INT(0, cam_parse_trigger("TRIGGER:event_id=1", &trig));
 }
 
 void test_trigger_no_match_lowercase(void)
 {
-    TEST_ASSERT_EQUAL_INT(0, cam_is_trigger("capture"));
+    cam_trigger_t trig;
+    TEST_ASSERT_EQUAL_INT(0, cam_parse_trigger("capture:event_id=1", &trig));
 }
 
-void test_trigger_no_match_partial(void)
+void test_trigger_no_match_missing_colon(void)
 {
-    TEST_ASSERT_EQUAL_INT(0, cam_is_trigger("CAPTUR"));
+    cam_trigger_t trig;
+    TEST_ASSERT_EQUAL_INT(0, cam_parse_trigger("CAPTURE", &trig));
 }
 
-void test_trigger_str_len(void)
+void test_trigger_null_buf_rejected(void)
 {
-    TEST_ASSERT_EQUAL_INT(7, CAM_TRIGGER_LEN);
+    cam_trigger_t trig;
+    TEST_ASSERT_EQUAL_INT(0, cam_parse_trigger(NULL, &trig));
+}
+
+void test_trigger_null_output_rejected(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, cam_parse_trigger("CAPTURE:event_id=1,cam_tx_id=1,zone=1", NULL));
+}
+
+void test_trigger_prefix_value(void)
+{
+    TEST_ASSERT_EQUAL_STRING("CAPTURE:", CAM_TRIGGER_PREFIX);
 }
 
 /******************************************************************************
@@ -199,13 +229,16 @@ int main(void)
     RUN_TEST(test_roundtrip_known);
     RUN_TEST(test_hdr_size_is_4);
 
-    RUN_TEST(test_trigger_matches_capture);
-    RUN_TEST(test_trigger_matches_with_trailing_data);
+    RUN_TEST(test_trigger_parses_full_payload);
+    RUN_TEST(test_trigger_parses_nonzero_zone);
+    RUN_TEST(test_trigger_matches_prefix_only_fields_default_zero);
     RUN_TEST(test_trigger_no_match_empty);
-    RUN_TEST(test_trigger_no_match_wrong_string);
+    RUN_TEST(test_trigger_no_match_wrong_prefix);
     RUN_TEST(test_trigger_no_match_lowercase);
-    RUN_TEST(test_trigger_no_match_partial);
-    RUN_TEST(test_trigger_str_len);
+    RUN_TEST(test_trigger_no_match_missing_colon);
+    RUN_TEST(test_trigger_null_buf_rejected);
+    RUN_TEST(test_trigger_null_output_rejected);
+    RUN_TEST(test_trigger_prefix_value);
 
     RUN_TEST(test_bbb_port);
     RUN_TEST(test_udp_trigger_port);
