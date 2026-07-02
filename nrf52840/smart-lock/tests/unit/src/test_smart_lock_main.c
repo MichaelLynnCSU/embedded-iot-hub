@@ -115,8 +115,8 @@ ZTEST(lock_timing, test_batt_update_sec)
 
 ZTEST(lock_timing, test_lock_write_len)
 {
-    zassert_equal(LOCK_WRITE_LEN, 1,
-        "LOCK_WRITE_LEN must be 1 -- hub sends single byte commands");
+    zassert_equal(LOCK_WRITE_LEN, 3,
+        "LOCK_WRITE_LEN must be 3 -- hub sends [state][tx_id_lo][tx_id_hi]");
 }
 
 /******************************************************************************

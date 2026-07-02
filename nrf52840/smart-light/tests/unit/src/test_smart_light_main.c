@@ -108,8 +108,8 @@ ZTEST(light_timing, test_idle_heartbeat)
 
 ZTEST(light_timing, test_light_write_len)
 {
-    zassert_equal(LIGHT_WRITE_LEN, 1,
-        "LIGHT_WRITE_LEN must be 1 -- hub sends single byte commands");
+    zassert_equal(LIGHT_WRITE_LEN, 3,
+        "LIGHT_WRITE_LEN must be 3 -- hub sends [state][tx_id_lo][tx_id_hi]");
 }
 
 ZTEST(light_timing, test_light_state_max)
@@ -159,8 +159,8 @@ ZTEST_SUITE(light_write, NULL, NULL, reset_all, NULL, NULL);
 
 ZTEST(light_write, test_write_len_must_be_1)
 {
-    zassert_equal(LIGHT_WRITE_LEN, 1,
-        "write_light_control must reject len != 1");
+    zassert_equal(LIGHT_WRITE_LEN, 3,
+        "write_light_control must reject len != 3");
 }
 
 ZTEST(light_write, test_state_max_is_1)

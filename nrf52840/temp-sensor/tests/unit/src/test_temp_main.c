@@ -153,8 +153,8 @@ ZTEST_SUITE(temp_mfg, NULL, NULL, reset_all, NULL, NULL);
 
 ZTEST(temp_mfg, test_mfg_data_size_is_4)
 {
-    zassert_equal(MFG_DATA_SIZE, 4,
-        "MFG_DATA_SIZE changed -- hub expects exactly 4 bytes");
+    zassert_equal(MFG_DATA_SIZE, 6,
+        "MFG_DATA_SIZE changed -- hub expects exactly 6 bytes (temp_lo, temp_hi, batt, tx_id_lo, tx_id_hi)");
 }
 
 ZTEST(temp_mfg, test_mfg_company_id_is_0xAE)
@@ -496,8 +496,8 @@ ZTEST(temp_ble, test_temp_payload_bytes_little_endian)
         if (ad[i].type == 0xFF) { mfg = &ad[i]; break; }
     }
     zassert_not_null(mfg, "payload must contain manufacturer data");
-    zassert_equal(mfg->data_len, 4,
-        "manufacturer data must be 4 bytes, got %d", mfg->data_len);
+    zassert_equal(mfg->data_len, 6,
+        "manufacturer data must be 6 bytes, got %d", mfg->data_len);
     zassert_equal(mfg->data[1], 0xFA,
         "temp low byte must be 0xFA, got 0x%02x", mfg->data[1]);
     zassert_equal(mfg->data[2], 0x00,

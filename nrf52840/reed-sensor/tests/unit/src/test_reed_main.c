@@ -165,8 +165,8 @@ ZTEST_SUITE(reed_mfg, NULL, NULL, reset_all, NULL, NULL);
 
 ZTEST(reed_mfg, test_mfg_data_size_is_3)
 {
-    zassert_equal(MFG_DATA_SIZE, 3,
-        "MFG_DATA_SIZE changed -- hub expects exactly 3 bytes");
+    zassert_equal(MFG_DATA_SIZE, 5,
+        "MFG_DATA_SIZE changed -- hub expects exactly 5 bytes (state, batt, tx_id_lo, tx_id_hi)");
 }
 
 ZTEST(reed_mfg, test_mfg_company_id_is_0xAB)
@@ -512,8 +512,8 @@ ZTEST(reed_ble, test_set_batt_payload_byte_reaches_adv_data)
         if (ad[i].type == 0xFF) { mfg = &ad[i]; break; }
     }
     zassert_not_null(mfg, "advertising payload must contain manufacturer data");
-    zassert_equal(mfg->data_len, 3,
-        "manufacturer data must be 3 bytes, got %d", mfg->data_len);
+    zassert_equal(mfg->data_len, 5,
+        "manufacturer data must be 5 bytes, got %d", mfg->data_len);
     zassert_equal(mfg->data[2], 88,
         "battery byte (data[2]) must be 88, got %d", mfg->data[2]);
 }
