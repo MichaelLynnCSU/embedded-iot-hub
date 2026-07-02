@@ -187,6 +187,41 @@ pipeline {
         }
 
         // ---------------------------------------------
+        // ESP32-Doorbell - Unity via FetchContent
+        // ---------------------------------------------
+
+        stage('ESP32-Doorbell Tests') {
+            steps {
+                sh '''
+                    cd esp32-doorbell/tests/unit
+                    rm -rf build && mkdir build && cd build
+                    cmake .. -DCMAKE_BUILD_TYPE=Debug \
+                             -DCMAKE_C_FLAGS="--coverage" \
+                             -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+                    make -j$(nproc)
+                    ctest -V
+                    gcovr --xml -o cobertura.xml \
+                        --root ${WORKSPACE} \
+                        --filter "${WORKSPACE}/esp32-doorbell/" \
+                        --exclude ".*/tests/.*" \
+                        --exclude ".*/CMakeFiles/.*" \
+                        --exclude ".*/unity/.*" \
+                        .
+                '''
+            }
+            post {
+                always {
+                    recordCoverage(
+                        id: 'esp32-doorbell',
+                        name: 'ESP32-Doorbell',
+                        tools: [[parser: 'COBERTURA', pattern: 'esp32-doorbell/tests/unit/build/cobertura.xml']],
+                        sourceDirectories: [[path: 'esp32-doorbell']]
+                    )
+                }
+            }
+        }
+
+        // ---------------------------------------------
         // ESP32-C3 Motor - Unity via FetchContent
         // ---------------------------------------------
 
