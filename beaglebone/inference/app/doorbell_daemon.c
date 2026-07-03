@@ -5,7 +5,7 @@
  * \brief BeagleBone doorbell ingest daemon.
  *
  * \details TCP server on port 9091. Accepts connections from ESP32 doorbell
- *          cams (up to MAX_DOORBELL_CAMS=4). Each connection sends a 20-byte
+ *          cams (up to MAX_DOORBELL_CAMS=4). Each connection sends a 24-byte
  *          cam_header_t followed by a JPEG payload. Runs inference via the
  *          shared inference_worker and saves results to /data/doorbell.
  *
@@ -82,8 +82,8 @@
 #define LOG_PATH          "/var/log/doorbell_daemon.log"
 #define LISTEN_PORT       9091
 #define CAM_MAGIC         0xCAFEBABEu
-#define CAM_HEADER_SIZE   20
-#define CAM_HEADER_VER    1
+#define CAM_HEADER_SIZE   24
+#define CAM_HEADER_VER    2
 #define MAX_DOORBELL_CAMS 4
 #define MAX_JPEG_BYTES    500000
 
@@ -240,10 +240,14 @@ typedef struct
    uint8_t  device_id;  /**< doorbell cam ID (0-3)    */
    uint64_t event_id;   /**< correlation key for hub  */
    uint32_t jpeg_size;  /**< JPEG payload bytes       */
+   uint32_t seq;        /**< BBB telemetry frame_seq. Always 0 for
+                         *   doorbell — device-initiated interrupt with
+                         *   no BBB frame correlation (see esp32-doorbell/
+                         *   main/main.c send_jpeg_to_bbb() note). */
 } doorbell_header_t;
 
 /**
- * \brief Unpack a 20-byte wire header into doorbell_header_t.
+ * \brief Unpack a 24-byte wire header into doorbell_header_t.
  *
  * \param buf  CAM_HEADER_SIZE byte input buffer.
  * \param out  Output struct.
@@ -261,6 +265,8 @@ static void unpack_header(const uint8_t *buf, doorbell_header_t *out)
                     ((uint64_t)buf[14] <<  8) | ((uint64_t)buf[15]);
    out->jpeg_size = ((uint32_t)buf[16] << 24) | ((uint32_t)buf[17] << 16) |
                     ((uint32_t)buf[18] <<  8) | ((uint32_t)buf[19]);
+   out->seq       = ((uint32_t)buf[20] << 24) | ((uint32_t)buf[21] << 16) |
+                    ((uint32_t)buf[22] <<  8) | ((uint32_t)buf[23]);
 }
 
 /******************************** TCP SERVER **********************************/
@@ -329,7 +335,7 @@ static void handle_connection(int client_fd, const char *client_ip)
    /* Drain all frames until connection closes */
    while (g_running)
    {
-      /* Read 20-byte header */
+      /* Read 24-byte header */
       n = recv(client_fd, hdr_buf, CAM_HEADER_SIZE, MSG_WAITALL);
       if (n != CAM_HEADER_SIZE)
       {
@@ -347,6 +353,15 @@ static void handle_connection(int client_fd, const char *client_ip)
       {
          log_msg("Bad magic 0x%08X from %s — dropping connection",
                  hdr.magic, client_ip);
+         break;
+      }
+
+      /* Validate version — rejects mismatched firmware/daemon builds
+       * instead of silently misparsing a header of the wrong size. */
+      if (hdr.version != CAM_HEADER_VER)
+      {
+         log_msg("Bad version %d (expected %d) from %s — dropping connection",
+                 hdr.version, CAM_HEADER_VER, client_ip);
          break;
       }
 

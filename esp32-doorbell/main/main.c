@@ -461,11 +461,22 @@ static bool tcp_connect_once(void)
     return false;
 }
 
+/**
+ * \note seq invariant (CAM_HEADER_VERSION=2, 2026-07-03):
+ *       seq is only meaningful for BBB-frame-correlated events (e.g. the
+ *       indoor PIR/camera path, where seq = the telemetry frame_seq that
+ *       triggered the capture). Doorbell presses are external, device-
+ *       initiated interrupts with no dependency on BBB frame timing — no
+ *       frame_seq exists at generation time. Rather than invent a false
+ *       temporal correlation (e.g. stamping the BBB's frame_seq on
+ *       receipt), doorbell always sends seq=0, a typed absence meaning
+ *       "not frame-correlated" rather than a fallback/error value.
+ */
 static bool send_jpeg_to_bbb(camera_fb_t *p_fb, uint64_t event_id)
 {
     uint8_t hdr_buf[CAM_HEADER_SIZE];
     cam_pack_header(hdr_buf, (uint8_t)DOORBELL_ID, event_id,
-                    (uint32_t)p_fb->len);
+                    (uint32_t)p_fb->len, 0 /* seq — see note above */);
 
     int hn = send(g_tcp_sock, hdr_buf, CAM_HEADER_SIZE, 0);
     ESP_LOGI(TAG, "Header send() returned %d (errno=%d %s)",

@@ -74,8 +74,8 @@
 /*---------------------------------------------------------------------------*/
 #define MAX_DOORBELL_CAMS   4             /**< Max doorbell cams in system    */
 #define CAM_MAGIC           0xCAFEBABEu   /**< Packet magic number            */
-#define CAM_HEADER_VERSION  1             /**< TCP header format version      */
-#define CAM_HEADER_SIZE     20            /**< TCP header size in bytes       */
+#define CAM_HEADER_VERSION  2             /**< TCP header format version      */
+#define CAM_HEADER_SIZE     24            /**< TCP header size in bytes       */
 
 #ifndef DOORBELL_ID
 #define DOORBELL_ID         0             /**< Default device ID (override    */
@@ -95,6 +95,8 @@ typedef struct {
     uint16_t reserved;   /**< alignment padding, set to 0                    */
     uint64_t event_id;   /**< correlation key — matches UDP envelope         */
     uint32_t jpeg_size;  /**< JPEG payload size in bytes                     */
+    uint32_t seq;        /**< BBB telemetry frame_seq — join key into
+                          *   telemetry.log (added CAM_HEADER_VERSION=2)    */
 } __attribute__((packed)) cam_header_t;
 
 /*---------------------------------------------------------------------------*/
@@ -161,7 +163,8 @@ static inline void cam_pack_stream_frame_hdr(uint8_t *buf, uint32_t jpeg_len)
 static inline void cam_pack_header(uint8_t *buf,
                                    uint8_t  device_id,
                                    uint64_t event_id,
-                                   uint32_t jpeg_size)
+                                   uint32_t jpeg_size,
+                                   uint32_t seq)
 {
     uint32_t magic = CAM_MAGIC;
     buf[0]  = (uint8_t)((magic     >> 24) & 0xFF);
@@ -184,6 +187,10 @@ static inline void cam_pack_header(uint8_t *buf,
     buf[17] = (uint8_t)((jpeg_size >> 16) & 0xFF);
     buf[18] = (uint8_t)((jpeg_size >>  8) & 0xFF);
     buf[19] = (uint8_t)((jpeg_size      ) & 0xFF);
+    buf[20] = (uint8_t)((seq       >> 24) & 0xFF);
+    buf[21] = (uint8_t)((seq       >> 16) & 0xFF);
+    buf[22] = (uint8_t)((seq       >>  8) & 0xFF);
+    buf[23] = (uint8_t)((seq            ) & 0xFF);
 }
 
 /**
@@ -205,6 +212,8 @@ static inline void cam_unpack_header(const uint8_t *buf, cam_header_t *out)
                      ((uint64_t)buf[14] <<  8) | ((uint64_t)buf[15]);
     out->jpeg_size = ((uint32_t)buf[16] << 24) | ((uint32_t)buf[17] << 16) |
                      ((uint32_t)buf[18] <<  8) | ((uint32_t)buf[19]);
+    out->seq       = ((uint32_t)buf[20] << 24) | ((uint32_t)buf[21] << 16) |
+                     ((uint32_t)buf[22] <<  8) | ((uint32_t)buf[23]);
 }
 
 /**
