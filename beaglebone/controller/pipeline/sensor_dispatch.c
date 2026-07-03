@@ -93,7 +93,7 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
    /* ---- Summary line ---- */
    LOG("[DISPATCH] seq=%u tmp=%.1f mot=%d occ=%d lgt=%d lck=%d mtr=%d "
        "ages pir=%d lgt=%d lck=%d batts pir=%d%% lck=%d%% mtr=%d%% "
-       "pirs=%d lock_eid=%llu light_eid=%llu",
+       "pirs=%d lock_event_id=%llu light_event_id=%llu",
        p_data->frame_seq,
        p_data->avg_temp,
        p_data->motion_count,
@@ -114,7 +114,7 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
    /* ---- Per-slot PIR (all slots) ---- */
    for (i = 0; i < MAX_PIRS; i++)
    {
-      LOG("[DISPATCH] PIR slot=%d cnt=%u batt=%d age=%d occ=%d eid=%llu",
+      LOG("[DISPATCH] PIR slot=%d cnt=%u batt=%d age=%d occ=%d event_id=%llu",
           i + 1,
           (unsigned)p_data->pir_slots[i].count,
           p_data->pir_slots[i].batt,
@@ -126,7 +126,7 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
    /* ---- Per-slot Reed (all slots) ---- */
    for (i = 0; i < MAX_REEDS; i++)
    {
-      LOG("[DISPATCH] Reed slot=%d active=%d st=%d batt=%d age=%d eid=%llu",
+      LOG("[DISPATCH] Reed slot=%d active=%d st=%d batt=%d age=%d event_id=%llu",
           i + 1,
           p_data->reed_slots[i].active,
           p_data->reed_slots[i].state,
@@ -138,7 +138,7 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
    /* ---- Per-slot Temp (all slots) ---- */
    for (i = 0; i < MAX_TEMPS; i++)
    {
-      LOG("[DISPATCH] Temp slot=%d temp=%d batt=%d age=%d eid=%llu",
+      LOG("[DISPATCH] Temp slot=%d temp=%d batt=%d age=%d event_id=%llu",
           i + 1,
           p_data->temp_slots[i].temp_decidegc,
           p_data->temp_slots[i].batt,

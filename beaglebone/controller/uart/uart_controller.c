@@ -77,7 +77,7 @@
  *          uart_update_frame() (pipe_ingress path, via p_raw_frame /
  *          SensorData directly) now emit one EID_<TYPE><slot>: line per
  *          active device into the outbound UART bundle, plus one
- *          "[UART] ... device=<TYPE> slot=<n> eid=..." log line per
+ *          "[UART] ... device=<TYPE> slot=<n> event_id=..." log line per
  *          device — mirroring the convention already established at
  *          [PARSE], [DISPATCH], and [SHM].
  *
@@ -182,7 +182,7 @@ static void emit_device_event_ids(UartMsg *p_msg, int *p_pos,
       pos += snprintf(p_msg->buf + pos, sizeof(p_msg->buf) - pos,
                       "EID_PIR%d:%llu\n",
                       i + 1, (unsigned long long)p_p_eid[i]);
-      LOG("[UART] transport=ttyS1 write dst=blackpill_lcd device=PIR slot=%d eid=%llu",
+      LOG("[UART] transport=ttyS1 write dst=blackpill_lcd device=PIR slot=%d event_id=%llu",
           i + 1, (unsigned long long)p_p_eid[i]);
    }
 
@@ -192,7 +192,7 @@ static void emit_device_event_ids(UartMsg *p_msg, int *p_pos,
       pos += snprintf(p_msg->buf + pos, sizeof(p_msg->buf) - pos,
                       "EID_REED%d:%llu\n",
                       i + 1, (unsigned long long)p_r_eid[i]);
-      LOG("[UART] transport=ttyS1 write dst=blackpill_lcd device=REED slot=%d eid=%llu",
+      LOG("[UART] transport=ttyS1 write dst=blackpill_lcd device=REED slot=%d event_id=%llu",
           i + 1, (unsigned long long)p_r_eid[i]);
    }
 
@@ -202,7 +202,7 @@ static void emit_device_event_ids(UartMsg *p_msg, int *p_pos,
       pos += snprintf(p_msg->buf + pos, sizeof(p_msg->buf) - pos,
                       "EID_TEMP%d:%llu\n",
                       i + 1, (unsigned long long)p_t_eid[i]);
-      LOG("[UART] transport=ttyS1 write dst=blackpill_lcd device=TEMP slot=%d eid=%llu",
+      LOG("[UART] transport=ttyS1 write dst=blackpill_lcd device=TEMP slot=%d event_id=%llu",
           i + 1, (unsigned long long)p_t_eid[i]);
    }
 
@@ -210,7 +210,7 @@ static void emit_device_event_ids(UartMsg *p_msg, int *p_pos,
    {
       pos += snprintf(p_msg->buf + pos, sizeof(p_msg->buf) - pos,
                       "EID_LOCK:%llu\n", (unsigned long long)lock_eid);
-      LOG("[UART] transport=ttyS1 write dst=blackpill_lcd device=LOCK eid=%llu",
+      LOG("[UART] transport=ttyS1 write dst=blackpill_lcd device=LOCK event_id=%llu",
           (unsigned long long)lock_eid);
    }
 
@@ -218,7 +218,7 @@ static void emit_device_event_ids(UartMsg *p_msg, int *p_pos,
    {
       pos += snprintf(p_msg->buf + pos, sizeof(p_msg->buf) - pos,
                       "EID_LIGHT:%llu\n", (unsigned long long)light_eid);
-      LOG("[UART] transport=ttyS1 write dst=blackpill_lcd device=LIGHT eid=%llu",
+      LOG("[UART] transport=ttyS1 write dst=blackpill_lcd device=LIGHT event_id=%llu",
           (unsigned long long)light_eid);
    }
 

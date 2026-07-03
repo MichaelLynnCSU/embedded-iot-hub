@@ -55,10 +55,10 @@
  *          PIR/reed/temp event IDs — which were equally present in
  *          p_data at this point — were dropped without being logged at
  *          all. A real capture showed event_id=52266 on the SHM write
- *          line exactly matching lock_eid=52266 from the [DISPATCH] line
+ *          line exactly matching lock_event_id=52266 from the [DISPATCH] line
  *          one row above it, while that same [DISPATCH] line also showed
- *          PIR slot=1 eid=45512, PIR slot=2 eid=45342, and Temp slot=1
- *          eid=52257 — none of which made it into the SHM log.
+ *          PIR slot=1 event_id=45512, PIR slot=2 event_id=45342, and Temp slot=1
+ *          event_id=52257 — none of which made it into the SHM log.
  *
  *          shm_update_frame() now logs every active device's event_id
  *          individually (device=PIR/REED/TEMP/LOCK/LIGHT), each on its
@@ -174,7 +174,7 @@ static void log_shm_device_event_ids(const struct SensorData *p_data)
    {
       if (p_data->pir_slots[i].active && (0 != p_data->pir_slots[i].event_id))
       {
-         LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=PIR slot=%d eid=%llu",
+         LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=PIR slot=%d event_id=%llu",
              i + 1, (unsigned long long)p_data->pir_slots[i].event_id);
       }
    }
@@ -183,7 +183,7 @@ static void log_shm_device_event_ids(const struct SensorData *p_data)
    {
       if (p_data->reed_slots[i].active && (0 != p_data->reed_slots[i].event_id))
       {
-         LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=REED slot=%d eid=%llu",
+         LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=REED slot=%d event_id=%llu",
              i + 1, (unsigned long long)p_data->reed_slots[i].event_id);
       }
    }
@@ -192,20 +192,20 @@ static void log_shm_device_event_ids(const struct SensorData *p_data)
    {
       if (p_data->temp_slots[i].active && (0 != p_data->temp_slots[i].event_id))
       {
-         LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=TEMP slot=%d eid=%llu",
+         LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=TEMP slot=%d event_id=%llu",
              i + 1, (unsigned long long)p_data->temp_slots[i].event_id);
       }
    }
 
    if (0 != p_data->lock_event_id)
    {
-      LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=LOCK eid=%llu",
+      LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=LOCK event_id=%llu",
           (unsigned long long)p_data->lock_event_id);
    }
 
    if (0 != p_data->light_event_id)
    {
-      LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=LIGHT eid=%llu",
+      LOG("[SHM] transport=sensor_shm write src=pipe_ingress device=LIGHT event_id=%llu",
           (unsigned long long)p_data->light_event_id);
    }
 }

@@ -16,8 +16,8 @@
  *            [WROOM]     event_id=8
  *            [TCP]       event_id=8
  *            [DISPATCH]  event_id=8
- *            [SHM]       transport=sensor_shm write src=pipe_ingress device=LOCK eid=8
- *            [UART]      transport=ttyS1 write dst=blackpill_lcd device=LOCK eid=8
+ *            [SHM]       transport=sensor_shm write src=pipe_ingress device=LOCK event_id=8
+ *            [UART]      transport=ttyS1 write dst=blackpill_lcd device=LOCK event_id=8
  *
  *          Note: the old "[LCD] transport=sensor_shm event_id=8 read"
  *          log line no longer exists. After the 2026-06-19 cleanup,
