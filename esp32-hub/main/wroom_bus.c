@@ -61,6 +61,8 @@
 #include "wroom_bus.h"
 #include "esp_log.h"
 #include <string.h>
+#include "nvs_flash.h"
+#include "nvs.h"
 
 static const char *TAG = "WROOM_BUS";
 
@@ -91,12 +93,45 @@ static portMUX_TYPE      g_event_seq_mux = portMUX_INITIALIZER_UNLOCKED; /**< gu
  *          from more than one task needs the same treatment — a bare
  *          increment/read-modify-write here is not safe by default.
  */
+#define WROOM_NVS_NAMESPACE   "wroom_bus"
+#define WROOM_NVS_SEQ_KEY     "event_seq"
+#define WROOM_SEQ_SAVE_EVERY  50U   /* persist every N increments to limit flash wear */
+
+static uint32_t g_seq_since_save = 0;
+
+static void wroom_event_seq_save(uint64_t value)
+{
+   nvs_handle_t handle = 0;
+   if (ESP_OK != nvs_open(WROOM_NVS_NAMESPACE, NVS_READWRITE, &handle)) { return; }
+   (void)nvs_set_u64(handle, WROOM_NVS_SEQ_KEY, value);
+   (void)nvs_commit(handle);
+   nvs_close(handle);
+}
+
+static uint64_t wroom_event_seq_load(void)
+{
+   nvs_handle_t handle = 0;
+   uint64_t     value  = 0;
+   if (ESP_OK != nvs_open(WROOM_NVS_NAMESPACE, NVS_READONLY, &handle)) { return 0; }
+   (void)nvs_get_u64(handle, WROOM_NVS_SEQ_KEY, &value);
+   nvs_close(handle);
+   return value;
+}
+
 static uint64_t wroom_event_id_generate(void)
 {
    uint64_t id;
+   bool     should_save;
+
    taskENTER_CRITICAL(&g_event_seq_mux);
    id = ++g_event_seq;
+   g_seq_since_save++;
+   should_save = (g_seq_since_save >= WROOM_SEQ_SAVE_EVERY);
+   if (should_save) { g_seq_since_save = 0; }
    taskEXIT_CRITICAL(&g_event_seq_mux);
+
+   if (should_save) { wroom_event_seq_save(id); }
+
    return id;
 }
 
@@ -127,7 +162,9 @@ BUS_SUBSCRIBER_T bus_register_subscriber(EventBits_t mask)
 
 void bus_init(void)
 {
-   ESP_LOGI(TAG, "[WROOM] Bus initialized");
+   g_event_seq = wroom_event_seq_load();
+   ESP_LOGI(TAG, "[WROOM] Bus initialized, resuming event_id from %llu",
+            (unsigned long long)g_event_seq);
 }
 
 static void bus_signal(EventBits_t bits)
