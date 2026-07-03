@@ -64,6 +64,7 @@ static time_t          g_doorbell_last_seen[MAX_DOORBELL_CAMS] = {0};
 static struct in_addr  g_cam_ip[MAX_CAMS]                      = {{0}};
 static pthread_mutex_t g_liveness_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t        g_cam_tx_id      = 0; /**< UDP trigger transport counter */
+static uint32_t        g_boot_epoch     = 0; /**< process-start epoch, distinguishes cam_tx_id across restarts */
 
 /* Forward declarations */
 static uint16_t cam_get_age_s(uint8_t slot);
@@ -439,10 +440,11 @@ static void send_capture_trigger(uint8_t zone, uint64_t event_id,
    }
    else
    {
-      log_msg("[TRIGGER] sent zone=%u event_id=%llu cam_tx_id=%u ip=%s",
+      log_msg("[TRIGGER] sent zone=%u event_id=%llu cam_tx_id=%u boot_epoch=%u ip=%s",
               (unsigned)zone,
               (unsigned long long)event_id,
               (unsigned)g_cam_tx_id,
+              (unsigned)g_boot_epoch,
               inet_ntoa(cam_ip));
    }
 
@@ -531,6 +533,8 @@ int main(void)
    setvbuf(stdout, NULL, _IOLBF, 0);
    signal(SIGINT,  sig_handler);
    signal(SIGTERM, sig_handler);
+
+   g_boot_epoch = (uint32_t)time(NULL);
 
    g_log = fopen(LOG_PATH, "a");
    if (NULL == g_log)
