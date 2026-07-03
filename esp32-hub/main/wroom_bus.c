@@ -68,11 +68,36 @@ static BUS_SUBSCRIBER_T g_subscribers[BUS_MAX_SUBSCRIBERS];
 static int              g_sub_count  = 0;
 static uint32_t         g_bus_seq    = 0;  /* Phase 1: Local bus sequence counter */
 static uint64_t         g_event_seq  = 0;  /* Phase 2: Authority event_id sequencer */
+static portMUX_TYPE      g_event_seq_mux = portMUX_INITIALIZER_UNLOCKED; /**< guards g_event_seq */
 
+/*
+ * NOTE — RACE CONDITION (fixed):
+ *          wroom_event_id_generate() originally did a bare "g_event_seq++"
+ *          with no locking. bus_publish_pir/reed/lock/light/temp/etc. each
+ *          call this from their own FreeRTOS task, so two tasks could read
+ *          the same g_event_seq value, both increment locally, and both
+ *          write back the same result — producing duplicate event_ids
+ *          under concurrent publishes. Confirmed in the wild: event_id=9999
+ *          was assigned to both a PIR event (5/29) and a REED event (5/31)
+ *          with continuous uptime and no restarts anywhere in the chain,
+ *          which ruled out wraparound/reset as the cause and pointed at
+ *          a plain read-modify-write race instead.
+ *
+ *          Fixed by guarding the increment with taskENTER_CRITICAL/
+ *          taskEXIT_CRITICAL + g_event_seq_mux, matching the portMUX_TYPE
+ *          pattern already used for state mutexes in ble_light.c/ble_lock.c.
+ *
+ *          Any future counter/global added to this file that's touched
+ *          from more than one task needs the same treatment — a bare
+ *          increment/read-modify-write here is not safe by default.
+ */
 static uint64_t wroom_event_id_generate(void)
 {
-   g_event_seq++;
-   return g_event_seq;
+   uint64_t id;
+   taskENTER_CRITICAL(&g_event_seq_mux);
+   id = ++g_event_seq;
+   taskEXIT_CRITICAL(&g_event_seq_mux);
+   return id;
 }
 
 BUS_SUBSCRIBER_T bus_register_subscriber(EventBits_t mask)
