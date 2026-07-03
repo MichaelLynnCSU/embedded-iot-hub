@@ -46,4 +46,30 @@ struct CamTriggerRequest
     uint8_t  zone;      /**< PIR slot index (0-based) = CAM_SLOT     */
 };
 
+
+
+#define CAM_TRIGGER_STATUS_SOCK "/tmp/cam_trigger_status.sock"
+
+/**
+ * \brief Reason a CamTriggerRequest was dropped by camera_manager,
+ *        reported back to controller for root-ledger visibility.
+ */
+enum CamTriggerDropReason
+{
+    CAM_DROP_ZONE_OUT_OF_RANGE = 0,
+    CAM_DROP_ZONE_OFFLINE      = 1,
+    CAM_DROP_NO_IP             = 2,
+};
+
+/**
+ * \brief Trigger-drop notification — sent by camera_manager,
+ *        received by controller. Same fire-and-forget contract as
+ *        CamTriggerRequest, just the reverse direction.
+ */
+struct CamTriggerStatus
+{
+    uint64_t event_id;
+    uint8_t  zone;
+    uint8_t  reason;
+};
 #endif /* CAM_TRIGGER_IPC_H */

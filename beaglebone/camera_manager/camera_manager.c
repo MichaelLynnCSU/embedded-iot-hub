@@ -44,6 +44,22 @@
 #include "../include/cam_trigger_ipc.h"
 #include <sys/un.h>
 
+static void report_trigger_drop(uint64_t event_id, uint8_t zone, uint8_t reason)
+{
+   struct sockaddr_un       addr = {0};
+   struct CamTriggerStatus  msg  = {0};
+   int                      sock = -1;
+   msg.event_id = event_id;
+   msg.zone     = zone;
+   msg.reason   = reason;
+   sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+   if (sock < 0) { return; }
+   addr.sun_family = AF_UNIX;
+   strncpy(addr.sun_path, CAM_TRIGGER_STATUS_SOCK, sizeof(addr.sun_path) - 1);
+   (void)sendto(sock, &msg, sizeof(msg), 0, (struct sockaddr *)&addr, sizeof(addr));
+   close(sock);
+}
+
 /*---------------------------------------------------------------------------*/
 /* Config                                                                      */
 /*---------------------------------------------------------------------------*/
@@ -502,18 +518,21 @@ static void *trigger_listener_thread(void *arg)
       if (req.zone >= MAX_CAMS)
       {
          log_msg("[TRIGGER] zone=%u out of range", (unsigned)req.zone);
+         report_trigger_drop(req.event_id, req.zone, CAM_DROP_ZONE_OUT_OF_RANGE);
          continue;
       }
 
       if (!cam_is_online(req.zone))
       {
          log_msg("[TRIGGER] zone=%u offline — trigger dropped", (unsigned)req.zone);
+         report_trigger_drop(req.event_id, req.zone, CAM_DROP_ZONE_OFFLINE);
          continue;
       }
 
       if (cam_get_ip(req.zone, &cam_ip) < 0)
       {
          log_msg("[TRIGGER] zone=%u no IP known — trigger dropped", (unsigned)req.zone);
+         report_trigger_drop(req.event_id, req.zone, CAM_DROP_NO_IP);
          continue;
       }
 
@@ -543,6 +562,10 @@ int main(void)
    {
       fprintf(stderr, "Warning: cannot open log %s: %s\n",
               LOG_PATH, strerror(errno));
+   }
+   else
+   {
+      setvbuf(g_log, NULL, _IOLBF, 0);
    }
 
    log_msg("[CAMERA_MGR] starting on UDP port %d", CAMERA_MANAGER_PORT);

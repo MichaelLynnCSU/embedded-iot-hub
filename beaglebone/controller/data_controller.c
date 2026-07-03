@@ -56,6 +56,7 @@
 #include "log.h"
 #include "globals.h"
 #include "heartbeat.h"
+#include "cam_trigger_status_reader.h"
 #include "db_manager.h"
 #include "uart_controller.h"
 #include "pipe_reader.h"
@@ -190,7 +191,8 @@ static int create_threads(pthread_t *p_rx_thread,
                            pthread_t *p_uart_thread,
                            pthread_t *p_hb_thread,
                            pthread_t *p_push_thread,
-                           pthread_t *p_cam_thread)
+                           pthread_t *p_cam_thread,
+                           pthread_t *p_cam_status_thread)
 {
    int ret = 0; /**< pthread return value */
 
@@ -226,6 +228,12 @@ static int create_threads(pthread_t *p_rx_thread,
    if (0 != ret)
    {
       LOG_ERR("cam_pipe_reader_thread create failed (err=%d)", ret);
+      return -1;
+   }
+   ret = pthread_create(p_cam_status_thread, NULL, cam_trigger_status_thread, NULL);
+   if (0 != ret)
+   {
+      LOG_ERR("cam_trigger_status_thread create failed (err=%d)", ret);
       return -1;
    }
 
@@ -284,6 +292,7 @@ int main(void)
    pthread_t hb_thread;   /**< heartbeat monitor thread handle */
    pthread_t push_thread; /**< UART push thread handle */
    pthread_t cam_thread;  /**< camera pipe reader thread handle */
+   pthread_t cam_status_thread; /**< cam trigger status reader thread handle */
 
    log_fp = fopen(CONTROLLER_LOG, "a");
    if (NULL == log_fp)
@@ -319,7 +328,8 @@ int main(void)
                            &uart_thread,
                            &hb_thread,
                            &push_thread,
-                           &cam_thread))
+                           &cam_thread,
+                           &cam_status_thread))
    {
       LOG_ERR("Thread creation failed");
       cleanup();
@@ -333,6 +343,7 @@ int main(void)
    (void)pthread_join(hb_thread,   NULL);
    (void)pthread_join(push_thread, NULL);
    (void)pthread_join(cam_thread,  NULL);
+   (void)pthread_join(cam_status_thread, NULL);
 
    LOG_INF("Controller shutting down");
 
