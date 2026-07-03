@@ -319,12 +319,14 @@ static int receive_clip(uint8_t ***out_frames,
                         int       *out_n_frames,
                         time_t    *out_start_ts,
                         int       *out_duration_ms,
-                        uint64_t  *out_event_id)
+                        uint64_t  *out_event_id,
+                        uint32_t  *out_seq)
 {
    uint8_t        **frames   = NULL;
    size_t          *lens     = NULL;
    int              n_frames = 0;
    uint64_t         event_id = 0;
+   uint32_t         seq      = 0;
    struct timespec  t0, t1;
 
    frames = calloc(MAX_CLIP_FRAMES, sizeof(uint8_t *));
@@ -391,9 +393,10 @@ static int receive_clip(uint8_t ***out_frames,
          /* First frame of this connection — this is the event_id for
           * the whole clip. */
          event_id = hdr.event_id;
+         seq      = hdr.seq;
          log_msg("[INDOOR] clip_start event_id=" EVENT_ID_FMT
-                 " device_id=%d",
-                 EVENT_ID_ARG(event_id), hdr.device_id);
+                 " seq=%u device_id=%d",
+                 EVENT_ID_ARG(event_id), seq, hdr.device_id);
       }
       else if (hdr.event_id != event_id)
       {
@@ -458,8 +461,8 @@ static int receive_clip(uint8_t ***out_frames,
       lens[n_frames]   = hdr.jpeg_size;
       n_frames++;
 
-      log_msg("[INDOOR] rx event_id=" EVENT_ID_FMT " frame=%d bytes=%u",
-              EVENT_ID_ARG(event_id), n_frames, hdr.jpeg_size);
+      log_msg("[INDOOR] rx event_id=" EVENT_ID_FMT " seq=%u frame=%d bytes=%u",
+              EVENT_ID_ARG(event_id), seq, n_frames, hdr.jpeg_size);
    }
 
    clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -470,13 +473,14 @@ static int receive_clip(uint8_t ***out_frames,
    g_client_fd = -1;
 
    log_msg("[INDOOR] clip_done event_id=" EVENT_ID_FMT
-           " frames=%d duration_ms=%d",
-           EVENT_ID_ARG(event_id), n_frames, *out_duration_ms);
+           " seq=%u frames=%d duration_ms=%d",
+           EVENT_ID_ARG(event_id), seq, n_frames, *out_duration_ms);
 
    *out_frames   = frames;
    *out_lens     = lens;
    *out_n_frames = n_frames;
    *out_event_id = event_id;
+   *out_seq      = seq;
    return (n_frames > 0) ? 0 : -1;
 }
 
@@ -506,7 +510,8 @@ static void process_clip(uint8_t **frames,
                          int       n_frames,
                          time_t    start_ts,
                          int       duration_ms,
-                         uint64_t  event_id)
+                         uint64_t  event_id,
+                         uint32_t  seq)
 {
    char      ts_str[32];
    char      tmp_dir[256];
@@ -566,12 +571,12 @@ static void process_clip(uint8_t **frames,
       /* Run inference on every Nth frame */
       if (i % infer_every_n == 0)
       {
-         log_msg("[INDOOR] infer_start event_id=" EVENT_ID_FMT " frame=%d",
-                 EVENT_ID_ARG(event_id), i + 1);
+         log_msg("[INDOOR] infer_start event_id=" EVENT_ID_FMT " seq=%u frame=%d",
+                 EVENT_ID_ARG(event_id), seq, i + 1);
          inference_worker_run(frames[i], lens[i], &detected, &conf);
          log_msg("[INDOOR] infer_done event_id=" EVENT_ID_FMT
-                 " frame=%d person=%d conf=%.2f",
-                 EVENT_ID_ARG(event_id), i + 1, detected, conf);
+                 " seq=%u frame=%d person=%d conf=%.2f",
+                 EVENT_ID_ARG(event_id), seq, i + 1, detected, conf);
          if (detected && conf > best_conf) { best_detected = 1; best_conf = conf; }
       }
       else
@@ -600,13 +605,13 @@ static void process_clip(uint8_t **frames,
 
    if (system(cmd) != 0)
    {
-      log_msg("[INDOOR] clip_failed event_id=" EVENT_ID_FMT " path=%s",
-              EVENT_ID_ARG(event_id), avi_path);
+      log_msg("[INDOOR] clip_failed event_id=" EVENT_ID_FMT " seq=%u path=%s",
+              EVENT_ID_ARG(event_id), seq, avi_path);
    }
    else
    {
-      log_msg("[INDOOR] clip_saved event_id=" EVENT_ID_FMT " path=%s",
-              EVENT_ID_ARG(event_id), avi_path);
+      log_msg("[INDOOR] clip_saved event_id=" EVENT_ID_FMT " seq=%u path=%s",
+              EVENT_ID_ARG(event_id), seq, avi_path);
       db_insert_clip(avi_path, start_ts, n_frames,
                      best_detected, best_conf, duration_ms, event_id);
    }
@@ -647,9 +652,10 @@ int main(void)
       time_t    start_ts    = 0;
       int       duration_ms = 0;
       uint64_t  event_id    = 0;
+      uint32_t  seq         = 0;
 
       if (receive_clip(&frames, &lens, &n_frames,
-                       &start_ts, &duration_ms, &event_id) < 0)
+                       &start_ts, &duration_ms, &event_id, &seq) < 0)
       {
           /* SIGTERM/SIGINT sets g_running=0 and interrupts any blocking
           * syscall (accept, recv) with EINTR, causing receive_clip() to
@@ -661,7 +667,7 @@ int main(void)
          continue;
       }
 
-      process_clip(frames, lens, n_frames, start_ts, duration_ms, event_id);
+      process_clip(frames, lens, n_frames, start_ts, duration_ms, event_id, seq);
 
       for (int i = 0; i < n_frames; i++) { free(frames[i]); }
       free(frames);

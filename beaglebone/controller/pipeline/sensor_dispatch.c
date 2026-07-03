@@ -54,13 +54,14 @@ static int8_t  g_pir_prev_occupied[MAX_PIRS] = {0}; /**< per-slot previous occup
 /* Cam trigger sender                                                          */
 /*---------------------------------------------------------------------------*/
 
-static void dispatch_cam_trigger(uint8_t zone, uint64_t event_id)
+static void dispatch_cam_trigger(uint8_t zone, uint64_t event_id, uint32_t seq)
 {
    struct sockaddr_un  addr = {0};
    struct CamTriggerRequest req = {0};
    int sock = -1;
 
    req.event_id = event_id;
+   req.seq      = seq;
    req.zone     = zone;
 
    sock = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -72,13 +73,13 @@ static void dispatch_cam_trigger(uint8_t zone, uint64_t event_id)
    if (sendto(sock, &req, sizeof(req), 0,
               (struct sockaddr *)&addr, sizeof(addr)) < 0)
    {
-      LOG("[DISPATCH] cam_trigger_failed zone=%u event_id=%llu errno=%d",
-          (unsigned)zone, (unsigned long long)event_id, errno);
+      LOG("[DISPATCH] cam_trigger_failed zone=%u event_id=%llu seq=%u errno=%d",
+          (unsigned)zone, (unsigned long long)event_id, seq, errno);
    }
    else
    {
-      LOG("[DISPATCH] cam_trigger zone=%u event_id=%llu",
-          (unsigned)zone, (unsigned long long)event_id);
+      LOG("[DISPATCH] cam_trigger zone=%u event_id=%llu seq=%u",
+          (unsigned)zone, (unsigned long long)event_id, seq);
    }
    close(sock);
 }
@@ -175,7 +176,8 @@ void sensor_frame_dispatch(const struct SensorData *p_data)
       int8_t occ = p_data->pir_slots[i].occupied;
       if ((0 == g_pir_prev_occupied[i]) && (1 == occ))
       {
-         dispatch_cam_trigger((uint8_t)i, p_data->pir_slots[i].event_id);
+         dispatch_cam_trigger((uint8_t)i, p_data->pir_slots[i].event_id,
+                              p_data->frame_seq);
       }
       g_pir_prev_occupied[i] = occ;
    }

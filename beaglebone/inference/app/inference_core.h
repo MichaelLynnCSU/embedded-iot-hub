@@ -44,8 +44,8 @@
 /*---------------------------------------------------------------------------*/
 
 #define CAM_MAGIC           0xCAFEBABEu
-#define CAM_HEADER_VERSION  1
-#define CAM_HEADER_SIZE     20    /**< packed indoor_header_t size, bytes    */
+#define CAM_HEADER_VERSION  2
+#define CAM_HEADER_SIZE     24    /**< packed indoor_header_t size, bytes    */
 
 /**
  * \brief Packed TCP header read before each JPEG frame.
@@ -61,6 +61,8 @@ typedef struct {
     uint16_t reserved;
     uint64_t event_id;
     uint32_t jpeg_size;
+    uint32_t seq;        /**< BBB telemetry frame_seq — join key into
+                          *   telemetry.log (added CAM_HEADER_VERSION=2) */
 } indoor_header_t;
 
 /**
@@ -85,6 +87,8 @@ static inline void infer_unpack_header(const uint8_t *buf, indoor_header_t *out)
                       ((uint64_t)buf[14] <<  8) |  (uint64_t)buf[15];
     out->jpeg_size = ((uint32_t)buf[16] << 24) | ((uint32_t)buf[17] << 16) |
                       ((uint32_t)buf[18] <<  8) |  (uint32_t)buf[19];
+    out->seq       = ((uint32_t)buf[20] << 24) | ((uint32_t)buf[21] << 16) |
+                      ((uint32_t)buf[22] <<  8) |  (uint32_t)buf[23];
 }
 
 /**

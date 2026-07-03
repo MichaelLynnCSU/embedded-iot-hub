@@ -102,8 +102,8 @@
 /*---------------------------------------------------------------------------*/
 
 #define CAM_MAGIC           0xCAFEBABEu   /**< Packet magic number            */
-#define CAM_HEADER_VERSION  1             /**< TCP header format version      */
-#define CAM_HEADER_SIZE     20            /**< TCP header size in bytes       */
+#define CAM_HEADER_VERSION  2             /**< TCP header format version      */
+#define CAM_HEADER_SIZE     24            /**< TCP header size in bytes       */
 #define CAM_MAX_SLOTS       3             /**< indoor/front/back — must match
                                             *   MAX_CAMS (beaglebone/include/
                                             *   ipc_proto.h and friends)       */
@@ -138,6 +138,8 @@ typedef struct
 {
     uint64_t event_id;   /**< PIR WROOM event_id — correlation key         */
     uint32_t cam_tx_id;  /**< hub-side UDP transport counter               */
+    uint32_t seq;        /**< BBB telemetry frame_seq at trigger time —
+                          *   join key into telemetry.log                  */
     uint8_t  zone;       /**< PIR slot index (0-based)                     */
 } cam_trigger_t;
 
@@ -158,6 +160,8 @@ typedef struct {
     uint16_t reserved;   /**< alignment padding, set to 0                    */
     uint64_t event_id;   /**< correlation key — matches UDP CAPTURE trigger  */
     uint32_t jpeg_size;  /**< JPEG payload size in bytes                     */
+    uint32_t seq;        /**< BBB telemetry frame_seq — join key into
+                          *   telemetry.log (added CAM_HEADER_VERSION=2)    */
 } __attribute__((packed)) cam_header_t;
 
 /*---------------------------------------------------------------------------*/
@@ -175,7 +179,8 @@ typedef struct {
 static inline void cam_pack_header(uint8_t *buf,
                                    uint8_t  device_id,
                                    uint64_t event_id,
-                                   uint32_t jpeg_size)
+                                   uint32_t jpeg_size,
+                                   uint32_t seq)
 {
     uint32_t magic = CAM_MAGIC;
     buf[0]  = (uint8_t)((magic     >> 24) & 0xFF);
@@ -198,6 +203,10 @@ static inline void cam_pack_header(uint8_t *buf,
     buf[17] = (uint8_t)((jpeg_size >> 16) & 0xFF);
     buf[18] = (uint8_t)((jpeg_size >>  8) & 0xFF);
     buf[19] = (uint8_t)((jpeg_size      ) & 0xFF);
+    buf[20] = (uint8_t)((seq       >> 24) & 0xFF);
+    buf[21] = (uint8_t)((seq       >> 16) & 0xFF);
+    buf[22] = (uint8_t)((seq       >>  8) & 0xFF);
+    buf[23] = (uint8_t)((seq            ) & 0xFF);
 }
 
 /**
@@ -219,6 +228,8 @@ static inline void cam_unpack_header(const uint8_t *buf, cam_header_t *out)
                      ((uint64_t)buf[14] <<  8) | ((uint64_t)buf[15]);
     out->jpeg_size = ((uint32_t)buf[16] << 24) | ((uint32_t)buf[17] << 16) |
                      ((uint32_t)buf[18] <<  8) | ((uint32_t)buf[19]);
+    out->seq       = ((uint32_t)buf[20] << 24) | ((uint32_t)buf[21] << 16) |
+                     ((uint32_t)buf[22] <<  8) | ((uint32_t)buf[23]);
 }
 
 /**
@@ -266,6 +277,7 @@ static inline int cam_parse_trigger(const char *buf, cam_trigger_t *p_out)
     unsigned long long event_id  = 0;
     unsigned int       cam_tx_id = 0;
     int                zone      = 0;
+    unsigned int       seq       = 0;
 
     if (NULL == buf || NULL == p_out)                        { return 0; }
     if (strncmp(buf, CAM_TRIGGER_PREFIX,
@@ -273,12 +285,13 @@ static inline int cam_parse_trigger(const char *buf, cam_trigger_t *p_out)
 
     /* Fields are optional — sscanf fills what it finds, rest stay 0. */
     sscanf(buf + strlen(CAM_TRIGGER_PREFIX),
-           "event_id=%llu,cam_tx_id=%u,zone=%d",
-           &event_id, &cam_tx_id, &zone);
+           "event_id=%llu,cam_tx_id=%u,zone=%d,seq=%u",
+           &event_id, &cam_tx_id, &zone, &seq);
 
     p_out->event_id  = (uint64_t)event_id;
     p_out->cam_tx_id = (uint32_t)cam_tx_id;
     p_out->zone      = (uint8_t)zone;
+    p_out->seq       = (uint32_t)seq;
 
     return 1;
 }

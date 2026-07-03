@@ -491,15 +491,17 @@ static void tcp_connect(void)
  * \param event_id  PIR event_id carried from trigger — logged at send so
  *                  the JPEG transmission is traceable back to the originating
  *                  PIR event.
+ * \param seq       BBB telemetry frame_seq carried from trigger — join key
+ *                  into telemetry.log on the BBB side.
  *
  * \return true on success, false on send failure.
  */
-static bool send_jpeg_to_bbb(camera_fb_t *p_fb, uint64_t event_id)
+static bool send_jpeg_to_bbb(camera_fb_t *p_fb, uint64_t event_id, uint32_t seq)
 {
     uint8_t  hdr[CAM_HEADER_SIZE];
     uint32_t len = (uint32_t)p_fb->len;
 
-    cam_pack_header(hdr, (uint8_t)CAM_SLOT, event_id, len);
+    cam_pack_header(hdr, (uint8_t)CAM_SLOT, event_id, len, seq);
 
     if (CAM_HEADER_SIZE != send(g_tcp_sock, hdr, CAM_HEADER_SIZE, 0)) { return false; }
 
@@ -512,8 +514,8 @@ static bool send_jpeg_to_bbb(camera_fb_t *p_fb, uint64_t event_id)
         trinity_wdt_kick();
     }
 
-    ESP_LOGI(TAG, "[CAM] event_id=%llu jpeg_send bytes=%zu",
-             (unsigned long long)event_id, p_fb->len);
+    ESP_LOGI(TAG, "[CAM] event_id=%llu seq=%lu jpeg_send bytes=%zu",
+             (unsigned long long)event_id, (unsigned long)seq, p_fb->len);
     return true;
 }
 
@@ -654,8 +656,9 @@ static void capture_task(void *arg)
         /* Trigger received — reset idle-ping counter. */
         idle_ms_since_ping = 0;
 
-        ESP_LOGI(TAG, "[CAM] event_id=%llu capture_start cam_tx_id=%u zone=%d",
+        ESP_LOGI(TAG, "[CAM] event_id=%llu seq=%lu capture_start cam_tx_id=%u zone=%d",
                  (unsigned long long)trig.event_id,
+                 (unsigned long)trig.seq,
                  (unsigned)trig.cam_tx_id,
                  (int)trig.zone);
 
@@ -686,7 +689,7 @@ static void capture_task(void *arg)
             camera_fb_t *p_fb = esp_camera_fb_get();
             if (NULL != p_fb)
             {
-                if (!send_jpeg_to_bbb(p_fb, trig.event_id))
+                if (!send_jpeg_to_bbb(p_fb, trig.event_id, trig.seq))
                 {
                     ESP_LOGW(TAG, "[CAM] event_id=%llu send_failed — aborting clip",
                              (unsigned long long)trig.event_id);
@@ -709,8 +712,9 @@ static void capture_task(void *arg)
             elapsed += CAM_CLIP_FRAME_MS;
         }
 
-        ESP_LOGI(TAG, "[CAM] event_id=%llu clip_done elapsed_ms=%lu",
+        ESP_LOGI(TAG, "[CAM] event_id=%llu seq=%lu clip_done elapsed_ms=%lu",
                  (unsigned long long)trig.event_id,
+                 (unsigned long)trig.seq,
                  (unsigned long)elapsed);
 
         close(g_tcp_sock);

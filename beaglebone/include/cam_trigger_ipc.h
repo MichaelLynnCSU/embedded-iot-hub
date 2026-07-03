@@ -39,6 +39,10 @@
 struct CamTriggerRequest
 {
     uint64_t event_id;  /**< pir_slots[i].event_id — correlation key */
+    uint32_t seq;        /**< p_data->frame_seq — BBB telemetry frame
+                          *   snapshot at trigger time. Join key into
+                          *   telemetry.log, matching every other event
+                          *   type in events.log. */
     uint8_t  zone;      /**< PIR slot index (0-based) = CAM_SLOT     */
 };
 

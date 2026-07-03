@@ -407,7 +407,7 @@ static void *ticker_thread(void *p_arg)
 /*---------------------------------------------------------------------------*/
 
 static void send_capture_trigger(uint8_t zone, uint64_t event_id,
-                                  struct in_addr cam_ip)
+                                  uint32_t seq, struct in_addr cam_ip)
 {
    struct sockaddr_in addr = {0};
    char               buf[64];
@@ -417,10 +417,11 @@ static void send_capture_trigger(uint8_t zone, uint64_t event_id,
    g_cam_tx_id++;
 
    buf_len = snprintf(buf, sizeof(buf),
-                      "CAPTURE:event_id=%llu,cam_tx_id=%u,zone=%d",
+                      "CAPTURE:event_id=%llu,cam_tx_id=%u,zone=%d,seq=%u",
                       (unsigned long long)event_id,
                       (unsigned)g_cam_tx_id,
-                      (int)zone);
+                      (int)zone,
+                      (unsigned)seq);
 
    addr.sin_family      = AF_INET;
    addr.sin_port        = htons(CAM_UDP_PORT);
@@ -440,9 +441,10 @@ static void send_capture_trigger(uint8_t zone, uint64_t event_id,
    }
    else
    {
-      log_msg("[TRIGGER] sent zone=%u event_id=%llu cam_tx_id=%u boot_epoch=%u ip=%s",
+      log_msg("[TRIGGER] sent zone=%u event_id=%llu seq=%u cam_tx_id=%u boot_epoch=%u ip=%s",
               (unsigned)zone,
               (unsigned long long)event_id,
+              (unsigned)seq,
               (unsigned)g_cam_tx_id,
               (unsigned)g_boot_epoch,
               inet_ntoa(cam_ip));
@@ -515,7 +517,7 @@ static void *trigger_listener_thread(void *arg)
          continue;
       }
 
-      send_capture_trigger(req.zone, req.event_id, cam_ip);
+      send_capture_trigger(req.zone, req.event_id, req.seq, cam_ip);
    }
 
    close(sock);
