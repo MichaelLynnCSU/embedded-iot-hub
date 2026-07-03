@@ -3,8 +3,11 @@
  * \brief Unit tests for ESP32-S3-CAM node pure logic.
  *
  * Coverage:
- *   cam_pack_jpeg_header()   cam_logic.h  -- big-endian 4-byte length pack
- *   cam_unpack_jpeg_header() cam_logic.h  -- roundtrip correctness
+ *   cam_pack_header()   / cam_unpack_header()   cam_logic.h -- 20-byte
+ *       network-order header pack/roundtrip (magic, version, device_id,
+ *       event_id, jpeg_size)
+ *   cam_header_valid()                          cam_logic.h -- magic check
+ *   cam_device_id_valid()                       cam_logic.h -- range check
  *   cam_is_trigger()         cam_logic.h  -- UDP trigger string match
  *   Network config constants cam_logic.h  -- BBB port alignment regression
  *   Camera pin constants     cam_logic.h  -- silkscreen regression guards
@@ -20,71 +23,153 @@ void tearDown(void) {}
  * JPEG header packing
  ******************************************************************************/
 
-void test_pack_zero(void)
+/******************************************************************************
+ * cam_pack_header / cam_unpack_header
+ ******************************************************************************/
+
+void test_pack_header_magic(void)
 {
-    uint8_t hdr[4] = {0};
-    cam_pack_jpeg_header(hdr, 0);
-    TEST_ASSERT_EQUAL_UINT8(0, hdr[0]);
-    TEST_ASSERT_EQUAL_UINT8(0, hdr[1]);
-    TEST_ASSERT_EQUAL_UINT8(0, hdr[2]);
-    TEST_ASSERT_EQUAL_UINT8(0, hdr[3]);
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    cam_pack_header(buf, 0, 0, 0);
+    uint32_t magic = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+                      ((uint32_t)buf[2] <<  8) | (uint32_t)buf[3];
+    TEST_ASSERT_EQUAL_UINT32(CAM_MAGIC, magic);
 }
 
-void test_pack_max(void)
+void test_pack_header_version(void)
 {
-    uint8_t hdr[4] = {0};
-    cam_pack_jpeg_header(hdr, 0xFFFFFFFF);
-    TEST_ASSERT_EQUAL_UINT8(0xFF, hdr[0]);
-    TEST_ASSERT_EQUAL_UINT8(0xFF, hdr[1]);
-    TEST_ASSERT_EQUAL_UINT8(0xFF, hdr[2]);
-    TEST_ASSERT_EQUAL_UINT8(0xFF, hdr[3]);
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    cam_pack_header(buf, 0, 0, 0);
+    TEST_ASSERT_EQUAL_UINT8(CAM_HEADER_VERSION, buf[4]);
 }
 
-void test_pack_known_value(void)
+void test_pack_header_device_id(void)
 {
-    uint8_t hdr[4] = {0};
-    cam_pack_jpeg_header(hdr, 0x01020304);
-    TEST_ASSERT_EQUAL_UINT8(0x01, hdr[0]);
-    TEST_ASSERT_EQUAL_UINT8(0x02, hdr[1]);
-    TEST_ASSERT_EQUAL_UINT8(0x03, hdr[2]);
-    TEST_ASSERT_EQUAL_UINT8(0x04, hdr[3]);
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    cam_pack_header(buf, 2, 0, 0);
+    TEST_ASSERT_EQUAL_UINT8(2, buf[5]);
 }
 
-void test_pack_msb_first(void)
+void test_pack_header_reserved_zero(void)
 {
-    /* Regression: BBB reads MSB first -- any endian swap breaks parser */
-    uint8_t hdr[4] = {0};
-    cam_pack_jpeg_header(hdr, 0x00000100);
-    TEST_ASSERT_EQUAL_UINT8(0x00, hdr[0]);
-    TEST_ASSERT_EQUAL_UINT8(0x00, hdr[1]);
-    TEST_ASSERT_EQUAL_UINT8(0x01, hdr[2]);
-    TEST_ASSERT_EQUAL_UINT8(0x00, hdr[3]);
+    uint8_t buf[CAM_HEADER_SIZE] = {0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+                                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    cam_pack_header(buf, 0, 0, 0);
+    TEST_ASSERT_EQUAL_UINT8(0, buf[6]);
+    TEST_ASSERT_EQUAL_UINT8(0, buf[7]);
 }
 
-void test_roundtrip_zero(void)
+void test_pack_header_event_id_msb_first(void)
 {
-    uint8_t hdr[4] = {0};
-    cam_pack_jpeg_header(hdr, 0);
-    TEST_ASSERT_EQUAL_UINT32(0, cam_unpack_jpeg_header(hdr));
+    /* Regression: MSB must be in buf[8] -- any endian swap breaks the
+     * event_id correlation key inference_daemon relies on to trace a
+     * clip back to its originating PIR trigger. */
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    cam_pack_header(buf, 0, 0x0102030405060708ULL, 0);
+    TEST_ASSERT_EQUAL_UINT8(0x01, buf[8]);
+    TEST_ASSERT_EQUAL_UINT8(0x02, buf[9]);
+    TEST_ASSERT_EQUAL_UINT8(0x03, buf[10]);
+    TEST_ASSERT_EQUAL_UINT8(0x04, buf[11]);
+    TEST_ASSERT_EQUAL_UINT8(0x05, buf[12]);
+    TEST_ASSERT_EQUAL_UINT8(0x06, buf[13]);
+    TEST_ASSERT_EQUAL_UINT8(0x07, buf[14]);
+    TEST_ASSERT_EQUAL_UINT8(0x08, buf[15]);
 }
 
-void test_roundtrip_max(void)
+void test_pack_header_jpeg_size_msb_first(void)
 {
-    uint8_t hdr[4] = {0};
-    cam_pack_jpeg_header(hdr, 0xFFFFFFFF);
-    TEST_ASSERT_EQUAL_UINT32(0xFFFFFFFF, cam_unpack_jpeg_header(hdr));
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    cam_pack_header(buf, 0, 0, 0x01020304UL);
+    TEST_ASSERT_EQUAL_UINT8(0x01, buf[16]);
+    TEST_ASSERT_EQUAL_UINT8(0x02, buf[17]);
+    TEST_ASSERT_EQUAL_UINT8(0x03, buf[18]);
+    TEST_ASSERT_EQUAL_UINT8(0x04, buf[19]);
 }
 
-void test_roundtrip_known(void)
+void test_header_roundtrip_zero(void)
 {
-    uint8_t hdr[4] = {0};
-    cam_pack_jpeg_header(hdr, 0xDEADBEEF);
-    TEST_ASSERT_EQUAL_UINT32(0xDEADBEEF, cam_unpack_jpeg_header(hdr));
+    uint8_t      buf[CAM_HEADER_SIZE] = {0};
+    cam_header_t out;
+    cam_pack_header(buf, 0, 0, 0);
+    cam_unpack_header(buf, &out);
+    TEST_ASSERT_EQUAL_UINT32(CAM_MAGIC, out.magic);
+    TEST_ASSERT_EQUAL_UINT8(CAM_HEADER_VERSION, out.version);
+    TEST_ASSERT_EQUAL_UINT8(0, out.device_id);
+    TEST_ASSERT_EQUAL_UINT64(0, out.event_id);
+    TEST_ASSERT_EQUAL_UINT32(0, out.jpeg_size);
 }
 
-void test_hdr_size_is_4(void)
+void test_header_roundtrip_max(void)
 {
-    TEST_ASSERT_EQUAL_INT(4, CAM_HDR_SIZE);
+    uint8_t      buf[CAM_HEADER_SIZE] = {0};
+    cam_header_t out;
+    cam_pack_header(buf, 0xFF, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFUL);
+    cam_unpack_header(buf, &out);
+    TEST_ASSERT_EQUAL_UINT8(0xFF, out.device_id);
+    TEST_ASSERT_EQUAL_UINT64(0xFFFFFFFFFFFFFFFFULL, out.event_id);
+    TEST_ASSERT_EQUAL_UINT32(0xFFFFFFFFUL, out.jpeg_size);
+}
+
+void test_header_roundtrip_known_values(void)
+{
+    uint8_t      buf[CAM_HEADER_SIZE] = {0};
+    cam_header_t out;
+    cam_pack_header(buf, 1, 0xDEADBEEFCAFEBABEULL, 9800UL);
+    cam_unpack_header(buf, &out);
+    TEST_ASSERT_EQUAL_UINT32(CAM_MAGIC, out.magic);
+    TEST_ASSERT_EQUAL_UINT8(CAM_HEADER_VERSION, out.version);
+    TEST_ASSERT_EQUAL_UINT8(1, out.device_id);
+    TEST_ASSERT_EQUAL_UINT64(0xDEADBEEFCAFEBABEULL, out.event_id);
+    TEST_ASSERT_EQUAL_UINT32(9800UL, out.jpeg_size);
+}
+
+void test_header_size_is_20(void)
+{
+    TEST_ASSERT_EQUAL_INT(20, CAM_HEADER_SIZE);
+}
+
+/******************************************************************************
+ * cam_header_valid
+ ******************************************************************************/
+
+void test_header_valid_true_after_pack(void)
+{
+    uint8_t      buf[CAM_HEADER_SIZE] = {0};
+    cam_header_t out;
+    cam_pack_header(buf, 0, 1, 1);
+    cam_unpack_header(buf, &out);
+    TEST_ASSERT_EQUAL_INT(1, cam_header_valid(&out));
+}
+
+void test_header_valid_false_wrong_magic(void)
+{
+    cam_header_t h = {0};
+    h.magic = 0x12345678UL;
+    TEST_ASSERT_EQUAL_INT(0, cam_header_valid(&h));
+}
+
+/******************************************************************************
+ * cam_device_id_valid
+ ******************************************************************************/
+
+void test_device_id_valid_zero(void)
+{
+    TEST_ASSERT_EQUAL_INT(1, cam_device_id_valid(0));
+}
+
+void test_device_id_valid_at_max_slots_minus_one(void)
+{
+    TEST_ASSERT_EQUAL_INT(1, cam_device_id_valid(CAM_MAX_SLOTS - 1));
+}
+
+void test_device_id_invalid_at_max_slots(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, cam_device_id_valid(CAM_MAX_SLOTS));
+}
+
+void test_device_id_invalid_255(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, cam_device_id_valid(255));
 }
 
 /******************************************************************************
@@ -220,14 +305,22 @@ int main(void)
 {
     UNITY_BEGIN();
 
-    RUN_TEST(test_pack_zero);
-    RUN_TEST(test_pack_max);
-    RUN_TEST(test_pack_known_value);
-    RUN_TEST(test_pack_msb_first);
-    RUN_TEST(test_roundtrip_zero);
-    RUN_TEST(test_roundtrip_max);
-    RUN_TEST(test_roundtrip_known);
-    RUN_TEST(test_hdr_size_is_4);
+    RUN_TEST(test_pack_header_magic);
+    RUN_TEST(test_pack_header_version);
+    RUN_TEST(test_pack_header_device_id);
+    RUN_TEST(test_pack_header_reserved_zero);
+    RUN_TEST(test_pack_header_event_id_msb_first);
+    RUN_TEST(test_pack_header_jpeg_size_msb_first);
+    RUN_TEST(test_header_roundtrip_zero);
+    RUN_TEST(test_header_roundtrip_max);
+    RUN_TEST(test_header_roundtrip_known_values);
+    RUN_TEST(test_header_size_is_20);
+    RUN_TEST(test_header_valid_true_after_pack);
+    RUN_TEST(test_header_valid_false_wrong_magic);
+    RUN_TEST(test_device_id_valid_zero);
+    RUN_TEST(test_device_id_valid_at_max_slots_minus_one);
+    RUN_TEST(test_device_id_invalid_at_max_slots);
+    RUN_TEST(test_device_id_invalid_255);
 
     RUN_TEST(test_trigger_parses_full_payload);
     RUN_TEST(test_trigger_parses_nonzero_zone);

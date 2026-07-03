@@ -38,7 +38,8 @@
  *          capture_task changed from single JPEG to 10s clip stream.
  *          On trigger: connect to BBB, send frames every CAM_CLIP_FRAME_MS
  *          for CAM_CLIP_DURATION_MS ms, then close. BBB detects end of clip
- *          by connection close. Wire protocol unchanged: [len:4][jpeg] per frame.
+ *          by connection close. Wire protocol at the time: [len:4][jpeg]
+ *          per frame (superseded by cam_header_t event_id, see note below).
  *
  * \note    Trinity integration (2026-06-11):
  *          trinity_wdt / canary / panic / nvs / stats added.
@@ -173,6 +174,25 @@
  *            [CAM]        event_id=101 capture_start
  *            [CAM]        event_id=101 jpeg_send bytes=9800
  *            [CAM]        event_id=101 clip_done elapsed_ms=10000
+ *
+ * \note    TCP header event_id (2026-07-02):
+ *          send_jpeg_to_bbb() previously sent a bare 4-byte big-endian
+ *          JPEG length before each frame (cam_pack_jpeg_header()). That
+ *          left the trace above dangling at the ESP32 -- inference_daemon
+ *          on the BBB had no correlation key and logged clip lifecycle
+ *          lines flat, tied only to timestamp/frame-sequence.
+ *
+ *          send_jpeg_to_bbb() now packs a full cam_header_t
+ *          (cam_pack_header(), CAM_HEADER_SIZE=20 bytes) ahead of every
+ *          frame, carrying trig.event_id from the dequeued trigger
+ *          unchanged. This is the same struct/wire layout already used
+ *          by the doorbell path (esp32-doorbell/main/cam_logic.h). See
+ *          that header's doc comment for the byte layout. inference_daemon
+ *          now validates CAM_MAGIC/CAM_HEADER_VERSION and logs event_id
+ *          on clip_start/rx/inference lines with the same EVENT_ID_FMT/
+ *          EVENT_ID_ARG convention doorbell_daemon uses, closing the loop:
+ *          PIR -> [TRIGGER] sent -> [UDP_CAM_RX] -> [CAM] -> [INDOOR] rx /
+ *          infer_done, all one event_id, grep-traceable end to end.
  ******************************************************************************/
 
 #include <string.h>
@@ -476,12 +496,12 @@ static void tcp_connect(void)
  */
 static bool send_jpeg_to_bbb(camera_fb_t *p_fb, uint64_t event_id)
 {
-    uint8_t  hdr[4];
+    uint8_t  hdr[CAM_HEADER_SIZE];
     uint32_t len = (uint32_t)p_fb->len;
 
-    cam_pack_jpeg_header(hdr, len);
+    cam_pack_header(hdr, (uint8_t)CAM_SLOT, event_id, len);
 
-    if (4 != send(g_tcp_sock, hdr, 4, 0)) { return false; }
+    if (CAM_HEADER_SIZE != send(g_tcp_sock, hdr, CAM_HEADER_SIZE, 0)) { return false; }
 
     size_t sent = 0;
     while (sent < p_fb->len)

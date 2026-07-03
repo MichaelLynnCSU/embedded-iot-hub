@@ -7,10 +7,6 @@
  * \details Extracted from main.c to enable host-side unit testing.
  *          All functions are static inline; no .c file required.
  *
- * \note    Header packing: 4-byte big-endian length prefix sent before
- *          JPEG payload. BBB receiver reads 4 bytes, then reads that many
- *          bytes for the image. Any change breaks the BBB parser silently.
- *
  * \note    Trigger identity model (2026-06-18):
  *          cam_is_trigger() replaced by cam_trigger_t + cam_parse_trigger().
  *          The UDP payload now carries event_id, cam_tx_id, and zone so
@@ -19,6 +15,29 @@
  *
  *          Wire format (named-field, self-describing):
  *            CAPTURE:event_id=101,cam_tx_id=42,zone=0
+ *
+ * \note    TCP header event_id (2026-07-02):
+ *          Legacy wire header (bare 4-byte big-endian JPEG length prefix,
+ *          no correlation key) replaced with cam_header_t — the same
+ *          struct already used by the doorbell path
+ *          (esp32-doorbell/main/cam_logic.h):
+ *            [magic:4][version:1][device_id:1][reserved:2][event_id:8][jpeg_size:4]
+ *          (20 bytes, packed, network byte order). Sent once per frame,
+ *          same as before, just with 16 more bytes ahead of jpeg_size.
+ *
+ *          event_id is carried unmodified from the UDP CAPTURE trigger
+ *          (cam_trigger_t.event_id) into every frame header sent to the
+ *          BBB, so inference_daemon can log it on clip_start/rx/inference
+ *          lines the same way doorbell_daemon does — one ID, greppable
+ *          end to end: PIR -> [TRIGGER] sent -> [UDP_CAM_RX] -> [CAM] ->
+ *          [INDOOR] rx / infer_done.
+ *
+ *          magic+version let inference_daemon reject a peer still running
+ *          the old 4-byte-length-only firmware instead of silently
+ *          misparsing its first 4 bytes as a bogus magic/event_id. Any
+ *          future wire change bumps CAM_HEADER_VERSION the same way.
+ *          device_id carries CAM_SLOT so multi-cam deployments can tell
+ *          frames apart, mirroring doorbell's device_id semantics.
  ******************************************************************************/
 
 #ifndef CAM_LOGIC_H
@@ -77,7 +96,17 @@
 /*---------------------------------------------------------------------------*/
 
 #define CAM_TRIGGER_PREFIX  "CAPTURE:"  /**< Named-field trigger prefix       */
-#define CAM_HDR_SIZE        4           /**< JPEG length header bytes         */
+
+/*---------------------------------------------------------------------------*/
+/* TCP frame header -- shared layout with esp32-doorbell/main/cam_logic.h     */
+/*---------------------------------------------------------------------------*/
+
+#define CAM_MAGIC           0xCAFEBABEu   /**< Packet magic number            */
+#define CAM_HEADER_VERSION  1             /**< TCP header format version      */
+#define CAM_HEADER_SIZE     20            /**< TCP header size in bytes       */
+#define CAM_MAX_SLOTS       3             /**< indoor/front/back — must match
+                                            *   MAX_CAMS (beaglebone/include/
+                                            *   ipc_proto.h and friends)       */
 
 /*---------------------------------------------------------------------------*/
 /* Heartbeat                                                                   */
@@ -112,36 +141,106 @@ typedef struct
     uint8_t  zone;       /**< PIR slot index (0-based)                     */
 } cam_trigger_t;
 
+/**
+ * \brief Packed TCP header sent before each JPEG frame.
+ *
+ * \details Identical layout to esp32-doorbell/main/cam_logic.h's
+ *          cam_header_t — BBB uses magic to validate, version to handle
+ *          future formats, device_id to identify the sending cam slot,
+ *          event_id to correlate with the UDP CAPTURE trigger that
+ *          started this clip, jpeg_size to recv exactly the right number
+ *          of bytes.
+ */
+typedef struct {
+    uint32_t magic;      /**< CAM_MAGIC — validates packet start             */
+    uint8_t  version;    /**< CAM_HEADER_VERSION — protocol version          */
+    uint8_t  device_id;  /**< CAM_SLOT, identifies which security cam        */
+    uint16_t reserved;   /**< alignment padding, set to 0                    */
+    uint64_t event_id;   /**< correlation key — matches UDP CAPTURE trigger  */
+    uint32_t jpeg_size;  /**< JPEG payload size in bytes                     */
+} __attribute__((packed)) cam_header_t;
+
 /*---------------------------------------------------------------------------*/
-/* Pure logic: JPEG length header packing                                     */
+/* Pure logic: TCP frame header pack / unpack — testable on host              */
 /*---------------------------------------------------------------------------*/
 
 /**
- * \brief Pack a 32-bit JPEG length into a 4-byte big-endian header.
+ * \brief Pack a cam_header_t into a 20-byte buffer (network byte order).
  *
- * \param hdr[4]  Output buffer — must be at least 4 bytes.
- * \param len     JPEG payload length in bytes.
+ * \param[out] buf       CAM_HEADER_SIZE output buffer.
+ * \param[in]  device_id Sending cam slot (CAM_SLOT).
+ * \param[in]  event_id  Correlation key from the UDP CAPTURE trigger.
+ * \param[in]  jpeg_size JPEG payload length in bytes.
  */
-static inline void cam_pack_jpeg_header(uint8_t hdr[4], uint32_t len)
+static inline void cam_pack_header(uint8_t *buf,
+                                   uint8_t  device_id,
+                                   uint64_t event_id,
+                                   uint32_t jpeg_size)
 {
-    hdr[0] = (len >> 24) & 0xFF;
-    hdr[1] = (len >> 16) & 0xFF;
-    hdr[2] = (len >>  8) & 0xFF;
-    hdr[3] = (len      ) & 0xFF;
+    uint32_t magic = CAM_MAGIC;
+    buf[0]  = (uint8_t)((magic     >> 24) & 0xFF);
+    buf[1]  = (uint8_t)((magic     >> 16) & 0xFF);
+    buf[2]  = (uint8_t)((magic     >>  8) & 0xFF);
+    buf[3]  = (uint8_t)((magic          ) & 0xFF);
+    buf[4]  = CAM_HEADER_VERSION;
+    buf[5]  = device_id;
+    buf[6]  = 0;
+    buf[7]  = 0;
+    buf[8]  = (uint8_t)((event_id  >> 56) & 0xFF);
+    buf[9]  = (uint8_t)((event_id  >> 48) & 0xFF);
+    buf[10] = (uint8_t)((event_id  >> 40) & 0xFF);
+    buf[11] = (uint8_t)((event_id  >> 32) & 0xFF);
+    buf[12] = (uint8_t)((event_id  >> 24) & 0xFF);
+    buf[13] = (uint8_t)((event_id  >> 16) & 0xFF);
+    buf[14] = (uint8_t)((event_id  >>  8) & 0xFF);
+    buf[15] = (uint8_t)((event_id       ) & 0xFF);
+    buf[16] = (uint8_t)((jpeg_size >> 24) & 0xFF);
+    buf[17] = (uint8_t)((jpeg_size >> 16) & 0xFF);
+    buf[18] = (uint8_t)((jpeg_size >>  8) & 0xFF);
+    buf[19] = (uint8_t)((jpeg_size      ) & 0xFF);
 }
 
 /**
- * \brief Unpack a 4-byte big-endian header back to a 32-bit length.
+ * \brief Unpack a cam_header_t from a 20-byte buffer (network byte order).
  *
- * \param hdr[4]  4-byte big-endian header buffer.
- * \return        32-bit JPEG length.
+ * \param[in]  buf  CAM_HEADER_SIZE input buffer.
+ * \param[out] out  Pointer to cam_header_t to fill.
  */
-static inline uint32_t cam_unpack_jpeg_header(const uint8_t hdr[4])
+static inline void cam_unpack_header(const uint8_t *buf, cam_header_t *out)
 {
-    return ((uint32_t)hdr[0] << 24) |
-           ((uint32_t)hdr[1] << 16) |
-           ((uint32_t)hdr[2] <<  8) |
-            (uint32_t)hdr[3];
+    out->magic     = ((uint32_t)buf[0]  << 24) | ((uint32_t)buf[1]  << 16) |
+                     ((uint32_t)buf[2]  <<  8) | ((uint32_t)buf[3]);
+    out->version   = buf[4];
+    out->device_id = buf[5];
+    out->reserved  = 0;
+    out->event_id  = ((uint64_t)buf[8]  << 56) | ((uint64_t)buf[9]  << 48) |
+                     ((uint64_t)buf[10] << 40) | ((uint64_t)buf[11] << 32) |
+                     ((uint64_t)buf[12] << 24) | ((uint64_t)buf[13] << 16) |
+                     ((uint64_t)buf[14] <<  8) | ((uint64_t)buf[15]);
+    out->jpeg_size = ((uint32_t)buf[16] << 24) | ((uint32_t)buf[17] << 16) |
+                     ((uint32_t)buf[18] <<  8) | ((uint32_t)buf[19]);
+}
+
+/**
+ * \brief Validate a cam_header_t magic number.
+ *
+ * \param[in] h  Pointer to cam_header_t.
+ * \return       1 if valid, 0 if not.
+ */
+static inline int cam_header_valid(const cam_header_t *h)
+{
+    return (h->magic == CAM_MAGIC) ? 1 : 0;
+}
+
+/**
+ * \brief Validate a device ID (cam slot) is in range.
+ *
+ * \param[in] device_id  Device ID to check.
+ * \return               1 if valid, 0 if not.
+ */
+static inline int cam_device_id_valid(uint8_t device_id)
+{
+    return (device_id < CAM_MAX_SLOTS) ? 1 : 0;
 }
 
 /*---------------------------------------------------------------------------*/

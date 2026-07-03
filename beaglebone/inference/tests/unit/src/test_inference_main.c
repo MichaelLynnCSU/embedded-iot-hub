@@ -4,6 +4,8 @@
  *
  * Coverage:
  *   infer_unpack_jpeg_len()  inference_core.h -- big-endian header parse
+ *   infer_unpack_header()   inference_core.h -- indoor_header_t parse (event_id)
+ *   infer_header_valid()     inference_core.h -- magic validation
  *   infer_jpeg_len_valid()   inference_core.h -- bounds validation
  *   infer_above_threshold()  inference_core.h -- confidence gating
  *   infer_is_person()        inference_core.h -- label classification
@@ -71,6 +73,114 @@ void test_unpack_roundtrip(void)
 void test_hdr_size_is_4(void)
 {
     CU_ASSERT_EQUAL(JPEG_HDR_SIZE, 4);
+}
+
+/******************************************************************************
+ * indoor_header_t unpacking (2026-07-02) -- event_id-carrying TCP header,
+ * replaces the legacy 4-byte length prefix above. Byte layout must match
+ * cam_pack_header() on the ESP32-CAM side exactly (esp32-cam/main/cam_logic.h).
+ ******************************************************************************/
+
+void test_header_unpack_magic(void)
+{
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    buf[0] = 0xCA; buf[1] = 0xFE; buf[2] = 0xBA; buf[3] = 0xBE;
+    indoor_header_t hdr;
+    infer_unpack_header(buf, &hdr);
+    CU_ASSERT_EQUAL(hdr.magic, CAM_MAGIC);
+}
+
+void test_header_unpack_version(void)
+{
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    buf[4] = CAM_HEADER_VERSION;
+    indoor_header_t hdr;
+    infer_unpack_header(buf, &hdr);
+    CU_ASSERT_EQUAL(hdr.version, CAM_HEADER_VERSION);
+}
+
+void test_header_unpack_device_id(void)
+{
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    buf[5] = 2;
+    indoor_header_t hdr;
+    infer_unpack_header(buf, &hdr);
+    CU_ASSERT_EQUAL(hdr.device_id, 2);
+}
+
+void test_header_unpack_event_id_msb_first(void)
+{
+    /* Regression: MSB must be in buf[8] -- any endian mismatch against
+     * cam_pack_header() on the ESP32 side breaks the event_id correlation
+     * key inference_daemon.c relies on to trace a clip back to its
+     * originating PIR trigger. */
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    buf[8]  = 0x01; buf[9]  = 0x02; buf[10] = 0x03; buf[11] = 0x04;
+    buf[12] = 0x05; buf[13] = 0x06; buf[14] = 0x07; buf[15] = 0x08;
+    indoor_header_t hdr;
+    infer_unpack_header(buf, &hdr);
+    CU_ASSERT_EQUAL(hdr.event_id, 0x0102030405060708ULL);
+}
+
+void test_header_unpack_jpeg_size_msb_first(void)
+{
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    buf[16] = 0x01; buf[17] = 0x02; buf[18] = 0x03; buf[19] = 0x04;
+    indoor_header_t hdr;
+    infer_unpack_header(buf, &hdr);
+    CU_ASSERT_EQUAL(hdr.jpeg_size, 0x01020304u);
+}
+
+void test_header_unpack_known_values(void)
+{
+    /* Matches cam_pack_header(buf, 1, 0xDEADBEEFCAFEBABEULL, 9800) on the
+     * ESP32-CAM side -- full end-to-end roundtrip sanity check. */
+    uint8_t buf[CAM_HEADER_SIZE] = {
+        0xCA, 0xFE, 0xBA, 0xBE,             /* magic */
+        CAM_HEADER_VERSION,                 /* version */
+        1,                                   /* device_id */
+        0, 0,                                /* reserved */
+        0xDE, 0xAD, 0xBE, 0xEF,             /* event_id hi */
+        0xCA, 0xFE, 0xBA, 0xBE,             /* event_id lo */
+        0x00, 0x00, 0x26, 0x48              /* jpeg_size = 9800 */
+    };
+    indoor_header_t hdr;
+    infer_unpack_header(buf, &hdr);
+    CU_ASSERT_EQUAL(hdr.magic, CAM_MAGIC);
+    CU_ASSERT_EQUAL(hdr.version, CAM_HEADER_VERSION);
+    CU_ASSERT_EQUAL(hdr.device_id, 1);
+    CU_ASSERT_EQUAL(hdr.event_id, 0xDEADBEEFCAFEBABEULL);
+    CU_ASSERT_EQUAL(hdr.jpeg_size, 9800u);
+}
+
+void test_header_size_is_20(void)
+{
+    CU_ASSERT_EQUAL(CAM_HEADER_SIZE, 20);
+}
+
+/******************************************************************************
+ * infer_header_valid
+ ******************************************************************************/
+
+void test_header_valid_true(void)
+{
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    buf[0] = 0xCA; buf[1] = 0xFE; buf[2] = 0xBA; buf[3] = 0xBE;
+    indoor_header_t hdr;
+    infer_unpack_header(buf, &hdr);
+    CU_ASSERT_EQUAL(infer_header_valid(&hdr), 1);
+}
+
+void test_header_valid_false_bad_magic(void)
+{
+    /* Regression: a peer still running the old 4-byte-length-only firmware
+     * must be rejected cleanly rather than silently misparsed -- its first
+     * 4 bytes essentially never equal CAM_MAGIC. */
+    uint8_t buf[CAM_HEADER_SIZE] = {0};
+    buf[0] = 0x00; buf[1] = 0x00; buf[2] = 0x26; buf[3] = 0x48; /* len=9800 */
+    indoor_header_t hdr;
+    infer_unpack_header(buf, &hdr);
+    CU_ASSERT_EQUAL(infer_header_valid(&hdr), 0);
 }
 
 /******************************************************************************
@@ -263,6 +373,18 @@ int main(void)
     CU_add_test(s_framing, "unpack_msb_first",  test_unpack_msb_first);
     CU_add_test(s_framing, "unpack_roundtrip",  test_unpack_roundtrip);
     CU_add_test(s_framing, "hdr_size_is_4",     test_hdr_size_is_4);
+
+    /* indoor_header_t suite (2026-07-02) */
+    CU_pSuite s_hdr = CU_add_suite("indoor_header", NULL, NULL);
+    CU_add_test(s_hdr, "unpack_magic",          test_header_unpack_magic);
+    CU_add_test(s_hdr, "unpack_version",        test_header_unpack_version);
+    CU_add_test(s_hdr, "unpack_device_id",      test_header_unpack_device_id);
+    CU_add_test(s_hdr, "unpack_event_id_msb",   test_header_unpack_event_id_msb_first);
+    CU_add_test(s_hdr, "unpack_jpeg_size_msb",  test_header_unpack_jpeg_size_msb_first);
+    CU_add_test(s_hdr, "unpack_known_values",   test_header_unpack_known_values);
+    CU_add_test(s_hdr, "size_is_20",            test_header_size_is_20);
+    CU_add_test(s_hdr, "valid_true",            test_header_valid_true);
+    CU_add_test(s_hdr, "valid_false_bad_magic", test_header_valid_false_bad_magic);
 
     /* Length validation suite */
     CU_pSuite s_len = CU_add_suite("jpeg_len_validation", NULL, NULL);

@@ -5,7 +5,7 @@
  * \brief BeagleBone PIR inference daemon — TCP server on port 9090.
  *
  * \details ESP32-CAM connects and pushes a JPEG clip on PIR trigger.
- *          Each connection delivers a stream of [len:4][jpeg] frames
+ *          Each connection delivers a stream of [header:20][jpeg] frames
  *          until the ESP32 closes the connection (end of clip).
  *          Frames are saved as individual JPEGs to a temp directory,
  *          then assembled into an MJPEG .avi via ffmpeg.
@@ -13,13 +13,34 @@
  *          DB record inserted directly via sqlite3 after .avi is written.
  *
  *          Wire protocol (port 9090):
- *          [jpeg_size:4] followed by jpeg_size bytes of JPEG payload.
- *          Repeated for each frame. Connection close = end of clip.
- *          (Simple 4-byte header — legacy PIR cam protocol.)
+ *          [magic:4][version:1][device_id:1][reserved:2][event_id:8][jpeg_size:4]
+ *          followed by jpeg_size bytes of JPEG payload. Repeated for each
+ *          frame. Connection close = end of clip. Same header layout as
+ *          the doorbell path (port 9091) — see inference_core.h.
  *
  * \note    Inference logic extracted to inference_worker.c (2026-06-07)
  *          so doorbell_daemon can share the same perception pipeline.
- *          Transport parsing (4-byte header, TCP accept loop) stays here.
+ *          Transport parsing (header unpack, TCP accept loop) stays here.
+ *
+ * \note    event_id header (2026-07-02):
+ *          Wire protocol upgraded from a bare 4-byte big-endian JPEG
+ *          length prefix (no correlation key) to the 20-byte
+ *          indoor_header_t layout above, matching cam_header_t on the
+ *          esp32-cam side (esp32-cam/main/cam_logic.h). magic/version are
+ *          validated on every header via infer_header_valid() so a peer
+ *          still running the old 4-byte-only firmware is rejected
+ *          cleanly (its first 4 bytes essentially never equal CAM_MAGIC)
+ *          instead of being silently misparsed as a header.
+ *
+ *          event_id is relayed unchanged from the UDP CAPTURE trigger
+ *          all the way through camera_manager's [TRIGGER] sent line and
+ *          esp32-cam's [UDP_CAM_RX]/[CAM] lines (see esp32-cam/main/main.c)
+ *          into this daemon, which now logs it on every clip lifecycle
+ *          line via EVENT_ID_FMT/EVENT_ID_ARG (inference_core.h) — the
+ *          same convention doorbell_daemon.c already uses. One event_id,
+ *          grep-traceable end to end:
+ *              grep <event_id_hex> /var/log/inference.log
+ *          See the updated logging contract note below.
  *
  * \note    Clip streaming (2026-06-11):
  *          Changed from single JPEG receive to multi-frame clip receive.
@@ -62,33 +83,43 @@
  *              FRAME_FPS = 1000 / CAM_CLIP_FRAME_MS   (from main.c)
  *          and update the constant here to match.
  *
- * \note    Logging contract (commit 1, 2026-06-15):
- *          No event_id in this daemon (PIR cam uses legacy 4-byte header
- *          with no correlation key). No cross-process shm boundaries.
- *          Flat [INDOOR] tags are used for all lifecycle events:
+ * \note    Logging contract (commit 2, 2026-07-02):
+ *          event_id now flows through this daemon (see note above). No
+ *          cross-process shm boundaries. Flat [INDOOR] tags are used for
+ *          all lifecycle events, with event_id (EVENT_ID_FMT/EVENT_ID_ARG)
+ *          on every line from clip_start onward — a single connection can
+ *          span multiple frames, all sharing the one event_id read off
+ *          the first frame's header:
  *
  *          Transport layer (receive_clip):
- *            [INDOOR] clip_start               — connection accepted, clip beginning
- *            [INDOOR] rx frame=%d bytes=%u     — single frame received
- *            [INDOOR] recv_failed frame=%d     — recv truncated (transport error)
- *            [INDOOR] clip_done frames=%d duration_ms=%d
+ *            [INDOOR] clip_start event_id=<hex>
+ *                                              — first header received, clip beginning
+ *            [INDOOR] rx event_id=<hex> frame=%d bytes=%u
+ *                                              — single frame received
+ *            [INDOOR] recv_failed event_id=<hex> frame=%d reason=...
+ *                                              — recv/header truncated or invalid (transport error)
+ *            [INDOOR] clip_done event_id=<hex> frames=%d duration_ms=%d
  *                                              — connection closed by ESP32
  *
  *          Pipeline layer (process_clip):
- *            [INDOOR] infer_start frame=%d     — inference about to run
- *            [INDOOR] infer_done  frame=%d person=%d conf=%.2f
- *            [INDOOR] infer_skip  frame=%d reason=interval_gate every_n=%d
- *            [INDOOR] clip_saved  path=%s      — ffmpeg mux succeeded
- *            [INDOOR] clip_failed path=%s      — ffmpeg mux failed
- *            [INDOOR] db_insert   path=%s      — DB record inserted
+ *            [INDOOR] infer_start event_id=<hex> frame=%d
+ *                                              — inference about to run
+ *            [INDOOR] infer_done  event_id=<hex> frame=%d person=%d conf=%.2f
+ *            [INDOOR] infer_skip  event_id=<hex> frame=%d reason=interval_gate every_n=%d
+ *            [INDOOR] clip_saved  event_id=<hex> path=%s — ffmpeg mux succeeded
+ *            [INDOOR] clip_failed event_id=<hex> path=%s — ffmpeg mux failed
+ *            [INDOOR] db_insert   event_id=<hex> path=%s — DB record inserted
  *
  *          This mirrors the DOORBELL daemon contract structure:
  *            clip_start  ↔ doorbell rx
  *            infer_start ↔ doorbell infer_start
  *            infer_done  ↔ doorbell infer_done
  *            clip_saved  ↔ doorbell [DOORBELL] -> [SHM] publish
- *          Without event_id the lifecycle is still grep-deterministic
- *          per connection by timestamp and frame sequence.
+ *          event_id is read from the first frame's header only; if a
+ *          later frame in the same clip somehow carried a different
+ *          event_id (should never happen — one trigger, one TCP
+ *          connection, one event_id) the first frame's value wins and
+ *          is what the whole clip is logged/saved under.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -200,13 +231,19 @@ static void tcp_server_init(void)
  * \param person      1 if person detected, 0 otherwise.
  * \param confidence  Best confidence across all frames.
  * \param duration_ms Clip duration in ms.
+ * \param event_id    Correlation key from the clip's frame headers, logged
+ *                    on the [INDOOR] db_insert line (not a DB column —
+ *                    the clips table schema is unchanged; event_id lives
+ *                    only in the logs for now, same as doorbell's asset
+ *                    field is a display hint rather than a stored key).
  */
 static void db_insert_clip(const char *clip_path,
                             time_t      ts,
                             int         frame_count,
                             int         person,
                             float       confidence,
-                            int         duration_ms)
+                            int         duration_ms,
+                            uint64_t    event_id)
 {
    sqlite3      *db   = NULL;
    sqlite3_stmt *stmt = NULL;
@@ -242,7 +279,8 @@ static void db_insert_clip(const char *clip_path,
    }
    else
    {
-      log_msg("[INDOOR] db_insert path=%s", clip_path);
+      log_msg("[INDOOR] db_insert event_id=" EVENT_ID_FMT " path=%s",
+              EVENT_ID_ARG(event_id), clip_path);
    }
 
    sqlite3_finalize(stmt);
@@ -254,26 +292,39 @@ static void db_insert_clip(const char *clip_path,
 /**
  * \brief Accept a connection and receive all frames until connection closes.
  *
- * \details Logs [INDOOR] clip_start on accept, [INDOOR] rx on each frame
- *          received, [INDOOR] recv_failed on transport error, and
- *          [INDOOR] clip_done on clean connection close.
+ * \details Reads an indoor_header_t (CAM_HEADER_SIZE bytes) before each
+ *          JPEG payload. event_id is read off the first frame's header
+ *          and reused for every subsequent log line in this clip — one
+ *          TCP connection corresponds to one PIR trigger, so all frames
+ *          in it share the same event_id (the ESP32 side only ever opens
+ *          a new connection per trigger; see esp32-cam/main/main.c
+ *          capture_task()).
+ *
+ *          Logs [INDOOR] clip_start on the first valid header, [INDOOR]
+ *          rx on each frame received, [INDOOR] recv_failed on transport
+ *          error or a bad/mismatched header, and [INDOOR] clip_done on
+ *          clean connection close.
  *
  * \param out_frames      Output: array of frame buffers (caller frees each).
  * \param out_lens        Output: array of frame lengths.
  * \param out_n_frames    Output: number of frames received.
  * \param out_start_ts    Output: unix timestamp when connection was accepted.
  * \param out_duration_ms Output: elapsed ms from accept to connection close.
+ * \param out_event_id    Output: event_id read from the first frame's
+ *                        header (0 if no frame was ever received).
  * \return                0 on success, -1 on error.
  */
 static int receive_clip(uint8_t ***out_frames,
                         size_t   **out_lens,
                         int       *out_n_frames,
                         time_t    *out_start_ts,
-                        int       *out_duration_ms)
+                        int       *out_duration_ms,
+                        uint64_t  *out_event_id)
 {
    uint8_t        **frames   = NULL;
    size_t          *lens     = NULL;
    int              n_frames = 0;
+   uint64_t         event_id = 0;
    struct timespec  t0, t1;
 
    frames = calloc(MAX_CLIP_FRAMES, sizeof(uint8_t *));
@@ -297,8 +348,6 @@ static int receive_clip(uint8_t ***out_frames,
    *out_start_ts = time(NULL);
    clock_gettime(CLOCK_MONOTONIC, &t0);
 
-   log_msg("[INDOOR] clip_start");
-
    int keepalive = 1, keepidle = 30, keepintvl = 5, keepcnt = 3;
    setsockopt(g_client_fd, SOL_SOCKET,  SO_KEEPALIVE, &keepalive, sizeof(keepalive));
    setsockopt(g_client_fd, IPPROTO_TCP, TCP_KEEPIDLE,  &keepidle,  sizeof(keepidle));
@@ -307,30 +356,61 @@ static int receive_clip(uint8_t ***out_frames,
 
    while (g_running)
    {
-      uint8_t  hdr[JPEG_HDR_SIZE];
-      uint32_t jpeg_len;
-      uint8_t *buf;
-      ssize_t  n;
-      size_t   received;
+      uint8_t          hdr_buf[CAM_HEADER_SIZE];
+      indoor_header_t  hdr;
+      uint8_t         *buf;
+      ssize_t          n;
+      size_t           received;
 
-      n = recv(g_client_fd, hdr, JPEG_HDR_SIZE, MSG_WAITALL);
+      n = recv(g_client_fd, hdr_buf, CAM_HEADER_SIZE, MSG_WAITALL);
       if (n == 0)
       {
          /* Clean close by ESP32 — normal end of clip */
          break;
       }
-      if (n != JPEG_HDR_SIZE)
+      if (n != CAM_HEADER_SIZE)
       {
-         log_msg("[INDOOR] recv_failed frame=%d reason=header_truncated",
-                 n_frames);
+         log_msg("[INDOOR] recv_failed event_id=" EVENT_ID_FMT
+                 " frame=%d reason=header_truncated",
+                 EVENT_ID_ARG(event_id), n_frames);
          break;
       }
 
-      jpeg_len = infer_unpack_jpeg_len(hdr);
-      if (!infer_jpeg_len_valid(jpeg_len))
+      infer_unpack_header(hdr_buf, &hdr);
+
+      if (!infer_header_valid(&hdr))
       {
-         log_msg("[INDOOR] recv_failed frame=%d reason=bad_jpeg_len len=%u",
-                 n_frames, jpeg_len);
+         log_msg("[INDOOR] recv_failed event_id=" EVENT_ID_FMT
+                 " frame=%d reason=bad_magic magic=0x%08X",
+                 EVENT_ID_ARG(event_id), n_frames, hdr.magic);
+         break;
+      }
+
+      if (0 == n_frames)
+      {
+         /* First frame of this connection — this is the event_id for
+          * the whole clip. */
+         event_id = hdr.event_id;
+         log_msg("[INDOOR] clip_start event_id=" EVENT_ID_FMT
+                 " device_id=%d",
+                 EVENT_ID_ARG(event_id), hdr.device_id);
+      }
+      else if (hdr.event_id != event_id)
+      {
+         /* Should never happen — one trigger, one connection, one
+          * event_id (see doc comment above). Log it but keep the
+          * clip's original event_id rather than switching mid-clip. */
+         log_msg("[INDOOR] WARNING event_id mismatch mid-clip: "
+                 "clip=" EVENT_ID_FMT " frame=" EVENT_ID_FMT " frame=%d",
+                 EVENT_ID_ARG(event_id), EVENT_ID_ARG(hdr.event_id),
+                 n_frames);
+      }
+
+      if (!infer_jpeg_len_valid(hdr.jpeg_size))
+      {
+         log_msg("[INDOOR] recv_failed event_id=" EVENT_ID_FMT
+                 " frame=%d reason=bad_jpeg_len len=%u",
+                 EVENT_ID_ARG(event_id), n_frames, hdr.jpeg_size);
          break;
       }
 
@@ -339,9 +419,9 @@ static int receive_clip(uint8_t ***out_frames,
          log_msg("WARN: MAX_CLIP_FRAMES reached — draining frame");
          uint8_t drain[512];
          size_t  drained = 0;
-         while (drained < jpeg_len)
+         while (drained < hdr.jpeg_size)
          {
-            size_t chunk = jpeg_len - drained;
+            size_t chunk = hdr.jpeg_size - drained;
             if (chunk > sizeof(drain)) { chunk = sizeof(drain); }
             n = recv(g_client_fd, drain, chunk, 0);
             if (n <= 0) { break; }
@@ -350,22 +430,24 @@ static int receive_clip(uint8_t ***out_frames,
          continue;
       }
 
-      buf = malloc(jpeg_len);
+      buf = malloc(hdr.jpeg_size);
       if (NULL == buf)
       {
-         log_msg("[INDOOR] recv_failed frame=%d reason=malloc_failed bytes=%u",
-                 n_frames, jpeg_len);
+         log_msg("[INDOOR] recv_failed event_id=" EVENT_ID_FMT
+                 " frame=%d reason=malloc_failed bytes=%u",
+                 EVENT_ID_ARG(event_id), n_frames, hdr.jpeg_size);
          break;
       }
 
       received = 0;
-      while (received < jpeg_len)
+      while (received < hdr.jpeg_size)
       {
-         n = recv(g_client_fd, buf + received, jpeg_len - received, 0);
+         n = recv(g_client_fd, buf + received, hdr.jpeg_size - received, 0);
          if (n <= 0)
          {
-            log_msg("[INDOOR] recv_failed frame=%d reason=payload_truncated",
-                    n_frames);
+            log_msg("[INDOOR] recv_failed event_id=" EVENT_ID_FMT
+                    " frame=%d reason=payload_truncated",
+                    EVENT_ID_ARG(event_id), n_frames);
             free(buf); buf = NULL; break;
          }
          received += (size_t)n;
@@ -373,10 +455,11 @@ static int receive_clip(uint8_t ***out_frames,
       if (NULL == buf) { break; }
 
       frames[n_frames] = buf;
-      lens[n_frames]   = jpeg_len;
+      lens[n_frames]   = hdr.jpeg_size;
       n_frames++;
 
-      log_msg("[INDOOR] rx frame=%d bytes=%u", n_frames, jpeg_len);
+      log_msg("[INDOOR] rx event_id=" EVENT_ID_FMT " frame=%d bytes=%u",
+              EVENT_ID_ARG(event_id), n_frames, hdr.jpeg_size);
    }
 
    clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -386,12 +469,14 @@ static int receive_clip(uint8_t ***out_frames,
    close(g_client_fd);
    g_client_fd = -1;
 
-   log_msg("[INDOOR] clip_done frames=%d duration_ms=%d",
-           n_frames, *out_duration_ms);
+   log_msg("[INDOOR] clip_done event_id=" EVENT_ID_FMT
+           " frames=%d duration_ms=%d",
+           EVENT_ID_ARG(event_id), n_frames, *out_duration_ms);
 
    *out_frames   = frames;
    *out_lens     = lens;
    *out_n_frames = n_frames;
+   *out_event_id = event_id;
    return (n_frames > 0) ? 0 : -1;
 }
 
@@ -411,12 +496,17 @@ static int receive_clip(uint8_t ***out_frames,
  * \param n_frames    Number of frames.
  * \param start_ts    Unix timestamp of clip start.
  * \param duration_ms Clip duration in ms.
+ * \param event_id    Correlation key from the clip's frame headers —
+ *                    logged on every pipeline-layer line so this clip's
+ *                    processing is traceable back to receive_clip()'s
+ *                    transport-layer lines with the same event_id.
  */
 static void process_clip(uint8_t **frames,
                          size_t   *lens,
                          int       n_frames,
                          time_t    start_ts,
-                         int       duration_ms)
+                         int       duration_ms,
+                         uint64_t  event_id)
 {
    char      ts_str[32];
    char      tmp_dir[256];
@@ -476,16 +566,19 @@ static void process_clip(uint8_t **frames,
       /* Run inference on every Nth frame */
       if (i % infer_every_n == 0)
       {
-         log_msg("[INDOOR] infer_start frame=%d", i + 1);
+         log_msg("[INDOOR] infer_start event_id=" EVENT_ID_FMT " frame=%d",
+                 EVENT_ID_ARG(event_id), i + 1);
          inference_worker_run(frames[i], lens[i], &detected, &conf);
-         log_msg("[INDOOR] infer_done frame=%d person=%d conf=%.2f",
-                 i + 1, detected, conf);
+         log_msg("[INDOOR] infer_done event_id=" EVENT_ID_FMT
+                 " frame=%d person=%d conf=%.2f",
+                 EVENT_ID_ARG(event_id), i + 1, detected, conf);
          if (detected && conf > best_conf) { best_detected = 1; best_conf = conf; }
       }
       else
       {
-         log_msg("[INDOOR] infer_skip frame=%d reason=interval_gate every_n=%d",
-                 i + 1, infer_every_n);
+         log_msg("[INDOOR] infer_skip event_id=" EVENT_ID_FMT
+                 " frame=%d reason=interval_gate every_n=%d",
+                 EVENT_ID_ARG(event_id), i + 1, infer_every_n);
       }
    }
 
@@ -507,13 +600,15 @@ static void process_clip(uint8_t **frames,
 
    if (system(cmd) != 0)
    {
-      log_msg("[INDOOR] clip_failed path=%s", avi_path);
+      log_msg("[INDOOR] clip_failed event_id=" EVENT_ID_FMT " path=%s",
+              EVENT_ID_ARG(event_id), avi_path);
    }
    else
    {
-      log_msg("[INDOOR] clip_saved path=%s", avi_path);
+      log_msg("[INDOOR] clip_saved event_id=" EVENT_ID_FMT " path=%s",
+              EVENT_ID_ARG(event_id), avi_path);
       db_insert_clip(avi_path, start_ts, n_frames,
-                     best_detected, best_conf, duration_ms);
+                     best_detected, best_conf, duration_ms, event_id);
    }
 
    /* Clean up temp frames */
@@ -551,9 +646,10 @@ int main(void)
       int       n_frames    = 0;
       time_t    start_ts    = 0;
       int       duration_ms = 0;
+      uint64_t  event_id    = 0;
 
       if (receive_clip(&frames, &lens, &n_frames,
-                       &start_ts, &duration_ms) < 0)
+                       &start_ts, &duration_ms, &event_id) < 0)
       {
           /* SIGTERM/SIGINT sets g_running=0 and interrupts any blocking
           * syscall (accept, recv) with EINTR, causing receive_clip() to
@@ -565,7 +661,7 @@ int main(void)
          continue;
       }
 
-      process_clip(frames, lens, n_frames, start_ts, duration_ms);
+      process_clip(frames, lens, n_frames, start_ts, duration_ms, event_id);
 
       for (int i = 0; i < n_frames; i++) { free(frames[i]); }
       free(frames);
