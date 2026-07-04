@@ -39,6 +39,40 @@
  *          drain_queues() captures event_id per slot from BLE mailboxes
  *          into g_state before sync_system_state(). Per-slot event_id
  *          included in JSON and logged at TCP send time.
+ *
+ * \note    Hub reboot lifecycle signal — "boot_marker" (2026-07-03):
+ *          PROBLEM: the BeagleBone side (sensor_server/data_controller)
+ *          had no reliable way to know when the hub itself rebooted.
+ *          Two prior approaches were tried and rejected:
+ *            1. Watching the BBB-side UART line for an ESP32 boot banner
+ *               (e.g. "rst:") — doesn't work, because the hub does not
+ *               talk to the BBB over a direct UART wire. It connects via
+ *               WiFi/TCP to an ESP-01 module acting as a TCP<->UART
+ *               bridge (see beaglebone/wifi/esp01_tcp_server_setup.py).
+ *               A hub reboot's serial boot banner only appears on the
+ *               hub's own USB debug console, never crosses the ESP-01
+ *               bridge, and never reaches the BBB.
+ *            2. Inferring a reboot from sensor data symptoms (all slot
+ *               ages resetting to AGE_UNKNOWN/65534, smaller payload
+ *               size right after reconnect) — this was observed live
+ *               and does work as a *heuristic*, but it's indirect: it
+ *               couples a lifecycle question to sensor-table state, and
+ *               can false-positive on a partial BLE reinit that isn't a
+ *               real reboot.
+ *
+ *          FIX: s_boot_marker below is a first-class, direct lifecycle
+ *          signal, independent of sensor state entirely. It is always 0
+ *          immediately after the hub boots (RAM-only, not persisted —
+ *          intentional, since a fresh 0 on every real boot IS the
+ *          signal), and flips to 1 after the very first successful send
+ *          to the BeagleBone. It rides in the existing "telemetry"
+ *          object on every frame (not events[], since it must be
+ *          present on every tick to reliably catch the 0->1 edge, not
+ *          just on delta-gated changes).
+ *
+ *          See json_parser.c's matching note for how the BBB side
+ *          detects the 1->0 transition and logs
+ *          "[PARSE] hub_reboot_detected".
  ******************************************************************************/
 
 #include "config.h"
@@ -87,6 +121,12 @@ static uint64_t s_last_sent_reed_eid[MAX_REEDS];
 static uint64_t s_last_sent_temp_eid[MAX_TEMPS];
 static uint64_t s_last_sent_lock_eid;
 static uint64_t s_last_sent_light_eid;
+
+/* Hub reboot lifecycle signal — see file header note "Hub reboot
+ * lifecycle signal" (2026-07-03). Always 0 on cold boot (RAM-only,
+ * not persisted — that's the point). Set to 1 after the first
+ * successful send_to_bb() and stays 1 until the next reboot. */
+static uint32_t s_boot_marker = 0;
 
 /*----------------------------------------------------------------------------*/
 
@@ -390,6 +430,15 @@ static void send_to_bb(int *p_bb_sock, int *p_bb_block_count, int *p_bb_state)
    (void)cJSON_AddNumberToObject(p_telemetry, "motor_online",       g_state.motor_online);
    (void)cJSON_AddNumberToObject(p_telemetry, "pir_count",          g_state.pir_count);
    (void)cJSON_AddNumberToObject(p_telemetry, "temp_count",         g_state.temp_count);
+
+   /* Hub reboot lifecycle signal — see file header note "Hub reboot
+    * lifecycle signal" (2026-07-03). 0 on the very first frame after
+    * boot, 1 on every frame thereafter until the next reboot. Placed
+    * in telemetry{} (not events[]) deliberately — it must appear on
+    * every single tick so the BBB side can reliably observe the
+    * 1->0 edge, not just on delta-gated changes. */
+   (void)cJSON_AddNumberToObject(p_telemetry, "boot_marker",        s_boot_marker);
+   s_boot_marker = 1;
 
    /* Reeds */
    g_state.reed_count = ble_get_reed_count();

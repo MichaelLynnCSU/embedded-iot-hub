@@ -83,6 +83,46 @@
  *          Room and reed string state belongs in events.log if needed.
  *          [PARSE] summary line retained in sensor_server.log for
  *          operational visibility (quick grep of the main log still works).
+ *
+ *          Hub reboot lifecycle signal — "boot_marker" (2026-07-03):
+ *          PROBLEM: Finding 3 — no log marker exists anywhere when the
+ *          hub itself restarts. Previously the only way to notice was
+ *          after the fact, via bounded event_id duplicate clusters in
+ *          events.log.
+ *
+ *          REJECTED APPROACHES (documented so they aren't retried):
+ *            1. Watching the BBB-side UART line (uart_io.c) for an
+ *               ESP32 boot banner string (e.g. "rst:") — the hub does
+ *               not talk to the BBB over a direct UART wire. It
+ *               connects via WiFi/TCP to an ESP-01 module acting as a
+ *               TCP<->UART bridge (see
+ *               beaglebone/wifi/esp01_tcp_server_setup.py). A real
+ *               ESP32 reboot's serial boot banner only appears on the
+ *               hub's own USB debug console and never crosses the
+ *               ESP-01 bridge onto ttyS4.
+ *            2. Watching the UART line for the ESP-01's own AT-firmware
+ *               "CONNECT"/"CLOSED" link-state notifications — plausible
+ *               in principle (these do appear on ttyS4 when the hub's
+ *               TCP link to the ESP-01 drops/reconnects), but never
+ *               verified live, and conflates a TCP link flap with an
+ *               actual hub reboot — not the same event.
+ *            3. Inferring reboot from sensor-state symptoms (all slot
+ *               ages hitting AGE_UNKNOWN/65534 simultaneously, smaller
+ *               telemetry payload size right after reconnect) — this
+ *               WAS observed live during testing (2025-05-30 01:37:52,
+ *               frame_seq 87->88) and does work as a heuristic, but
+ *               it's an indirect "smell": it couples a lifecycle
+ *               question to sensor-table state and can false-positive
+ *               on a partial BLE reinit that isn't a real reboot.
+ *
+ *          FIX: g_last_boot_marker below tracks a first-class lifecycle
+ *          field ("boot_marker") that the hub now includes in every
+ *          telemetry{} object (see tcp_manager.c's matching note). It
+ *          is 0 on the hub's very first frame after boot and 1 on
+ *          every frame after that. This file watches for the 1->0
+ *          transition and logs "[PARSE] hub_reboot_detected" the
+ *          moment it happens — a direct signal, not an inference from
+ *          unrelated sensor data.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -97,6 +137,13 @@
 #include "server_log.h"
 
 static uint32_t g_frame_seq = 0;
+
+/* Hub reboot lifecycle signal — see file header note "Hub reboot
+ * lifecycle signal" (2026-07-03). Starts at 1 (assume steady-state)
+ * so sensor_server's own startup never falsely logs a reboot on the
+ * very first frame it happens to receive. Only flags a transition
+ * from a previously-seen 1 down to a 0. */
+static int g_last_boot_marker = 1;
 
 /******************************************************************************
  * \brief Extract age value from JSON object with range clamping.
@@ -605,6 +652,28 @@ void process_json(const char *p_json_body)
    if (json_object_object_get_ex(p_telemetry, "motor_online",       &p_obj)) data.motor_online       = (uint8_t)json_object_get_int(p_obj);
    if (json_object_object_get_ex(p_telemetry, "batt_motor",         &p_obj)) data.batt_motor         = json_object_get_int(p_obj);
    if (json_object_object_get_ex(p_telemetry, "pir_count",          &p_obj)) data.pir_count          = (uint8_t)json_object_get_int(p_obj);
+
+   /* ---- Hub reboot lifecycle signal ----
+    * See file header note "Hub reboot lifecycle signal" (2026-07-03)
+    * and tcp_manager.c's matching note on the hub side. Detects the
+    * 1->0 edge in "boot_marker" and logs it once, right here, before
+    * any other telemetry field is touched — this is a lifecycle
+    * check, deliberately kept separate from ordinary state parsing.
+    * Field defaults to 1 (steady-state) if absent, so an old-protocol
+    * hub that hasn't been updated yet never falsely trips this. */
+   {
+      int boot_marker = 1;
+
+      if (json_object_object_get_ex(p_telemetry, "boot_marker", &p_obj))
+         boot_marker = json_object_get_int(p_obj);
+
+      if ((0 == boot_marker) && (1 == g_last_boot_marker))
+      {
+         log_msg("[PARSE] hub_reboot_detected frame_seq=%u", frame_seq);
+      }
+
+      g_last_boot_marker = boot_marker;
+   }
 
    data.age_pir = json_get_age(p_telemetry, "age_pir");
    data.age_lgt = json_get_age(p_telemetry, "age_lgt");

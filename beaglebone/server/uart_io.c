@@ -52,6 +52,43 @@
  *          Depth counter   find_json_frame() tracks brace nesting
  *                          depth to handle nested JSON objects
  *                          correctly ({} inside {}).
+ *
+ * \note    Architecture clarification — hub transport (2026-07-03):
+ *          It is easy to misread this file as talking directly to the
+ *          ESP32 hub. It does not. The actual chain is:
+ *
+ *            ESP32 hub --(WiFi/TCP client, tcp_manager.c)-->
+ *            ESP-01 module --(AT firmware, acts as TCP server + UART bridge)-->
+ *            /dev/ttyS4 (this file) --> sensor_server --> data_controller
+ *
+ *          The ESP-01 is configured once at boot by a separate one-shot
+ *          script (beaglebone/wifi/esp01_tcp_server_setup.py, run by
+ *          esp01-tcp-server.service, Type=oneshot, exits after setup —
+ *          it is NOT a long-running process and has no ongoing role).
+ *          After that script exits, the ESP-01's own AT firmware does
+ *          all the TCP<->UART bridging in hardware; nothing in this
+ *          repo owns that bridge at runtime.
+ *
+ *          Consequences that have caused real mistakes before:
+ *          - The hub's own reboot boot banner (e.g. "rst:") is printed
+ *            on the hub's USB debug console only. It does NOT cross
+ *            the ESP-01 bridge and will NEVER appear in g_active[]
+ *            here, no matter how this file is instrumented.
+ *          - sensor_server (this file included) has no socket code at
+ *            all and never will unless this architecture changes —
+ *            don't go looking for a TCP accept loop on the BBB side to
+ *            hook a hub-connect event; it doesn't exist.
+ *          - The ESP-01's own AT firmware may emit its own link-state
+ *            text (e.g. "CONNECT"/"CLOSED") into this same byte stream
+ *            when the hub's TCP link to the ESP-01 flaps. This has not
+ *            been confirmed live as of this note. If pursuing this
+ *            signal, verify it first — do not assume the string or
+ *            its exact behavior.
+ *          - Hub-reboot detection was ultimately solved upstream of
+ *            this file entirely, via a "boot_marker" field in the JSON
+ *            telemetry payload itself (see json_parser.c and
+ *            tcp_manager.c). That is the current source of truth for
+ *            "did the hub reboot?" — not anything in this file.
  ******************************************************************************/
 
 #include <stdio.h>
@@ -224,13 +261,31 @@ void uart_io_read(void)
    {
       log_msg("[UART] overflow bytes=%d", g_active_pos + n);
       g_active_pos = 0;
-      g_active[0]  = '\0';
+      g_active[0]  = '\0';  /* BUFFER_RESET: overflow discard -- do not
+                             * confuse with BUFFER_APPEND below; these
+                             * are two different operations that happen
+                             * to look similar at a glance. */
       return;
    }
 
    (void)memcpy(g_active + g_active_pos, tmp, n);
    g_active_pos           += n;
-   g_active[g_active_pos]  = '\0';
+   g_active[g_active_pos]  = '\0';  /* BUFFER_APPEND: normal accumulation --
+                                     * this is the line to anchor on when
+                                     * adding logic that should run after
+                                     * every successful read. Do not match
+                                     * on "g_active[...] = '\\0';" alone in
+                                     * any future sed/grep here -- see
+                                     * BUFFER_RESET above, which matches
+                                     * the same shape but does something
+                                     * different. */
+
+   /* END_uart_io_read -- any new logic that should fire on every
+    * successful accumulation must go ABOVE this comment and INSIDE
+    * the function's closing brace above. A previous edit attempt
+    * landed code after this brace by mistake (dead, non-compiling
+    * code sitting between functions) -- this marker exists so that
+    * doesn't happen again. */
 }
 
 /******************************************************************************
