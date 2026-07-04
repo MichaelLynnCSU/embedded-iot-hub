@@ -60,9 +60,9 @@ if [[ "$MODE" == "event" ]]; then
     echo "Summary line counts:"
     for f in "$LOGS_CAMERA" "$LOGS_CONTROLLER" "$LOGS_INFERENCE" "$LOGS_DOORBELL"; do
         [[ -f "$f" ]] || continue
-        c_dec=$(grep -c "event_id=${DEC}\b" "$f" 2>/dev/null || echo 0)
-        c_hex=$(grep -c "event_id=${HEX}\b" "$f" 2>/dev/null || echo 0)
-        printf "  %-28s dec=%-4s hex=%-4s\n" "$(basename "$f")" "$c_dec" "$c_hex"
+        c_dec=$(grep -c "event_id=${DEC}\b" "$f" 2>/dev/null || true)
+        c_hex=$(grep -c "event_id=${HEX}\b" "$f" 2>/dev/null || true)
+        printf "  %-28s dec=%-4s hex=%-4s\n" "$(basename "$f")" "${c_dec:-0}" "${c_hex:-0}"
     done
     hr
 
