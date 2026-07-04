@@ -4,6 +4,16 @@ A fault-tolerant distributed IoT system across 10+ MCUs — sensing, control,
 persistence, networking, inference, and display each run as isolated processes
 or dedicated hardware nodes for independent failure recovery.
 
+## Quick Navigation
+
+- Architecture → Architecture
+- Runtime flows → PIR + Camera + Doorbell Pipelines
+- Logging & tracing → Logging & Event Correlation
+- System guarantees → System Invariants
+- IPC + boot ordering → BeagleBone Pipeline / IPC Reference
+- Camera system → Camera Port Reference
+- Testing → Testing
+
 ## Architecture
 ![System Architecture](docs/Arch%20diagram3.png)
 
@@ -247,6 +257,168 @@ LCK:state,batt
 MTR:online
 ```
 
+## Logging & Event Correlation
+
+Cross-process log correlation on the BBB uses **two distinct, unrelated
+keys** — do not join across them, they answer different questions.
+
+### `event_id` — sensor/camera/inference event correlation
+
+Identifies a single physical event (a PIR trip, a REED state change, a
+camera capture, etc.) across every process that touches it. Generated
+once per event in `esp32-hub/main/wroom_bus.c` via
+`wroom_event_id_generate()` — a `uint64_t` monotonic counter guarded by
+a critical section (`taskENTER_CRITICAL`/`taskEXIT_CRITICAL` +
+`portMUX_TYPE`), matching the mutex pattern already used in
+`ble_light.c`/`ble_lock.c`. Concurrent `bus_publish_*` calls from
+different FreeRTOS tasks previously raced on this counter and could
+produce duplicate event_ids; the critical section fixes this.
+
+Same underlying value, two textual formats on the BBB side:
+
+| Domain                          | Format                      | Example                     |
+|----------------------------------|------------------------------|------------------------------|
+| controller (dispatch/SHM/UART)  | decimal, `event_id=%llu`    | `event_id=45512`            |
+| camera_manager                  | decimal, `event_id=%llu`    | `event_id=49`               |
+| inference / doorbell daemons     | 16-hex-digit, `EVENT_ID_FMT`| `event_id=0000000000000031` |
+
+Convert decimal → hex to join against inference/doorbell logs:
+```bash
+printf '%016x\n' 49
+# 0000000000000031
+```
+
+`EVENT_ID_FMT`/`EVENT_ID_ARG` are defined independently (same text) in
+`inference_core.h` and `doorbell_result_shm.h` — not centralized; keep
+both in sync if the format changes.
+
+Example end-to-end trace (security-cam path):
+```
+camera_manager.log:  [TRIGGER] sent zone=0 event_id=49 cam_tx_id=1 boot_epoch=... ip=10.0.1.166
+inference.log:       [INDOOR] clip_start event_id=0000000000000031 device_id=0
+inference.log:       [INDOOR] rx event_id=0000000000000031 frame=1 bytes=17922
+inference.log:       [INDOOR] clip_done event_id=0000000000000031 frames=20 duration_ms=10654
+inference.log:       [INDOOR] infer_start/infer_done event_id=0000000000000031 frame=1..20
+inference.log:       [INDOOR] clip_saved / db_insert event_id=0000000000000031 path=...
+```
+
+Controller-domain example (`event_id=8` threaded across six log prefixes):
+```
+[BLE_LOCK] / [WROOM] / [TCP] / [DISPATCH] event_id=8
+[SHM]  transport=sensor_shm write src=pipe_ingress device=LOCK event_id=8
+[UART] transport=ttyS1 write dst=blackpill_lcd device=LOCK event_id=8
+```
+
+The controller domain used `eid=` instead of `event_id=` until unified
+across `uart_controller.c`, `shm_updater.c`, `sensor_dispatch.c`, and
+`state_registry.c`. Any `eid=` seen going forward indicates a stale
+binary that needs rebuilding.
+
+**`cam_tx_id` / `boot_epoch`** — a related but separate, session-scoped
+pair, not a standalone event correlation key. `cam_tx_id` correlates a
+UDP trigger to the ESP32-cam's capture within one `camera_manager`
+process lifetime only, and resets to 1 on every restart. `boot_epoch`
+(process start time) is logged alongside it on every `[TRIGGER] sent`
+line so `(boot_epoch, cam_tx_id)` pairs are unique across restarts.
+`boot_epoch` is BBB-log-only and is never sent over the wire to the
+ESP32-cam.
+
+### `frame_seq` — server telemetry/event correlation
+
+A separate join key used only in the `sensor_server`/telemetry
+pipeline (`json_parser.c`, `pipe_writer.c`, `sensor_server.c`). Not
+interchangeable with `event_id`.
+
+- `telemetry.log` — high-volume, one line per tick.
+- `events.log` — low-volume, one line only on a true state
+  transition, written via a dedicated `log_event()` function to its
+  own file handle.
+
+`frame_seq` is the documented join key between these two files.
+`event_id` can appear as a payload field on individual `events.log`
+lines, but `frame_seq` — not `event_id` — is what correlates a line
+in `events.log` back to its corresponding tick in `telemetry.log`.
+
+### Trace commands
+
+A helper script (`trace_event.sh`) traces either key across the
+relevant logs, handling the decimal↔hex conversion for `event_id`
+automatically:
+```bash
+./trace_event.sh event 49        # camera/controller/inference domains
+./trace_event.sh seq   18809     # server telemetry/events domains
+```
+Run on the BeagleBone — both modes read directly from `/var/log/*.log`.
+
+### Bridging event_id and frame_seq at trigger time
+
+As of 2026-07-04, the security-cam (indoor) trigger pipeline threads
+`frame_seq` alongside `event_id` from `sensor_dispatch.c` through
+`camera_manager.c`'s wire trigger, the ESP32-CAM header (`cam_header_t`
+bumped v1→v2, 20→24 bytes), and into `inference_daemon.c`'s log lines.
+This does not merge the two schemes — `event_id` (causal identity) and
+`frame_seq` (telemetry snapshot) remain conceptually distinct — but a
+camera/inference event can now be joined back to the exact sensor
+telemetry tick active at capture time.
+
+**Not yet covered:** `esp32-doorbell`'s `cam_logic.h` shares the same
+`cam_header_t` layout and needs the identical change to stay
+compatible; tracked separately, not yet applied.
+
+### Known gaps
+
+- `esp32-doorbell` does not yet carry `frame_seq` in its header (see
+  above) — the doorbell path is unaffected by the trigger-time bridge.
+
+## System Invariants
+
+Reflects verified source/behavior as of 2026-07-04. These are
+assertions to check against, not aspirational design goals — several
+of these were false until fixes landed today; see the linked commits.
+
+- `wroom_event_id_generate()` (`wroom_bus.c`) is the single generator
+  for PIR/REED/LOCK/LIGHT/TEMP `event_id`s, guarded by a critical
+  section (`taskENTER_CRITICAL`/`taskEXIT_CRITICAL` + `portMUX_TYPE`)
+  as of `85a2736`. Before that fix, concurrent `bus_publish_*` calls
+  from different FreeRTOS tasks could race and produce duplicate
+  `event_id`s — confirmed in production (`event_id=9999` assigned to
+  both a PIR and a REED event with no restart involved).
+- doorbell's `event_id` source is **not** confirmed to go through
+  `wroom_event_id_generate()` — `bus_publish_doorbell()` generates and
+  discards an `eid` via that function, then uses an externally-passed
+  `event_id` parameter instead. Unresolved; treat doorbell `event_id`
+  provenance as unverified until this is chased down.
+- `event_id` resumes from its last NVS-checkpointed value on hub
+  reboot (checkpointed every `WROOM_SEQ_SAVE_EVERY`=50 increments,
+  commit `c6e08ba`). A restart can produce a bounded overlap of up to
+  ~50 `event_id`s with pre-restart values — this is **not** a full
+  reset to 0, and **not** perfectly gapless continuity either.
+- `frame_seq` is only a valid join key within the
+  `sensor_server`/telemetry pipeline (`events.log` ↔ `telemetry.log`);
+  as of `69dde21` it is also threaded through the security-cam
+  (indoor) trigger pipeline to bridge with `event_id` at trigger time
+  (see above) — doorbell not yet included.
+- `cam_tx_id` alone is valid only within one `camera_manager` process
+  lifetime (resets to 1 on restart); pair with `boot_epoch` (logged on
+  every `[TRIGGER] sent` line) for cross-restart disambiguation.
+- `camera_manager` is the only component that resolves camera IPs
+  (learned dynamically from UDP heartbeat source addresses); the hub
+  is transport-only for camera triggers and has no capture authority.
+- UDP camera triggers (`camera_manager` → ESP32-CAM) are fire-and-forget
+  with no retry/acknowledgment. As of `f64f5e5`, a dropped trigger
+  (zone out of range, camera offline, no IP known) is now reported to
+  `data_controller` via a status message, so drops are visible in
+  `data_controller`'s log — the trigger itself is still not retried.
+- Hub reboot is detected on the BBB via a `boot_marker` field sent on
+  every `telemetry{}` tick (0 on the first frame after hub boot, 1
+  thereafter; commit `8725a4f`) — a direct signal, not inferred from
+  sensor-state symptoms. Old hub firmware without this field defaults
+  the BBB's interpretation to `1` (no false reboot detection).
+- `/tmp/cam_pipe` and `/tmp/sensor_pipe` are named FIFOs requiring
+  writer/reader coexistence at startup (see chicken-and-egg note under
+  BeagleBone Pipeline); `/tmp/cam_trigger.sock` is a UNIX datagram
+  socket and does not have this requirement.
+
 ## Crash Logging
 
 All nodes persist crash state across hard power loss:
@@ -419,17 +591,17 @@ embedded-iot-hub/
 │   └── wifi/                   # ESP-01 AT setup script
 │
 ├── esp32c3/                    # ESP32-C3 targets
-│   ├── idf/motor/              # Motor PWM controller (ESP-IDF)
-│   └── zephyr/pir/             # PIR sensor x5 (Zephyr)
+│   ├── idf/motor/               # Motor PWM controller (ESP-IDF)
+│   └── zephyr/pir/              # PIR sensor x5 (Zephyr)
 │
-├── nrf52840/                   # Zephyr BLE peripheral nodes
+├── nrf52840/                    # Zephyr BLE peripheral nodes
 │   ├── reed-sensor/            # Door/window reed sensor (up to 6)
 │   ├── temp-sensor/            # BLE temperature sensor (TempSensor1/2)
 │   ├── smart-light/
 │   └── smart-lock/
 │
-├── stm32-blackpill/            # STM32F411 LVGL dashboard
-├── stm32-bluepill/             # STM32F103 DHT11 + UART bridge
+├── stm32-blackpill/             # STM32F411 LVGL dashboard
+├── stm32-bluepill/               # STM32F103 DHT11 + UART bridge
 ├── docs/
 ├── README.md
 └── ENVIRONMENT.md
