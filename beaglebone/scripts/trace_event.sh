@@ -6,19 +6,29 @@
 # Usage:
 #   ./trace_event.sh event <decimal_event_id>
 #   ./trace_event.sh seq   <frame_seq>
+#   ./trace_event.sh frame <frame_seq> [field_filter]
 #
 # event mode converts the decimal id to the 16-hex-digit EVENT_ID_FMT form
 # automatically and greps both forms across the right log files.
 # seq mode greps frame_seq as-is across the server telemetry/event logs.
+# frame mode pulls one telemetry.log tick and breaks it into one
+# field-per-line (like `tr ' ' '\n'`), optionally filtered to fields
+# matching field_filter (e.g. "age", "batt", "pir") — same idea as
+# `tail -1 /var/log/telemetry.log | tr ' ' '\n' | grep age`, but keyed
+# to a specific frame_seq instead of always the latest tick. Also lists
+# every discrete events.log entry sharing that frame_seq, since more
+# than one sensor can transition within the same tick.
 
 set -euo pipefail
 
 MODE="${1:-}"
 VAL="${2:-}"
+FIELD_FILTER="${3:-}"
 
 if [[ -z "$MODE" || -z "$VAL" ]]; then
     echo "Usage: $0 event <decimal_event_id>"
     echo "       $0 seq   <frame_seq>"
+    echo "       $0 frame <frame_seq> [field_filter]"
     exit 1
 fi
 
@@ -120,7 +130,38 @@ elif [[ "$MODE" == "seq" ]]; then
     echo "Cross-check: sensor_server.log / data_controller.log for the same seq"
     grep_wrapped "seq=${SEQ}\b" "$LOGS_SERVER" "$LOGS_CONTROLLER" "no match"
 
+elif [[ "$MODE" == "frame" ]]; then
+    SEQ="$VAL"
+    echo "Frame breakdown for frame_seq=$SEQ"
+    [[ -n "$FIELD_FILTER" ]] && echo "Filtering fields matching: $FIELD_FILTER"
+    hr
+
+    echo "[1/2] telemetry.log — field-by-field breakdown"
+    line=$(grep -- "seq=${SEQ}\b" "$LOGS_TELEMETRY" 2>/dev/null | tail -1 || true)
+    if [[ -n "$line" ]]; then
+        if [[ -n "$FIELD_FILTER" ]]; then
+            echo "$line" | tr ' ' '\n' | grep -i -- "$FIELD_FILTER" | sed 's/^/  /' \
+                || echo "  (no fields matched '$FIELD_FILTER' in this tick)"
+        else
+            echo "$line" | tr ' ' '\n' | sed 's/^/  /'
+        fi
+    else
+        echo "  (no telemetry.log entry for frame_seq=$SEQ)"
+    fi
+    hr
+
+    echo "[2/2] events.log — all discrete events sharing this frame_seq"
+    echo "  (more than one line here means multiple sensors transitioned in the same tick)"
+    events_output=$(grep -n -- "seq=${SEQ}\b" "$LOGS_EVENTS" 2>/dev/null || true)
+    if [[ -n "$events_output" ]]; then
+        echo "$events_output" | fold -s -w "$WRAP_WIDTH"
+        event_count=$(echo "$events_output" | wc -l)
+        echo "  --> $event_count event(s) found for this frame_seq"
+    else
+        echo "  (no discrete events for this frame_seq — telemetry-only tick)"
+    fi
+
 else
-    echo "Unknown mode '$MODE'. Use 'event' or 'seq'."
+    echo "Unknown mode '$MODE'. Use 'event', 'seq', or 'frame'."
     exit 1
 fi
