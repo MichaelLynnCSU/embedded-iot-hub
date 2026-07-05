@@ -15,10 +15,14 @@
 #define BATT_UPDATE_SEC     300  /**< Battery SOC refresh interval (seconds)  */
 
 /* ── BLE manufacturer data layout ─────────────────────────────────────────── */
-#define MFG_DATA_SIZE       3    /**< Total manufacturer data bytes           */
+#define MFG_DATA_SIZE       4    /**< Total manufacturer data bytes           */
 #define MFG_COMPANY_ID      0xAC /**< Registered company ID byte              */
 #define MFG_LOCK_STATE_IDX  1    /**< Lock state byte index in mfg data       */
 #define MFG_BATT_IDX        2    /**< Battery SOC byte index in mfg data      */
+#define MFG_HEARTBEAT_IDX   3    /**< Heartbeat counter byte index in mfg data.
+                                   *   Incremented on every heartbeat tick so
+                                   *   a passive scanner (hub or app) can see
+                                   *   liveness without a GATT connection.   */
 
 /*
  * GATT write payload layout (3 bytes):

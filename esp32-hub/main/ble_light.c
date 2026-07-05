@@ -20,6 +20,14 @@
  *          Thread safety:
  *          - light_mux (portMUX) guards light_connecting and light_connected
  *          - All state mutations outside ISR context use taskENTER_CRITICAL
+ *
+ * \note    GATT read cleanup (2026-07-05):
+ *          Removed the stamp_device() calls from the GATT event handlers
+ *          below (same change as ble_lock.c). ble_scan.c already calls
+ *          stamp_device(DEV_IDX_LIGHT) and ble_light_update_adv() on every
+ *          passive adv, so the GATT-side calls only duplicated it. The
+ *          write path (ble_send_light_command()) remains production; the
+ *          state read-back after connecting is bench-validation only.
  ******************************************************************************/
 
 #include "config.h"
@@ -431,7 +439,7 @@ void ble_light_handle_event(esp_gattc_cb_event_t event,
          {
             uint64_t eid = 0;
             g_current_light_state = p_param->read.value[0];
-            stamp_device(DEV_IDX_LIGHT);
+            /* Age already stamped passively by ble_scan.c on adv receipt. */
 
             eid = bus_publish_light(g_current_light_state);
             ESP_LOGI(TAG, "[LIGHT] GATT state rx: event_id=%llu state=%d", (unsigned long long)eid, g_current_light_state);
@@ -453,8 +461,7 @@ void ble_light_handle_event(esp_gattc_cb_event_t event,
             break;
          }
 
-         stamp_device(DEV_IDX_LIGHT);
-
+         /* Age already stamped passively by ble_scan.c on adv receipt. */
          if (p_param->notify.handle == g_light_hb_handle)
          {
             ESP_LOGI(TAG, "[LIGHT] Heartbeat received");

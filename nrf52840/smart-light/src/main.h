@@ -7,8 +7,9 @@
 #define IDLE_HEARTBEAT_SEC   240
 #define RELAY_PIN            11
 #define MFG_COMPANY_ID       0xAD
-#define MFG_DATA_SIZE        2
+#define MFG_DATA_SIZE        3
 #define MFG_STATE_IDX        1
+#define MFG_HEARTBEAT_IDX    2   /**< heartbeat counter, mirrors smart-lock */
 
 /*
  * GATT write payload layout (3 bytes):

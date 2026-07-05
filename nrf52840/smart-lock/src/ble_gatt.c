@@ -72,7 +72,10 @@ static uint8_t      lock_batt_soc   = 0;
 static uint8_t      heartbeat_val   = 1;
 static uint64_t     last_lock_activity = 0;
 
-static uint8_t lock_mfg_data[MFG_DATA_SIZE] = {MFG_COMPANY_ID, 0x00, 0x00};
+static uint8_t lock_mfg_data[MFG_DATA_SIZE] = {MFG_COMPANY_ID, 0x00, 0x00, 0x00};
+static uint8_t heartbeat_counter = 0; /**< incremented on every heartbeat tick,
+                                        *   written into lock_mfg_data[MFG_HEARTBEAT_IDX]
+                                        *   so passive scanners see liveness. */
 
 static struct bt_data adv_data[] =
 {
@@ -285,6 +288,7 @@ void ble_adv_update(void)
 
     lock_mfg_data[MFG_LOCK_STATE_IDX] = ble_val;
     lock_mfg_data[MFG_BATT_IDX]       = lock_batt_soc;
+    lock_mfg_data[MFG_HEARTBEAT_IDX]  = heartbeat_counter;
     bt_le_adv_update_data(adv_data, ARRAY_SIZE(adv_data), NULL, 0);
 }
 
@@ -330,11 +334,18 @@ static void hb_work_handler(struct k_work *work)
 
     if ((now - last_lock_activity) > (IDLE_HEARTBEAT_SEC * 1000ULL))
     {
+        heartbeat_counter++;
+
+        /* GATT notify still fires for any connected/subscribed client. */
         int err = bt_gatt_notify(NULL, &smartlock_svc.attrs[5],
                                  &heartbeat_val, sizeof(heartbeat_val));
         if (err && err != -ENOTCONN) { printk("[HB] Notify failed: %d\n", err); }
-        else                         { printk("[HB] Sent\n"); }
+
+        /* Advertising refresh is now the primary passive liveness path --
+         * matches reed/temp sensor pattern. Hub sees this without ever
+         * connecting. */
         ble_adv_update();
+        printk("[HB] Sent (counter=%u)\n", heartbeat_counter);
     }
 }
 

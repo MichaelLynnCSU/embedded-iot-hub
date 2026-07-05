@@ -35,6 +35,20 @@
  *          after bus_publish_lock(). Same two-phase identity pattern as
  *          smart-light (ble_light.c).
  *
+ * \note    GATT read/battery cleanup (2026-07-05):
+ *          Removed the battery characteristic discovery/read and the
+ *          stamp_device() calls from the GATT event handlers below.
+ *          Both were redundant with the passive advertisement path:
+ *          ble_scan.c already calls stamp_device(DEV_IDX_LOCK) and
+ *          ble_lock_update_adv() on every manufacturer-data adv, at
+ *          zero connection overhead. Note this GATT client's production
+ *          role is narrower than it may look: the *write* path
+ *          (ble_send_lock_command()) is still how commands reach the
+ *          device and remains production. The *read-back* of state and
+ *          battery after connecting was a bench-validation leftover for
+ *          exercising the device's GATT service and isn't needed for
+ *          the hub's normal age/state tracking.
+ *
  ******************************************************************************/
 
 #include "config.h"
@@ -54,7 +68,6 @@
 #define LOCK_SERVICE_UUID      0x1234  /**< lock GATT service UUID */
 #define LOCK_STATE_CHAR_UUID   0x1235  /**< lock state characteristic UUID */
 #define LOCK_NOTIFY_CHAR_UUID  0x1236  /**< lock notify characteristic UUID */
-#define LOCK_BATT_CHAR_UUID    0x2A19  /**< battery level characteristic UUID */
 #define LOCK_NOTIFY_ENABLE     1       /**< CCCD value to enable notifications */
 #define LOCK_STATE_LEN         1       /**< expected state characteristic length */
 
@@ -71,7 +84,6 @@ static int     g_pending_lock_state = -1;  /**< queued command, -1 = none */
 static uint16_t g_lock_conn_id        = LOCK_CONN_ID_INVALID; /**< active conn id */
 static uint16_t g_lock_service_handle = 0; /**< discovered service handle */
 static uint16_t g_lock_char_handle    = 0; /**< state char handle */
-static uint16_t g_lock_batt_handle    = 0; /**< battery char handle */
 static bool     g_lock_connected      = false; /**< connection active flag */
 static bool     g_lock_connecting     = false; /**< connection in progress flag */
 
@@ -238,8 +250,9 @@ void ble_lock_try_connect(void)
  *
  * \details Extracted from ble_lock_handle_event to keep function length
  *          under 100 lines. Enumerates all characteristics in the lock
- *          service and sets up state read, notify subscription, and
- *          battery read.
+ *          service and sets up state read and notify subscription.
+ *          Battery is not read here — see the GATT read/battery cleanup
+ *          note at the top of this file.
  *
  * \author MichaelLynnCSU (https://github.com/MichaelLynnCSU)
  ******************************************************************************/
@@ -329,19 +342,11 @@ static void handle_search_complete(esp_gatt_if_t gattc_if)
                                                      ESP_GATT_AUTH_REQ_NONE);
             }
          }
-         else if (LOCK_BATT_CHAR_UUID == uuid)
-         {
-            g_lock_batt_handle = p_elems[i].char_handle;
-            ESP_LOGI(TAG, "[LOCK] Battery char found handle=0x%04x, reading...",
-                     g_lock_batt_handle);
-            (void)esp_ble_gattc_read_char(gattc_if,
-                                           g_lock_conn_id,
-                                           g_lock_batt_handle,
-                                           ESP_GATT_AUTH_REQ_NONE);
-         }
          else
          {
-            /* unknown characteristic — skip */
+            /* unknown characteristic — skip. Battery is no longer read
+             * over GATT; it arrives passively via manufacturer adv data
+             * (see ble_lock_update_adv()). */
          }
       }
    }
@@ -477,21 +482,14 @@ void ble_lock_handle_event(esp_gattc_cb_event_t event,
          if ((ESP_GATT_OK == p_param->read.status) &&
              (LOCK_STATE_LEN == p_param->read.value_len))
          {
-            if ((p_param->read.handle == g_lock_batt_handle) &&
-                (0 != g_lock_batt_handle))
-            {
-               g_lock_batt = (int)p_param->read.value[0];
-               ESP_LOGI(TAG, "[LOCK] GATT batt rx: batt=%d%%", g_lock_batt);
-               bus_publish_lock(g_current_lock_state, g_lock_batt);
-            }
-            else
-            {
-               g_current_lock_state = p_param->read.value[0];
-               stamp_device(DEV_IDX_LOCK);
-               ESP_LOGI(TAG, "[LOCK] GATT state rx: state=%d batt=%d%%",
-                        g_current_lock_state, g_lock_batt);
-               bus_publish_lock(g_current_lock_state, g_lock_batt);
-            }
+            /* Age (stamp_device) is not updated here — ble_scan.c already
+             * stamps DEV_IDX_LOCK on every passive adv, so this GATT read
+             * would only duplicate it. Battery is likewise sourced from
+             * adv data (g_lock_batt), not read over GATT. */
+            g_current_lock_state = p_param->read.value[0];
+            ESP_LOGI(TAG, "[LOCK] GATT state rx: state=%d batt=%d%%",
+                     g_current_lock_state, g_lock_batt);
+            bus_publish_lock(g_current_lock_state, g_lock_batt);
          }
          else
          {
@@ -515,8 +513,8 @@ void ble_lock_handle_event(esp_gattc_cb_event_t event,
             break;
          }
 
-         stamp_device(DEV_IDX_LOCK);
-
+         /* Age is already stamped passively by ble_scan.c on adv receipt;
+          * no need to stamp_device() again here. */
          if (LOCK_STATE_LEN == p_param->notify.value_len)
          {
             g_current_lock_state = p_param->notify.value[0];
@@ -591,7 +589,6 @@ void ble_lock_handle_event(esp_gattc_cb_event_t event,
 
          g_lock_char_handle    = 0;
          g_lock_service_handle = 0;
-         g_lock_batt_handle    = 0;
          g_lock_conn_id        = LOCK_CONN_ID_INVALID;
 
          ble_scheduler_notify_done();

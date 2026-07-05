@@ -64,7 +64,9 @@ static uint64_t last_activity_time = 0;
 static const struct bt_gatt_attr *heartbeat_attr = NULL;
 static struct bt_conn            *current_conn   = NULL;
 
-static uint8_t light_mfg_data[MFG_DATA_SIZE] = {MFG_COMPANY_ID, 0x00};
+static uint8_t light_mfg_data[MFG_DATA_SIZE] = {MFG_COMPANY_ID, 0x00, 0x00};
+static uint8_t light_heartbeat_counter = 0; /**< written into
+                                              *   light_mfg_data[MFG_HEARTBEAT_IDX] */
 
 static struct bt_data adv_data[] =
 {
@@ -77,7 +79,8 @@ static struct bt_data adv_data[] =
 
 void ble_adv_update(void)
 {
-    light_mfg_data[MFG_STATE_IDX] = light_state;
+    light_mfg_data[MFG_STATE_IDX]     = light_state;
+    light_mfg_data[MFG_HEARTBEAT_IDX] = light_heartbeat_counter;
     bt_le_adv_update_data(adv_data, ARRAY_SIZE(adv_data), NULL, 0);
 }
 
@@ -110,6 +113,7 @@ static void hb_work_handler(struct k_work *work)
 
     if ((now - last_activity_time) > (IDLE_HEARTBEAT_SEC * 1000ULL))
     {
+        light_heartbeat_counter++;
         ble_adv_update();
         if (current_conn && heartbeat_attr)
         {
