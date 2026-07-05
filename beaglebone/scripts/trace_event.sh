@@ -30,7 +30,30 @@ LOGS_SERVER="/var/log/sensor_server.log"
 LOGS_TELEMETRY="/var/log/telemetry.log"
 LOGS_EVENTS="/var/log/events.log"
 
+# Log lines here commonly carry a dozen+ key=value fields (DISPATCH/telemetry
+# especially) and blow past a normal terminal width as one unbroken line.
+# Wrap at word boundaries instead of letting the terminal hard-wrap mid-field.
+WRAP_WIDTH="${TRACE_WRAP_WIDTH:-100}"
+
 hr() { printf '%s\n' "------------------------------------------------------------"; }
+
+# grep_wrapped PATTERN FILE [FILE...] NOMATCH_MSG
+# Greps for PATTERN in the given files, wraps any matched lines to
+# WRAP_WIDTH at word boundaries, and prints NOMATCH_MSG if nothing matched.
+# Safe under `set -e` — capture-then-check instead of relying on grep's
+# own exit code, which is 1 on zero matches even though it prints nothing.
+grep_wrapped() {
+    local pattern="$1"; shift
+    local nomatch_msg="${*: -1}"
+    local files=("${@:1:$#-1}")
+    local output
+    output=$(grep -n -- "$pattern" "${files[@]}" 2>/dev/null || true)
+    if [[ -n "$output" ]]; then
+        echo "$output" | fold -s -w "$WRAP_WIDTH"
+    else
+        echo "  ($nomatch_msg)"
+    fi
+}
 
 if [[ "$MODE" == "event" ]]; then
     DEC="$VAL"
@@ -40,21 +63,27 @@ if [[ "$MODE" == "event" ]]; then
     hr
 
     echo "[1/4] camera_manager.log (decimal event_id, cam_tx_id, boot_epoch)"
-    grep -n "event_id=${DEC}\b" "$LOGS_CAMERA" 2>/dev/null || echo "  (no match)"
+    grep_wrapped "event_id=${DEC}\b" "$LOGS_CAMERA" "no match"
     hr
 
     echo "[2/4] data_controller.log (decimal event_id — DISPATCH/SHM/UART, unified naming)"
-    grep -n "event_id=${DEC}\b" "$LOGS_CONTROLLER" 2>/dev/null || echo "  (no match)"
+    grep_wrapped "event_id=${DEC}\b" "$LOGS_CONTROLLER" "no match"
     echo "  -- checking for stale 'eid=' usage (should be none post-rename) --"
-    grep -n "eid=${DEC}\b" "$LOGS_CONTROLLER" 2>/dev/null && echo "  WARNING: found legacy eid= usage above" || echo "  (none — good)"
+    eid_output=$(grep -n -- "eid=${DEC}\b" "$LOGS_CONTROLLER" 2>/dev/null || true)
+    if [[ -n "$eid_output" ]]; then
+        echo "$eid_output" | fold -s -w "$WRAP_WIDTH"
+        echo "  WARNING: found legacy eid= usage above"
+    else
+        echo "  (none — good)"
+    fi
     hr
 
     echo "[3/4] inference.log (hex event_id via EVENT_ID_FMT)"
-    grep -n "event_id=${HEX}\b" "$LOGS_INFERENCE" 2>/dev/null || echo "  (no match)"
+    grep_wrapped "event_id=${HEX}\b" "$LOGS_INFERENCE" "no match"
     hr
 
     echo "[4/4] doorbell_daemon.log (hex event_id via EVENT_ID_FMT, if applicable)"
-    grep -n "event_id=${HEX}\b" "$LOGS_DOORBELL" 2>/dev/null || echo "  (no match)"
+    grep_wrapped "event_id=${HEX}\b" "$LOGS_DOORBELL" "no match"
     hr
 
     echo "Summary line counts:"
@@ -68,8 +97,12 @@ if [[ "$MODE" == "event" ]]; then
 
     echo "Bridged frame_seq check (indoor cam path only, as of 2026-07-04 — see README):"
     echo "  a line with both event_id and seq= confirms trigger-time bridging worked."
-    grep -n "event_id=${DEC}\b.*seq=\|seq=.*event_id=${DEC}\b" "$LOGS_CAMERA" 2>/dev/null || echo "  (no bridged seq= found in camera_manager.log — expected on pre-bridge binaries or doorbell events)"
-    grep -n "event_id=${HEX}\b.*seq=\|seq=.*event_id=${HEX}\b" "$LOGS_INFERENCE" 2>/dev/null || echo "  (no bridged seq= found in inference.log — expected on pre-bridge binaries or doorbell events)"
+    grep_wrapped "event_id=${DEC}\b.*seq=\|seq=.*event_id=${DEC}\b" "$LOGS_CONTROLLER" \
+        "no bridged seq= found in data_controller.log — bridge originates here at sensor_dispatch.c"
+    grep_wrapped "event_id=${DEC}\b.*seq=\|seq=.*event_id=${DEC}\b" "$LOGS_CAMERA" \
+        "no bridged seq= found in camera_manager.log — expected if trigger was dropped before send, or on pre-bridge binaries/doorbell events"
+    grep_wrapped "event_id=${HEX}\b.*seq=\|seq=.*event_id=${HEX}\b" "$LOGS_INFERENCE" \
+        "no bridged seq= found in inference.log — expected on pre-bridge binaries or doorbell events"
 
 elif [[ "$MODE" == "seq" ]]; then
     SEQ="$VAL"
@@ -77,15 +110,15 @@ elif [[ "$MODE" == "seq" ]]; then
     hr
 
     echo "[1/2] events.log (low-volume, true state transitions only)"
-    grep -n "seq=${SEQ}\b" "$LOGS_EVENTS" 2>/dev/null || echo "  (no match)"
+    grep_wrapped "seq=${SEQ}\b" "$LOGS_EVENTS" "no match"
     hr
 
     echo "[2/2] telemetry.log (high-volume, every tick)"
-    grep -n "seq=${SEQ}\b" "$LOGS_TELEMETRY" 2>/dev/null || echo "  (no match)"
+    grep_wrapped "seq=${SEQ}\b" "$LOGS_TELEMETRY" "no match"
     hr
 
     echo "Cross-check: sensor_server.log / data_controller.log for the same seq"
-    grep -n "seq=${SEQ}\b" "$LOGS_SERVER" "$LOGS_CONTROLLER" 2>/dev/null || echo "  (no match)"
+    grep_wrapped "seq=${SEQ}\b" "$LOGS_SERVER" "$LOGS_CONTROLLER" "no match"
 
 else
     echo "Unknown mode '$MODE'. Use 'event' or 'seq'."
