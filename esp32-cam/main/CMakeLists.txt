@@ -6,7 +6,7 @@ idf_component_register(SRCS "main.c"
         "trinity_panic_idf.c"
         "build_info.c"
         "trinity_log_stack.c"
-    INCLUDE_DIRS "." "include")
+    INCLUDE_DIRS "." "include" "../../include")
 
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     TRINITY_CHIP_ESP32_CAM_IDF=1

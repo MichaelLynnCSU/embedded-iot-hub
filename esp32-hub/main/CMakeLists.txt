@@ -25,7 +25,7 @@ idf_component_register(
         "trinity_panic_idf.c"
         "motor_server.c"
         "trinity_log_stack.c"
-    INCLUDE_DIRS "." "include"
+    INCLUDE_DIRS "." "include" "../../include"
     REQUIRES
         bt
         nvs_flash

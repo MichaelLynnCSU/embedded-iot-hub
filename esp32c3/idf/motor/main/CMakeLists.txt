@@ -13,7 +13,7 @@ idf_component_register(
         "trinity_stats_idf.c"
         "trinity_panic_idf.c"
         "trinity_log_stack.c"
-    INCLUDE_DIRS "."
+    INCLUDE_DIRS "." "../../../../include"
     REQUIRES
         nvs_flash
         esp_wifi

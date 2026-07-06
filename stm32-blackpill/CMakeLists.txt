@@ -65,6 +65,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
     "Core/Inc"
     "USB_DEVICE/App"
     "USB_DEVICE/Target"
+    "../include"
 )
 
 # Add the fresh LVGL pull

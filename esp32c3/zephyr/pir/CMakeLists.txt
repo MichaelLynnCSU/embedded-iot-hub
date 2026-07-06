@@ -22,3 +22,7 @@ target_sources(app PRIVATE
     src/trinity_stats_esp.c
     src/trinity_fault_esp.c
 )
+
+target_include_directories(app PRIVATE
+    ../../../include
+)

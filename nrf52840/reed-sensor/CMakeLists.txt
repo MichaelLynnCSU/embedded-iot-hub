@@ -19,4 +19,5 @@ target_sources(app PRIVATE
 
 target_include_directories(app PRIVATE
     drivers/fuel_gauge/max17048
+    ../../include
 )

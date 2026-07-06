@@ -7,7 +7,7 @@ idf_component_register(SRCS "main.c"
         "build_info.c"
         "trinity_log_stack.c"
         "buzzer.c"
-    INCLUDE_DIRS "." "include")
+    INCLUDE_DIRS "." "include" "../../include")
 
 if(DEFINED DOORBELL_ID)
     target_compile_definitions(__idf_main PUBLIC DOORBELL_ID=${DOORBELL_ID})
