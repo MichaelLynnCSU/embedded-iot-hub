@@ -1,6 +1,7 @@
 /******************************************************************************
  * \file trinity_flash.c
  * \brief Trinity flash log -- nRF52840 Zephyr.
+ * \board smart-light
  *
  * \details Owns the flash partition, write ring, mutex, and all log I/O.
  *          Depends on trinity_wdt.c (kick during partition scan) and
@@ -152,6 +153,41 @@ void write_panic(const char *p_msg, uint16_t len)
    if (TRINITY_INIT_MAGIC != g_initialized_magic) { return; }
    if (!g_part_open || 0u == len)                 { return; }
    write_internal(p_msg, len);
+}
+
+/* Trinity crash contract (v2) -- writes one compact, canonical-format
+ * line built purely from TRINITY_CRASH_RECORD_X's fields. This is
+ * additive to trinity_fault.c's own richer diagnostic lines (which carry
+ * Zephyr-specific detail -- raw reason string, cycle count, SP, init
+ * stage -- that has no place in the architecture-neutral record); it
+ * does not replace them. Uses write_panic()'s same lock-free fault-context
+ * path -- this is only ever called from k_sys_fatal_error_handler(). */
+void trinity_crash_store(TRINITY_CRASH_RECORD_X *p_record)
+{
+   char buf[192] = {0};  /* worst-case snprintf output: ~165B per
+                            * -Wformat-truncation (2x %u + 6x 0x%%08X +
+                            * literals), rounded up with margin. NOT tied
+                            * to trinity_fault.c's CRASH_BUF_SIZE (112) --
+                            * that size fit the ORIGINAL line1/line2
+                            * strings, not this longer canonical-record
+                            * line. */
+
+   if (NULL == p_record) { return; }
+
+   (void)snprintf(buf, sizeof(buf),
+                  "EVENT: TRINITY_CRASH_RECORD | ARCH: %u | ERR: %u"
+                  " | PC: 0x%08X | LR: 0x%08X | CFSR: 0x%08X | HFSR: 0x%08X"
+                  " | MMFAR: 0x%08X | BFAR: 0x%08X\n",
+                  (unsigned int)p_record->arch,
+                  (unsigned int)p_record->error,
+                  (unsigned int)p_record->pc,
+                  (unsigned int)p_record->lr,
+                  (unsigned int)p_record->arch_data.cortex_m.cfsr,
+                  (unsigned int)p_record->arch_data.cortex_m.hfsr,
+                  (unsigned int)p_record->arch_data.cortex_m.mmfar,
+                  (unsigned int)p_record->arch_data.cortex_m.bfar);
+
+   write_panic(buf, (uint16_t)strlen(buf));
 }
 
 /************************** FLASH MUTEX API ***********************************/

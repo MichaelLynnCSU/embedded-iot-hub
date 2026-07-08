@@ -1,6 +1,7 @@
 /******************************************************************************
  * \file trinity_fault.c
  * \brief Trinity fault handler -- nRF52840 Zephyr.
+ * \board smart-light
  *
  * \details Overrides k_sys_fatal_error_handler(). Captures CFSR/HFSR/
  *          MMFAR/BFAR/PC/LR/SP/cycles and writes to flash via write_panic()
@@ -53,6 +54,8 @@ static const char *reason_to_str(unsigned int reason)
    }
 }
 
+/* stage_to_str is only referenced in the BENCH build path below. */
+#if defined(CONFIG_TRINITY_MODE_BENCH)
 static const char *stage_to_str(uint32_t stage)
 {
    switch (stage)
@@ -70,6 +73,7 @@ static const char *stage_to_str(uint32_t stage)
       default:                      { return "UNKNOWN";   }
    }
 }
+#endif /* CONFIG_TRINITY_MODE_BENCH */
 
 void k_sys_fatal_error_handler(unsigned int reason,
                                 const struct arch_esf *p_esf)
@@ -111,8 +115,35 @@ void k_sys_fatal_error_handler(unsigned int reason,
                   " | MMFAR: 0x%08X | BFAR: 0x%08X\n",
                   cfsr, hfsr, mmfar, bfar);
 
+   /* Original rich diagnostic lines -- unchanged, zero fidelity loss.
+    * These carry Zephyr/nRF-specific detail (raw reason string, cycle
+    * count, SP, init-stage) that has no place in the architecture-neutral
+    * TRINITY_CRASH_RECORD_X, so they stay here, board-owned, exactly as
+    * before. */
    write_panic(line1, (uint16_t)strlen(line1));
    write_panic(line2, (uint16_t)strlen(line2));
+
+   /* v2 crash contract: additionally build the canonical cross-board
+    * record from the same registers already captured above, and call
+    * trinity_crash_store() (trinity_flash.c). This does NOT replace the
+    * two lines above -- it writes one further, compact, canonical-format
+    * line, giving every board (STM32 + nRF) the same
+    * "a TRINITY_CRASH_RECORD_X was stored" entry point, without eroding
+    * this board's existing richer diagnostics. */
+   TRINITY_CRASH_RECORD_X record = {0};
+   record.magic        = TRINITY_CRASH_MAGIC;
+   record.version      = TRINITY_CRASH_VERSION;
+   record.arch         = TRINITY_ARCH_CORTEX_M;
+   record.error        = (K_ERR_STACK_CHK_FAIL == reason) ? eTRINITY_ERR_STACK
+                                                            : eTRINITY_ERR_HARDFAULT;
+   record.reset_reason = 0u;
+   record.pc           = (NULL != p_esf) ? (uint32_t)p_esf->basic.pc : 0u;
+   record.lr           = (NULL != p_esf) ? (uint32_t)p_esf->basic.lr : 0u;
+   record.arch_data.cortex_m.cfsr  = cfsr;
+   record.arch_data.cortex_m.hfsr  = hfsr;
+   record.arch_data.cortex_m.mmfar = mmfar;
+   record.arch_data.cortex_m.bfar  = bfar;
+   trinity_crash_store(&record);
 
 #if defined(CONFIG_TRINITY_MODE_BENCH)
    printk("\n[TRINITY] === FAULT HALT ===\n");

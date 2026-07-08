@@ -107,6 +107,30 @@ extern volatile uint32_t g_init_stage;
  *****************************************************************************/
 void trinity_log_dump_previous(void);
 
+/**
+ * \brief Error taxonomy for the Trinity crash contract. Originally scoped
+ *        to STM32 only; moved to the common section when nRF52840 adopted
+ *        TRINITY_CRASH_RECORD_X -- the values here (HARDFAULT/STACK/HEAP/
+ *        etc.) are generic enough to serve every board, not STM32-specific.
+ */
+typedef enum
+{
+   eTRINITY_ERR_NONE        = 0x00u,
+   eTRINITY_ERR_HARDFAULT   = 0x01u,
+   eTRINITY_ERR_STACK       = 0x02u,
+   eTRINITY_ERR_HEAP        = 0x03u,
+   eTRINITY_ERR_ASSERT      = 0x04u,
+   eTRINITY_ERR_BROWNOUT    = 0x05u,
+   eTRINITY_ERR_WATCHDOG    = 0x06u,
+   eTRINITY_ERR_PANIC       = 0x07u,
+   eTRINITY_ERR_UNKNOWN     = 0xFFu,
+} TRINITY_ERROR_E;
+
+/* Crash record contract (TRINITY_CRASH_RECORD_X / trinity_crash_store()).
+ * Common to every board; each board's .c file decides how the record
+ * becomes persistent against its own storage (see trinity_crash.h). */
+#include "trinity_crash.h"
+
 #if defined(CONFIG_TRINITY_CHIP_NRF52840) || defined(CONFIG_TRINITY_CHIP_ESP32C3)
 int  trinity_log_init(void);
 int  trinity_log_erase(void);
@@ -198,29 +222,6 @@ void trinity_log_record_low_stack(uint32_t hwm_words);
 #if defined(TRINITY_CHIP_STM32_F4) || defined(TRINITY_CHIP_STM32_F1)
 
 #define TRINITY_MSG_LEN   80u  /**< Max panic/log message length incl NUL */
-
-/**
- * \brief Error codes stored in the crash record.
- * \details F411: written to RTC backup registers. F103: written to FRAM.
- *          Read back by trinity_log_init() on the next boot.
- */
-typedef enum
-{
-   eTRINITY_ERR_NONE        = 0x00u,
-   eTRINITY_ERR_HARDFAULT   = 0x01u,
-   eTRINITY_ERR_STACK       = 0x02u,
-   eTRINITY_ERR_HEAP        = 0x03u,
-   eTRINITY_ERR_ASSERT      = 0x04u,
-   eTRINITY_ERR_BROWNOUT    = 0x05u,
-   eTRINITY_ERR_WATCHDOG    = 0x06u,
-   eTRINITY_ERR_PANIC       = 0x07u,
-   eTRINITY_ERR_UNKNOWN     = 0xFFu,
-} TRINITY_ERROR_E;
-
-/* New minimum-guaranteed crash record contract (TRINITY_CRASH_RECORD_X /
- * trinity_crash_store()). Not yet called by either board's fault handler --
- * see trinity_crash.h header comment. */
-#include "trinity_crash.h"
 
 /** Polled, blocking UART write. Safe to call from fault handlers. */
 void trinity_uart_log(const char *p_msg);

@@ -42,7 +42,7 @@
 
 #include <stdint.h>
 
-/* Uses TRINITY_ERROR_E -- defined in trinity_log.h's STM32 block.
+/* Uses TRINITY_ERROR_E -- defined in trinity_log.h's common section.
  * trinity_log.h includes this header after that enum, so it's always
  * available by the time this file is expanded from there. If included
  * standalone, include trinity_log.h first. */
