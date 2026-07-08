@@ -65,6 +65,38 @@ void trinity_rtc_store(TRINITY_ERROR_E err)
    rb_crashlog_push((uint8_t)err, 0u);
 }
 
+/* Trinity crash contract (v2) -- single public entry point.
+ *
+ * F411 has two live backends reachable from two different contexts:
+ *   - crash_fault_handler() (crash_log.c) -- naked exception context,
+ *     called directly from the vector table. Must stay fast/deterministic;
+ *     no I2C/FRAM access is safe here.
+ *   - panic_handler() (trinity_fault_stm32_f4.c) -- normal task/thread
+ *     context (called from the heap/stack modules). Safe to touch FRAM.
+ *
+ * The record itself carries no destination field (see trinity_crash.h),
+ * so this function distinguishes the two the same way ARM code normally
+ * detects "am I in a handler": IPSR is 0 in thread mode and non-zero
+ * (the active exception number) inside any exception handler. This is a
+ * standard, documented Cortex-M mechanism (CMSIS __get_IPSR()), not a
+ * guess -- crash_fault_handler() is only ever reached via the vector
+ * table, so IPSR is guaranteed non-zero on that path and 0 on
+ * panic_handler()'s.
+ */
+void trinity_crash_store(TRINITY_CRASH_RECORD_X *p_record)
+{
+   if (NULL == p_record) { return; }
+
+   if (0u != __get_IPSR())
+   {
+      crash_log_store_rtc(p_record);
+      return;
+   }
+
+   if (!g_fram_ok) { return; }
+   rb_crashlog_push((uint8_t)p_record->error, 0u);
+}
+
 /************************** RESET CAUSE ***************************************/
 
 static TRINITY_ERROR_E classify_reset_cause(void)

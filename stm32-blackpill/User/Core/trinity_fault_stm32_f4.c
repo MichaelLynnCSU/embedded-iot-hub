@@ -15,14 +15,25 @@
 
 void panic_handler(const char *p_reason, TRINITY_ERROR_E err)
 {
-   char msg[TRINITY_MSG_LEN] = {0};
+   char                    msg[TRINITY_MSG_LEN] = {0};
+   TRINITY_CRASH_RECORD_X  record                = {0};
 
    __disable_irq();
 
    (void)snprintf(msg, sizeof(msg), "[PANIC] %s\r\n",
                   (NULL != p_reason) ? p_reason : "unknown reason");
    trinity_uart_log(msg);
-   trinity_rtc_store(err);
+
+   record.magic         = TRINITY_CRASH_MAGIC;
+   record.version       = TRINITY_CRASH_VERSION;
+   record.arch          = TRINITY_ARCH_CORTEX_M;
+   record.error         = err;
+   record.reset_reason  = 0u;
+   record.pc            = 0u;  /* not available at this call site, as before */
+   record.lr            = 0u;
+   /* arch_data left zeroed -- not available/relevant at a software panic
+    * call site (no hardware fault occurred here). */
+   trinity_crash_store(&record);
 
 #if defined(TRINITY_MODE_BENCH)
    __asm volatile ("bkpt #0");

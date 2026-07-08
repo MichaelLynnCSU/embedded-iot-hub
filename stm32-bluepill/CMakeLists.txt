@@ -64,11 +64,21 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ../include
 )
 
+# Trinity build mode
+# Select exactly ONE mode by passing -DTRINITY_MODE=BENCH|FIELD to cmake.
+# Default is FIELD if not specified.
+#   Bench -- UART + BKPT halt  (ST-Link inspection, dev only)
+#   Field -- UART + auto-reset + FRAM black box (battery / production)
+if(NOT DEFINED TRINITY_MODE)
+    set(TRINITY_MODE "FIELD")
+endif()
+message("Trinity mode: " ${TRINITY_MODE})
+
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
     TRINITY_CHIP_STM32_F1=1
-    TRINITY_MODE_BENCH
+    TRINITY_MODE_${TRINITY_MODE}
 )
 
 # Remove wrong libob.a library dependency when using cpp files

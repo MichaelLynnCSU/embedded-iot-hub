@@ -28,14 +28,23 @@ extern uint32_t g_boot_count;
 
 void panic_handler(const char *p_reason, TRINITY_ERROR_E err)
 {
-   char msg[TRINITY_MSG_LEN] = {0};
+   char                    msg[TRINITY_MSG_LEN] = {0};
+   TRINITY_CRASH_RECORD_X  record                = {0};
 
    taskDISABLE_INTERRUPTS();
 
    (void)snprintf(msg, sizeof(msg), "[PANIC] %s\r\n",
                   (NULL != p_reason) ? p_reason : "unknown reason");
    trinity_uart_log(msg);
-   trinity_rtc_store(err, (uint8_t)g_boot_count);
+
+   record.magic         = TRINITY_CRASH_MAGIC;
+   record.version       = TRINITY_CRASH_VERSION;
+   record.arch          = TRINITY_ARCH_CORTEX_M;
+   record.error         = err;
+   record.reset_reason  = 0u;
+   record.pc            = 0u;  /* not available at this call site */
+   record.lr            = 0u;
+   trinity_crash_store(&record);
 
 #if defined(TRINITY_MODE_BENCH)
    __asm volatile ("bkpt #0");
@@ -113,7 +122,19 @@ void crash_fault_handler_c(uint32_t *fault_stack, uint32_t fault_type)
                   "EVENT: %s | PC=0x%08lX | LR=0x%08lX\n",
                   fault_name, (unsigned long)pc, (unsigned long)lr);
    trinity_log_event(buf);
-   trinity_rtc_store(eTRINITY_ERR_HARDFAULT, (uint8_t)g_boot_count);
+
+   TRINITY_CRASH_RECORD_X record = {0};
+   record.magic         = TRINITY_CRASH_MAGIC;
+   record.version       = TRINITY_CRASH_VERSION;
+   record.arch          = TRINITY_ARCH_CORTEX_M;
+   record.error         = eTRINITY_ERR_HARDFAULT;
+   record.reset_reason  = 0u;
+   record.pc            = pc;   /* available here, but NOT persisted -- FRAM's
+                                 * CRASH_LOG_ENTRY_X has no pc/lr fields today.
+                                 * Stays UART-only, matching existing behavior. */
+   record.lr            = lr;
+   record.arch_data.cortex_m.cfsr = SCB->CFSR;  /* in-memory only, see above */
+   trinity_crash_store(&record);
 
    NVIC_SystemReset();
 #endif
@@ -129,7 +150,8 @@ void HardFault_Handler_C(uint32_t *fault_stack)
 
 void vApplicationStackOverflowHook(TaskHandle_t p_task, char *p_task_name)
 {
-   char msg[TRINITY_MSG_LEN] = {0};
+   char                    msg[TRINITY_MSG_LEN] = {0};
+   TRINITY_CRASH_RECORD_X  record                = {0};
 
    (void)p_task;
 
@@ -137,7 +159,15 @@ void vApplicationStackOverflowHook(TaskHandle_t p_task, char *p_task_name)
                   "[TRINITY] Stack overflow: %s\r\n",
                   (NULL != p_task_name) ? p_task_name : "unknown");
    trinity_uart_log(msg);
-   trinity_rtc_store(eTRINITY_ERR_STACK, (uint8_t)g_boot_count);
+
+   record.magic         = TRINITY_CRASH_MAGIC;
+   record.version       = TRINITY_CRASH_VERSION;
+   record.arch          = TRINITY_ARCH_CORTEX_M;
+   record.error         = eTRINITY_ERR_STACK;
+   record.reset_reason  = 0u;
+   record.pc            = 0u;
+   record.lr            = 0u;
+   trinity_crash_store(&record);
 
 #if defined(TRINITY_MODE_BENCH)
    __asm volatile ("bkpt #0");
@@ -149,8 +179,18 @@ void vApplicationStackOverflowHook(TaskHandle_t p_task, char *p_task_name)
 
 void vApplicationMallocFailedHook(void)
 {
+   TRINITY_CRASH_RECORD_X record = {0};
+
    trinity_uart_log("[TRINITY] FreeRTOS heap allocation failed!\r\n");
-   trinity_rtc_store(eTRINITY_ERR_HEAP, (uint8_t)g_boot_count);
+
+   record.magic         = TRINITY_CRASH_MAGIC;
+   record.version       = TRINITY_CRASH_VERSION;
+   record.arch          = TRINITY_ARCH_CORTEX_M;
+   record.error         = eTRINITY_ERR_HEAP;
+   record.reset_reason  = 0u;
+   record.pc            = 0u;
+   record.lr            = 0u;
+   trinity_crash_store(&record);
 
 #if defined(TRINITY_MODE_BENCH)
    __asm volatile ("bkpt #0");

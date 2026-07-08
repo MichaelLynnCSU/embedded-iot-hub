@@ -86,6 +86,25 @@ void trinity_rtc_store(TRINITY_ERROR_E err, uint8_t boot_count)
    rb_crashlog_push((uint8_t)err, boot_count);
 }
 
+/* Trinity crash contract (v2) -- single public entry point. F103 has only
+ * one backend (real FRAM chip; no RTC-backup-register path exists on this
+ * board), so unlike F411 there's no context-based branching here -- every
+ * call site (crash_fault_handler_c, panic_handler, the two FreeRTOS hooks)
+ * goes through the same rb_crashlog_push(). Serializes only the fields
+ * CRASH_LOG_ENTRY_X already supports (error, boot_count -- timestamp and
+ * crc are filled in by rb_crashlog_push() itself). boot_count comes from
+ * g_boot_count directly, not from the record -- the v2 contract dropped
+ * boot_count as a canonical field since it's board-global bookkeeping, not
+ * fault-context data. pc/lr/arch_data are deliberately dropped here too,
+ * matching today's behavior: they're UART-only, never persisted to FRAM.
+ * See trinity_crash.h for why CRASH_LOG_ENTRY_X isn't being resized to
+ * carry them. */
+void trinity_crash_store(TRINITY_CRASH_RECORD_X *p_record)
+{
+   if ((!g_fram_ok) || (NULL == p_record)) { return; }
+   rb_crashlog_push((uint8_t)p_record->error, (uint8_t)g_boot_count);
+}
+
 /************************** RESET CAUSE ***************************************/
 
 static TRINITY_ERROR_E classify_reset_cause(uint32_t reset_reason)

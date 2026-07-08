@@ -217,6 +217,11 @@ typedef enum
    eTRINITY_ERR_UNKNOWN     = 0xFFu,
 } TRINITY_ERROR_E;
 
+/* New minimum-guaranteed crash record contract (TRINITY_CRASH_RECORD_X /
+ * trinity_crash_store()). Not yet called by either board's fault handler --
+ * see trinity_crash.h header comment. */
+#include "trinity_crash.h"
+
 /** Polled, blocking UART write. Safe to call from fault handlers. */
 void trinity_uart_log(const char *p_msg);
 
