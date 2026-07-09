@@ -130,6 +130,32 @@ void write_panic(const char *p_msg, uint16_t len)
    write_internal(p_msg, len);
 }
 
+/* Trinity crash contract (v2) -- writes one compact, canonical-format
+ * line built from TRINITY_CRASH_RECORD_X's fields. Additive to
+ * trinity_fault_esp.c's own richer diagnostic line (reason string, init
+ * stage); does not replace it. Uses write_panic()'s same lock-free
+ * fault-context path -- only ever called from k_sys_fatal_error_handler().
+ * Buffer sized for worst-case snprintf output (~100B: 2x %u + 2x 0x%%08X +
+ * literals), with margin -- computed up front this time rather than
+ * copied from an unrelated buffer size (see nRF52840's trinity_flash.c
+ * history for why that went wrong there). */
+void trinity_crash_store(TRINITY_CRASH_RECORD_X *p_record)
+{
+   char buf[128] = {0};
+
+   if (NULL == p_record) { return; }
+
+   (void)snprintf(buf, sizeof(buf),
+                  "EVENT: TRINITY_CRASH_RECORD | ARCH: %u | ERR: %u"
+                  " | PC: 0x%08X | LR: 0x%08X\n",
+                  (unsigned int)p_record->arch,
+                  (unsigned int)p_record->error,
+                  (unsigned int)p_record->pc,
+                  (unsigned int)p_record->lr);
+
+   write_panic(buf, (uint16_t)strlen(buf));
+}
+
 /************************** DUMP CORE *****************************************/
 
 static const char *stage_to_str(uint32_t stage)

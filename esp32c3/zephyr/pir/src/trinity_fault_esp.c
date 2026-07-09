@@ -80,6 +80,38 @@ void k_sys_fatal_error_handler(unsigned int reason,
 
    write_panic(msg, (uint16_t)strlen(msg));
 
+   /* v2 crash contract: additionally build the canonical record from the
+    * same mepc/ra already captured above, and call trinity_crash_store()
+    * (trinity_flash_esp.c). Additive -- does not replace the msg line
+    * above.
+    *
+    * arch_data.riscv fields, verified against this project's actual
+    * struct arch_esf (zephyr/include/zephyr/arch/riscv/exception.h):
+    *   mepc, mstatus -- real members here, populated below.
+    *   mcause -- only exists in arch_esf when
+    *             CONFIG_CLIC_SUPPORT_INTERRUPT_LEVEL is set; confirmed
+    *             NOT set in this project's build (.config), so this
+    *             field is unconditionally absent from the struct here,
+    *             not just unpopulated. Left reserved/zero.
+    *   mtval -- does not exist in struct arch_esf on RISC-V Zephyr at
+    *            all (any config). Left reserved/zero permanently on
+    *            this platform. */
+   TRINITY_CRASH_RECORD_X record = {0};
+   record.magic        = TRINITY_CRASH_MAGIC;
+   record.version      = TRINITY_CRASH_VERSION;
+   record.arch         = TRINITY_ARCH_RISCV;
+   record.error        = (K_ERR_STACK_CHK_FAIL == reason) ? eTRINITY_ERR_STACK
+                                                            : eTRINITY_ERR_HARDFAULT;
+   record.reset_reason = 0u;
+   record.pc           = (NULL != p_esf) ? (uint32_t)p_esf->mepc : 0u;
+   record.lr           = (NULL != p_esf) ? (uint32_t)p_esf->ra   : 0u;
+   if (NULL != p_esf)
+   {
+      record.arch_data.riscv.mepc    = (uint32_t)p_esf->mepc;
+      record.arch_data.riscv.mstatus = (uint32_t)p_esf->mstatus;
+   }
+   trinity_crash_store(&record);
+
 #if defined(CONFIG_TRINITY_MODE_BENCH)
    printk("\n[TRINITY] === FAULT HALT ===\n");
    printk("[TRINITY] %s", msg);

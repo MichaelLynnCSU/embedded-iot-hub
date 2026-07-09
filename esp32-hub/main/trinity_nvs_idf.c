@@ -99,6 +99,29 @@ void trinity_log_event(const char *p_msg)
    xSemaphoreGive(g_log_mutex);
 }
 
+/* Trinity crash contract (v2) -- single public entry point for IDF (motor +
+ * hub). Unlike Zephyr's write_panic() split, ESP-IDF's panic handler can
+ * safely take the NVS mutex (see this file's header comment), so this
+ * just formats the canonical record into one line and reuses
+ * trinity_log_event() directly -- no separate lock-free path needed.
+ * trinity_log_event() already safely truncates long messages
+ * (msg_clean[MSG_CLEAN_SIZE]), so no risk of buffer overrun here
+ * regardless of message length. */
+void trinity_crash_store(TRINITY_CRASH_RECORD_X *p_record)
+{
+   char buf[96] = {0};
+
+   if (NULL == p_record) { return; }
+
+   (void)snprintf(buf, sizeof(buf),
+                  "EVENT: TRINITY_CRASH_RECORD | ARCH: %u | ERR: %u | PC: 0x%08X",
+                  (unsigned int)p_record->arch,
+                  (unsigned int)p_record->error,
+                  (unsigned int)p_record->pc);
+
+   trinity_log_event(buf);
+}
+
 void trinity_log_dump_previous(void)
 {
    nvs_handle_t handle            = 0;
