@@ -290,10 +290,10 @@ void trinity_check_stack(void);
  * Heap exhaustion        ✓          ✓          ✓          ✓         ✓     ✓
  * Pre-init crash         ✓          ✓          ✓          ✓         -     -
  * Boot stage cookie      ✓          ✓          -          -         -     -
- * Full fault regs        ✓(CFSR)    ✓(mepc)    ✓(PC)      ✓(PC)     -     -
+ * Full fault regs        ✓(4 reg)   ✓(2 reg)   ✓(4 reg)   ✓(PC)     -     -
  * RTC backup regs        -          -          -          -         ✓     -
  * FRAM black box         -          -          -          -         -     ✓
- * Flash concurrency      ✓          -          -          -         -     -
+ * Flash concurrency      ✓          -          ✓          ✓         -     -
  *
  * Trinity CANNOT catch:
  *   nRF52840/ESP-C3Z: Crashes before PRE_KERNEL_1 -- JLink/OpenOCD only.
