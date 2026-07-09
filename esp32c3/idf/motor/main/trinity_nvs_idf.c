@@ -1,20 +1,24 @@
 /******************************************************************************
  * \file trinity_nvs_idf.c
- * \brief Trinity NVS log -- ESP-IDF (motor + hub).
+ * \brief Trinity NVS log -- ESP-IDF (motor, hub, cam, doorbell).
  *
  * \details Owns NVS namespace, log mutex, and all log I/O.
  *          Depends on trinity_canary_idf.c for RTC canary variables.
  *
  *          NVS namespace set via CMakeLists.txt compile definition:
- *            motor: TRINITY_NVS_NAMESPACE="motor_log"
- *            hub:   TRINITY_NVS_NAMESPACE="hub_log"
+ *            motor:    TRINITY_NVS_NAMESPACE="motor_log"
+ *            hub:      TRINITY_NVS_NAMESPACE="hub_log"
+ *            cam:      TRINITY_NVS_NAMESPACE="cam_log"
+ *            doorbell: TRINITY_NVS_NAMESPACE="doorbell_log"
  *          Default fallback "trinity_log" warns at build time.
  *
- *          Mutex fix (2026-03-28):
- *          g_log_mutex serializes static NVS buffer and NVS read-modify-write
- *          against concurrent task callers. Hub has 5 tasks, motor has 2.
- *          Both call trinity_log_event() concurrently. Without mutex, NVS
- *          writes corrupt each other.
+ *          Mutex fix (2026-03-28, originally motor/hub -- hub had 5 tasks,
+ *          motor had 2, all calling trinity_log_event() concurrently):
+ *          g_log_mutex serializes the static NVS buffer and NVS
+ *          read-modify-write against concurrent task callers on any board.
+ *          Without it, concurrent NVS writes corrupt each other. Applies
+ *          equally to cam/doorbell -- exact task counts not reverified here,
+ *          but the mutex is unconditional per-board, not sized to a count.
  ******************************************************************************/
 
 #include "trinity_log.h"
@@ -100,9 +104,9 @@ void trinity_log_event(const char *p_msg)
 }
 
 /* Trinity crash contract (v2) -- single public entry point for IDF (motor +
- * hub). Unlike Zephyr's write_panic() split, ESP-IDF's panic handler can
- * safely take the NVS mutex (see this file's header comment), so this
- * just formats the canonical record into one line and reuses
+ * hub/cam/doorbell). Unlike Zephyr's write_panic() split, ESP-IDF's panic
+ * handler can safely take the NVS mutex (see this file's header comment),
+ * so this just formats the canonical record into one line and reuses
  * trinity_log_event() directly -- no separate lock-free path needed.
  * trinity_log_event() already safely truncates long messages
  * (msg_clean[MSG_CLEAN_SIZE]), so no risk of buffer overrun here

@@ -1,6 +1,6 @@
 /******************************************************************************
  * \file trinity_panic_idf.c
- * \brief Trinity panic handler -- ESP-IDF (motor + hub).
+ * \brief Trinity panic handler -- ESP-IDF (motor, hub, cam, doorbell).
  *
  * \details Overrides esp_panic_handler_user(). Calls trinity_log_event()
  *          directly -- no write_panic needed on IDF since the panic handler
@@ -22,8 +22,8 @@
 #include "freertos/task.h"
 #include <stdio.h>
 
-/* This file is shared between motor (RISC-V, esp32c3) and hub (Xtensa,
- * esp32) -- see file \brief above. RvExcFrame is RISC-V-only; including
+/* This file is shared between motor (RISC-V, esp32c3) and hub/cam/doorbell
+ * (Xtensa, esp32) -- see file \brief above. RvExcFrame is RISC-V-only; including
  * it unconditionally broke the hub build (riscv component isn't, and
  * shouldn't be, a dependency of an Xtensa target). Guard on ESP-IDF's
  * own target-arch Kconfig macro so this header/cast only compiles in
@@ -59,7 +59,7 @@ void esp_panic_handler_user(panic_info_t *p_info)
     * replace the trinity_log_event() lines above.
     *
     * arch differs by which real target this file is compiled for --
-    * motor (esp32c3) is RISC-V, hub (esp32) is Xtensa. Only the RISC-V
+    * motor (esp32c3) is RISC-V, hub/cam/doorbell (esp32) are Xtensa. Only the RISC-V
     * build parses RvExcFrame (verified against this project's actual
     * struct, components/riscv/include/riscv/rvruntime-frames.h:
     * mepc/mstatus/mcause/mtval all real members). The Xtensa build gets
